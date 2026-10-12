@@ -142,6 +142,7 @@ describe('useVirtualChat: return surface and callback identity', () => {
       'farmRowMounted',
       'getFollow',
       'isAtBottom',
+      'leadingRef',
       'measureRef',
       'mountIndex',
       'offsetAfter',

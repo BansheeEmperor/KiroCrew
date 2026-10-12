@@ -17,7 +17,7 @@
  * dockClearance geometry stays with the page, which supplies the floating
  * dock's clearance padding via `scrollerStyle`.
  */
-import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Loader } from 'lucide-react'
 import { i18nT } from '../../i18n/t'
 import { afterSlide, forgetAfterSlide, holdReadingPosition, markSlideSettling, onReleaseReadingPosition, slideHeld, watchPanelSlide } from '../../utils/panelSlide'
@@ -97,11 +97,18 @@ function pickSlideAnchor(el: HTMLElement): { node: Element; want: number } | nul
  * wheel the page's swipe did not cancel, a scrollbar press, a scrolling key, a
  * touch).
  */
-function useSlideAnchor(scrollerRef: React.RefObject<HTMLDivElement | null>): void {
+function useSlideAnchor(scrollerRef: React.RefObject<HTMLDivElement | null>, liveEdgeAtTop = false): void {
+  // Read at slide start, so a layout toggle does not re-arm the observers.
+  const liveEdgeAtTopRef = useRef(liveEdgeAtTop)
+  liveEdgeAtTopRef.current = liveEdgeAtTop
   useEffect(() => {
     const el = scrollerRef.current
     if (!el || typeof ResizeObserver === 'undefined') return
     let anchor: { node: Element; want: number } | null = null
+    // At the top in the top-down layout, where the newest turn is: held at 0.
+    // A block anchor would raise scrollTop as the rows rewrap, and the
+    // top-edge follower reads that as the reader leaving the live edge.
+    let top = false
     // At the bottom: the transcript stays pinned there. The follow logic pins
     // too, but on its own schedule; when the slide lands, the held width
     // rewraps the rows in that same commit, and a pin a frame later let one
@@ -111,6 +118,10 @@ function useSlideAnchor(scrollerRef: React.RefObject<HTMLDivElement | null>): vo
     let raf = 0
     let until = 0
     const correct = () => {
+      if (top) {
+        if (el.scrollTop >= 0.5) el.scrollTop = 0
+        return
+      }
       if (bottom) {
         const top = el.scrollHeight - el.clientHeight
         if (Math.abs(el.scrollTop - top) >= 0.5) el.scrollTop = top
@@ -128,6 +139,7 @@ function useSlideAnchor(scrollerRef: React.RefObject<HTMLDivElement | null>): vo
     const drop = () => {
       anchor = null
       bottom = false
+      top = false
       el.removeAttribute('data-slide-anchor')
       holdReadingPosition(el, false)
       onReleaseReadingPosition(el, null)
@@ -139,11 +151,19 @@ function useSlideAnchor(scrollerRef: React.RefObject<HTMLDivElement | null>): vo
     // The reader's own input (a wheel the page's swipe did not claim, a
     // scrollbar press, a scrolling key, a touch) ends the hold at once: the
     // next correction would undo their scroll.
-    const detachIntent = attachUserScrollIntent(el, () => { if (anchor || bottom) drop() })
+    const detachIntent = attachUserScrollIntent(el, () => { if (anchor || bottom || top) drop() })
     const unwatch = watchPanelSlide((sliding, retired) => {
       if (sliding) {
         drop()
-        if (el.scrollHeight - el.scrollTop - el.clientHeight <= ANCHOR_AT_BOTTOM_PX) {
+        if (liveEdgeAtTopRef.current && el.scrollTop <= ANCHOR_AT_BOTTOM_PX) {
+          top = true
+          onReleaseReadingPosition(el, drop)
+        } else if (!liveEdgeAtTopRef.current && el.scrollHeight - el.scrollTop - el.clientHeight <= ANCHOR_AT_BOTTOM_PX) {
+          // The bottom layout only. In top-down the bottom is the end of the
+          // loaded history and nothing follows it: an older page landing in
+          // the hold would move a pin there past the turn being read, so that
+          // reader takes the block anchor below. scrollTop 0 is top-down's only
+          // edge pin.
           bottom = true
           onReleaseReadingPosition(el, drop)
         } else {
@@ -165,7 +185,7 @@ function useSlideAnchor(scrollerRef: React.RefObject<HTMLDivElement | null>): vo
       // Dropped rather than landed (a session switch): the scroller may show
       // another session now, whose own restore owns the position.
       if (retired) { drop(); return }
-      if (!anchor && !bottom) return
+      if (!anchor && !bottom && !top) return
       until = performance.now() + ANCHOR_AFTER_SLIDE_MS
       const tick = () => {
         correct()
@@ -233,6 +253,12 @@ export interface TranscriptVirtWiring {
    *  tail growth. Optional so a wiring that predates it (tests, a host with no
    *  trailing chrome) still type-checks; the wrapper renders either way. */
   trailingRef?: React.MutableRefObject<HTMLDivElement | null>
+  /** The virtualizer's ref for the wrapper around the chrome that renders
+   *  BEFORE the rows in the top-down layout (the footer, preparing caption and
+   *  survey there). Its ResizeObserver watches the wrapper so a change in that
+   *  chrome above a released reader reaches the measured residual. The wrapper
+   *  renders only with `liveEdgeAtTop`; the bottom layout's DOM has none. */
+  leadingRef?: React.MutableRefObject<HTMLDivElement | null>
   offsetBefore: number
   offsetAfter: number
 }
@@ -243,10 +269,12 @@ export default function TranscriptScrollShell({
   virt,
   loadingOlder,
   spinnerNearTop,
+  historyAtBottom = false,
+  liveEdgeAtTop = historyAtBottom,
   scrollerStyle,
   headerSpacer = true,
-  aboveRows,
-  belowRows,
+  aboveRows: aboveSlot,
+  belowRows: belowSlot,
   onScrollerElement,
   children,
 }: {
@@ -260,6 +288,14 @@ export default function TranscriptScrollShell({
    *  has zero layout footprint, so a host that does not track this cannot be
    *  hurt by it. */
   spinnerNearTop?: boolean
+  /** Older history loads at the BOTTOM (the top-down chat layout), so the
+   *  loading overlay sits at the bottom edge instead of under the header, and
+   *  `spinnerNearTop` means "near that edge". */
+  historyAtBottom?: boolean
+  /** The live edge is scrollTop 0 (the top-down layout), so a side-panel slide
+   *  holds a reader there. Defaults to `historyAtBottom`; a host that places
+   *  its own paging bar sets this alone. */
+  liveEdgeAtTop?: boolean
   /** Host-owned geometry merged onto the scroller (e.g. the fade-band clearance padding). */
   scrollerStyle?: React.CSSProperties
   /** Reserve the main chat's overlay-header band (h-16) above the rows. On by
@@ -277,7 +313,34 @@ export default function TranscriptScrollShell({
   children: React.ReactNode
 }) {
   usePaneWidthProperty(scrollerRef)
-  useSlideAnchor(scrollerRef)
+  useSlideAnchor(scrollerRef, liveEdgeAtTop)
+  // History at the bottom (the top-down layout): the two slots trade ends, so
+  // the host's live chrome (footer, survey) sits above the newest row and its
+  // paging bar below the oldest. The props keep their host-facing meaning.
+  const aboveRows = historyAtBottom ? belowSlot : aboveSlot
+  const belowRows = historyAtBottom ? aboveSlot : belowSlot
+  // A top-edge dock changes the leading padding under a released reader.
+  // Write the padding and the same scrollTop shift before paint. No reading-
+  // position hold: the virtualizer's only held path (compensateAboveFold)
+  // acts on row reprices, and a padding change on the scroller resizes no
+  // row. The slide anchor stays the only owner of the hold.
+  const { paddingTop, ...scrollerStyleWithoutTopPadding } = scrollerStyle ?? {}
+  useLayoutEffect(() => {
+    const el = scrollerRef.current
+    if (!el) return
+    if (!liveEdgeAtTop) {
+      // The effect owns top padding in top-down mode. Clear its value when
+      // the bottom-layout host does not supply a replacement.
+      if (paddingTop === undefined && el.style.paddingTop) el.style.paddingTop = ''
+      return
+    }
+    const oldScrollTop = el.scrollTop
+    const oldPadding = Number.parseFloat(el.style.paddingTop) || 0
+    el.style.paddingTop = typeof paddingTop === 'number' ? `${paddingTop}px` : paddingTop ?? ''
+    if (oldScrollTop <= 0.5) return
+    const newPadding = Number.parseFloat(el.style.paddingTop) || 0
+    el.scrollTop = oldScrollTop + newPadding - oldPadding
+  }, [liveEdgeAtTop, paddingTop, scrollerRef])
   useLayoutEffect(() => {
     if (!onScrollerElement) return
     onScrollerElement(scrollerRef.current)
@@ -299,7 +362,7 @@ export default function TranscriptScrollShell({
         // overriding e.g. overflowX would silently reinstate the horizontal
         // scrollbar bug documented below. Hosts may only ADD properties the
         // shell does not claim (like the fade-band clearance padding).
-        ...scrollerStyle,
+        ...(liveEdgeAtTop ? scrollerStyleWithoutTopPadding : scrollerStyle),
         flex: 1,
         overflowY: 'auto',
         // overflow-x must be pinned, not left to default `visible`: with
@@ -334,7 +397,14 @@ export default function TranscriptScrollShell({
     >
       {/* Header spacer */}
       {headerSpacer && <div className="h-16" />}
-      {aboveRows}
+      {/* Leading chrome in the top-down layout, in one block so the
+          virtualizer can OBSERVE it: the footer, preparing caption and survey
+          change height here when a turn starts, ends or goes quiet, above a
+          reader in history, with no row resize to announce it. WebKit has no
+          scroll anchoring, so the measured residual is what holds that reader.
+          Only with the live edge at the top: the bottom layout's DOM is
+          unchanged. A plain block wrapper, like the trailing one. */}
+      {liveEdgeAtTop ? <div ref={virt.leadingRef} data-vc-leading="">{aboveRows}</div> : aboveRows}
       {/* Top sentinel: drives upward window expansion via virtualizer's IO. */}
       <div ref={virt.topSentinelRef} aria-hidden style={{ height: 1 }} />
       {/* top-16 matches the h-16 header spacer above, so the spinner clears the
@@ -352,7 +422,7 @@ export default function TranscriptScrollShell({
            `spinnerNearTop` lets the page hide it once the reader has scrolled
            away from the top, where an overlay pinned to the header would
            otherwise float over unrelated content. */
-        <div className="absolute top-16 inset-x-0 z-[1] flex justify-center py-2 pointer-events-none" data-testid="older-messages-loading" role="status" aria-label={i18nT('pages.chatPage.loading_earlier_messages')} style={{ overflowAnchor: 'none' }}>
+        <div className="absolute top-16 inset-x-0 z-[1] flex justify-center py-2 pointer-events-none" data-testid="older-messages-loading" role="status" aria-label={i18nT('pages.chatPage.loading_earlier_messages')} style={{ overflowAnchor: 'none', ...(historyAtBottom ? { top: 'auto', bottom: 8 } : null) }}>
           <span className="rounded-full px-2 py-1" style={{ background: 'var(--bg)' }}>
             <Loader size={16} className="animate-spin text-muted" />
           </span>

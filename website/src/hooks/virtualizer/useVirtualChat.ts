@@ -135,7 +135,7 @@ export function useVirtualChat<T>(
     estimatedHeight = DEFAULT_ESTIMATED,
     overscan = DEFAULT_OVERSCAN,
     followOutput = true,
-    initialPlacement = 'bottom',
+    followEdge = 'bottom',
     eagerFirstMeasure = false,
     getStableId,
     getAltId,
@@ -147,6 +147,9 @@ export function useVirtualChat<T>(
     runActive,
     onTopReached,
   } = opts
+  // A top live edge opens at the head: the live window IS the head window, and
+  // the entry placement writes scrollTop 0 (readingPosition.ts).
+  const initialPlacement: 'top' | 'bottom' = followEdge === 'top' ? 'top' : (opts.initialPlacement ?? 'bottom')
 
   const itemCount = items.length
   // Live ref for the RO callback (a stable-identity effect — see its own
@@ -243,13 +246,14 @@ export function useVirtualChat<T>(
     topSentinelRef,
     bottomSentinelRef,
     trailingRef,
+    leadingRef,
     leadingOffset,
     scrollerEl,
     syncScrollerEl,
     elIndexRef,
     resizeObserverRef,
   } = useScrollerElement(externalScrollerRef)
-  const follow = useFollowState(followOutput)
+  const follow = useFollowState(followOutput, followEdge)
   const view = useWindowState(itemCount, overscan, initialPlacement, sessionId)
   const { windowRange, setWindowRange, windowRangeRef, resolveWindowRange } = view
   // Render phase: TRIGGERS 1-7 capture the reader's row against the PREVIOUS
@@ -323,7 +327,7 @@ export function useVirtualChat<T>(
   const sync = useGeometrySync({ itemsRef, eagerFirstMeasureRef, heightIndexRef, shift, follow, pinning, ops })
   const measurement = useRowMeasurement({
     itemsRef, getKeyRef, streamingIndexRef, eagerFirstMeasureRef, elIndexRef, resizeObserverRef,
-    trailingRef, heightIndexRef, canMeasure, windowRangeRef, scrollerRef, grace, sync, follow,
+    trailingRef, leadingRef, heightIndexRef, canMeasure, windowRangeRef, scrollerRef, grace, sync, follow,
   })
 
   // Layout effects, pre-paint: the shift compensation's consumers, then
@@ -342,9 +346,9 @@ export function useVirtualChat<T>(
   })
   useScrollListener({ scrollerEl, bottomThreshold, setIsAtBottom, itemsRef, getKeyRef, follow, pinning, reading, measurement, ops })
   useCoverageWatchdog({ scrollerEl, leadingOffset, itemsRef, heightIndexRef, windowRangeRef, ops, follow, pinning })
-  useResizeObserver({ scrollerRef, scrollerEl, elIndexRef, trailingRef, resizeObserverRef, measurement, compensation, sync, pinning, ops })
+  useResizeObserver({ scrollerRef, scrollerEl, elIndexRef, trailingRef, leadingRef, resizeObserverRef, measurement, compensation, sync, pinning, ops })
   useWindowEdgeTriggers({
-    windowRange, itemCount, overscan, prefetchStartIndex, sessionId, scrollerRef, scrollerEl,
+    windowRange, itemCount, overscan, prefetchStartIndex, sessionId, followEdge, scrollerRef, scrollerEl,
     topSentinelRef, bottomSentinelRef, onTopReachedRef, itemsRef, setWindowRange, ops,
   })
 
@@ -529,6 +533,7 @@ export function useVirtualChat<T>(
     topSentinelRef,
     bottomSentinelRef,
     trailingRef,
+    leadingRef,
     virtualItems,
     offsetBefore,
     offsetAfter,
