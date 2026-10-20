@@ -1543,25 +1543,37 @@ async def _resume_slot_from_history_noted(
             # the way the restart path restores it, and the hook's app check is a
             # real read rather than a constant. From the fresh re-read, as below.
             slot._app = str(post_read_meta["app"])
-        if containment is not None:
-            # Same for the channel link: the resume core binds only a cron
-            # transcript's own ``linked_session_key`` (the restart path and the
-            # History surfacing hydrate the rest), so the hook's link check would
-            # read an empty field whatever the line says. Restored from the FRESH
-            # re-read (``post_read_meta``), not the pre-transcript snapshot, so a
-            # link written to the line inside the read window is what the hook
-            # sees; a channel-born key marks the origin the way the surfacing path
-            # does.
-            fresh_link = str(post_read_meta.get("linked_session_key") or "")
-            if fresh_link and not getattr(slot, "linked_session_key", ""):
-                slot.linked_session_key = fresh_link
-                # Beside the assignment, as every link-setting site records it
-                # (``test_crew_log_class_recorder``). The built slot has no open
-                # log yet, so this is the in-memory restriction mark; a hook that
-                # refuses the linked build discards the slot and the mark with it.
-                note_crew_log_class(state, slot)
-            if fresh_link or post_read_meta.get("channel_origin"):
-                slot.channel_origin = True
+        # The channel link: construction binds only a cron transcript's own
+        # ``linked_session_key`` (``slot_args``), so the resume core hydrates the
+        # rest itself (the codec table leaves it to RESUME's core because the
+        # restriction class must be recorded beside the assignment, which a bare
+        # table read cannot do).
+        # Without it a channel conversation resumed from the History tab comes back
+        # unbound, and its next full save clears the persisted key. Restored
+        # from the FRESH re-read (``post_read_meta``), not the pre-transcript
+        # snapshot, so a link written to the line inside the read window is what a
+        # containment hook sees; a channel-born key marks the origin the way the
+        # surfacing path does.
+        #
+        # Only a dashboard user (no app token) or a containment-hooked revive
+        # restores the link. An APP resume does NOT: its token is scoped to the
+        # transcript it owns, and binding its slot to the channel session the line
+        # names would hand it a conversation whose own authorization this path
+        # never checked. An app's slot keeps the link its OWN surfacing path sets,
+        # not one read back from an operator-editable line.
+        restore_link = containment is not None or not request_app
+        relinked = False
+        fresh_link = str(post_read_meta.get("linked_session_key") or "") if restore_link else ""
+        if fresh_link and not getattr(slot, "linked_session_key", ""):
+            slot.linked_session_key = fresh_link
+            # Beside the assignment, as every link-setting site records it
+            # (``test_crew_log_class_recorder``). The built slot has no open
+            # log yet, so this is the in-memory restriction mark; a hook that
+            # refuses the linked build discards the slot and the mark with it.
+            note_crew_log_class(state, slot)
+            relinked = True
+        if fresh_link or post_read_meta.get("channel_origin"):
+            slot.channel_origin = True
     except BaseException:
         state.end_slot_construction(slot.key)
         state._slots.pop(slot.key, None)
@@ -1897,6 +1909,13 @@ async def _resume_slot_from_history_noted(
     # payload while under construction. End construction and push once: this is
     # the first frame any client sees, and it shows a fully hydrated session.
     state.end_slot_construction(slot.key)
+    if relinked and slot.autocompact_pct is not None and state.sessions:
+        # The materialiser seeded the restored compaction override under the
+        # pre-link key, and the link moves ``effective_session_key`` to the
+        # linked session. Seed it there only now, past every refusal: the linked
+        # key names another conversation's live session, so a refused resume or
+        # revive must leave that session's threshold untouched.
+        state.sessions.set_autocompact_pct(effective_session_key(slot), slot.autocompact_pct)
     _sync_dashboard_slots(state)
     # Committed: the block's exit logs a failing broadcast instead of 500ing it.
     with state.suspend_slots_push():
