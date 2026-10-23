@@ -964,9 +964,10 @@ def _credential_redaction_plan(
     # disjoint; it is what the later passes subtract from.
     taken: list[_RedactionSpan] = []
     if _might_contain_credential(text):
-        for m in _credential_matches(text):
-            # Keep the Bearer branch's non-secret prefix (end() is -1 elsewhere).
-            start = max(m.start(), m.end("bearer_prefix"))
+        for m in _credential_matches(text, glued=True):
+            # Keep the Bearer branch's non-secret prefix (end() is -1 elsewhere; a
+            # glued scan also yields matches of patterns without that group).
+            kept = m.end("bearer_prefix") if "bearer_prefix" in m.re.groupindex else -1
             # Emit ONLY non-sensitive metadata (length). Do NOT slice any part of
             # the match into the warning: `_CREDENTIAL_PATTERNS` matches the raw
             # secret value itself (e.g. `ghp_…`, `sk-ant-…`), so even a short prefix
@@ -975,9 +976,16 @@ def _credential_redaction_plan(
             # redaction-subsystem output expected to be safe to log/surface, so it
             # must carry no secret bytes. The base64 / bare-secret passes below
             # likewise log length only.
-            warnings.append(f"Redacted credential pattern ({m.end() - start} chars)")
+            warnings.append(f"Redacted credential pattern ({m.end() - max(m.start(), kept)} chars)")
+            # A credential glued to the one before it starts inside that span;
+            # only its part past the span is still in plaintext.
+            start = max(m.start(), kept, taken[-1][1] if taken else -1)
+            if start >= m.end():
+                continue  # wholly inside a span already redacted
             taken.append((start, m.end(), _REDACTED_CREDENTIAL_TAG))
-            rules[start] = _pass1_rule(m.group())
+            rule, label = _pass1_rule(m.group())
+            # A record shows the label part still inside the clipped span.
+            rules[start] = (rule, label[start - m.start() :])
 
     # Passes 2 and 3 both scan the ORIGINAL `text` for runs of the base64
     # alphabet, and they select the SAME spans: `[A-Za-z0-9+/]{40,}` is greedy and
@@ -1451,11 +1459,18 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _ARN_ACCOUNT_ID_12_DIGITS_RE,
         _ARN_ACCOUNT_ID_PREFIX_RE,
         _ARN_PREFIX_MAX_LOOKBACK,
+        _AUTHORITY_END_RE,
+        _AWS_LABEL_PREFIX_RE,
+        _AWS_VALUE_RUN_RE,
+        _BEARER_PREFIX_RE,
         _BOT_ID_LENGTHS,
         _CDK_NAME_MAX_LEN,
         _CDK_RESOURCE_NAME_RE,
         _CDK_WORDS,
         _CREDENTIAL_PATTERNS,
+        _CREDENTIAL_PATTERNS_GLUED,
+        _CREDENTIAL_PATTERNS_GLUED_SANS_JWT,
+        _CREDENTIAL_PATTERNS_GLUED_SANS_TELEGRAM,
         _CREDENTIAL_PATTERNS_NO_PEM_BLOCK,
         _CREDENTIAL_PATTERNS_SANS_JWT,
         _CREDENTIAL_PATTERNS_SANS_TELEGRAM,
@@ -1467,22 +1482,37 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _CREDENTIAL_PREFILTER_TELEGRAM_RE,
         _CREDENTIAL_PREFILTER_URI_RE,
         _CREDENTIAL_STARTS_SANS_JWT,
+        _GLUED_PROBES,
+        _GLUED_WINDOW,
+        _GUARD_CHAR_RE,
         _JWT_SEGMENT_RUN_RE,
         _NATIVE_GATE,
+        _PEM_END_RE,
         _PREFILTER_MIN_LEN,
+        _RUN_REST_RE,
+        _SPACED_START_RE,
+        _START_LOOKAHEAD,
         _TELEGRAM_AT_RE,
         _TELEGRAM_BRANCH,
         _TELEGRAM_DIGITS_RE,
+        _TOKEN_CHAR_RE,
+        _URI_START_RE,
+        _abutting_match,
         _arn_exemption_withheld,
         _contains_credential_pattern,
         _credential_search,
+        _glued_matches,
+        _is_aws_value_run,
         _jwt_branch_matches_at,
         _load_native_gate,
         _might_contain_credential_py,
         _native_gate_fingerprint,
         _next_jwt_branch_start,
+        _pem_body_end,
+        _probe_at,
         _sans_jwt_start,
         _segment_run_end,
+        _validated_match,
         get_credential_patterns,
         iter_credential_matches,
     )
