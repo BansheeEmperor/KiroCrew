@@ -15106,6 +15106,8 @@
         "dashboard_stale_wake": "叫醒 Bot 更新过期字段",
         "dashboard_stale_wake_desc": "Bot 在 Dashboard 页面上写的字段过期时，即使没开任何定时检查，{{productName}} 也会在这个 Bot 的聊天里发起一轮简短对话，请它重新写这些字段。每个 Bot 每 30 分钟最多一轮，每轮都会消耗额度。",
         "dashboard_stale_wake_desc_summary": "请 Bot 更新它的过期字段。",
+        "visual_refresh": "视觉焕新",
+        "visual_refresh_desc": "开启仪表板正在进行中的新样式。目前还没有任何改动：各部分完成后会陆续出现，可能看起来未完成，或在更新之间发生变化。关闭即可恢复当前外观。",
         "crew_mode": "Ultra Mode",
         "crew_mode_desc": "让一个对话把任务交给一个团队，并在看板里跟踪它们。",
         "crew_mode_desc_summary": "把对话的任务交给团队。",

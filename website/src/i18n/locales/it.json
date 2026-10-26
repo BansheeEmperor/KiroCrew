@@ -15894,6 +15894,8 @@
         "dashboard_stale_wake": "Sveglia i Bot per aggiornare i campi non aggiornati",
         "dashboard_stale_wake_desc": "Quando un campo che un Bot scrive sulla sua pagina del Dashboard non è più aggiornato, {{productName}} avvia un breve turno nella chat di quel Bot chiedendogli di riscriverlo, anche senza check-in attivi. Al massimo un turno di questo tipo per Bot ogni 30 minuti, e ognuno consuma crediti.",
         "dashboard_stale_wake_desc_summary": "Chiede a un Bot di aggiornare i suoi campi non aggiornati.",
+        "visual_refresh": "Rinnovo visivo",
+        "visual_refresh_desc": "Attiva il restyling in corso della dashboard. Non è ancora cambiato nulla: le parti compaiono man mano che sono pronte e potrebbero sembrare incomplete o cambiare tra un aggiornamento e l'altro. Disattivalo per tornare all'aspetto attuale.",
         "crew_mode": "Ultra Mode",
         "crew_mode_desc": "Permette a una chat di affidare attività a una crew e seguirle su una bacheca.",
         "crew_mode_desc_summary": "Affida le attività di una chat a una crew.",

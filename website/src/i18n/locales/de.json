@@ -15500,6 +15500,8 @@
         "dashboard_stale_wake": "Bots wecken, um veraltete Felder zu aktualisieren",
         "dashboard_stale_wake_desc": "Wird ein Feld, das ein Bot auf seiner Dashboard-Seite schreibt, veraltet, startet {{productName}} einen kurzen Zug im Chat dieses Bots und bittet ihn, das Feld neu zu schreiben, auch ohne aktiven Check-in. Höchstens ein solcher Zug pro Bot alle 30 Minuten, und jeder verbraucht Credits.",
         "dashboard_stale_wake_desc_summary": "Bittet einen Bot, seine veralteten Felder zu aktualisieren.",
+        "visual_refresh": "Visuelle Auffrischung",
+        "visual_refresh_desc": "Schaltet die laufende Neugestaltung des Dashboards ein. Noch ist nichts neu gestaltet: Teile erscheinen, sobald sie fertig sind, und können unfertig aussehen oder sich zwischen Updates ändern. Schalte sie aus, um zum aktuellen Aussehen zurückzukehren.",
         "crew_mode": "Ultra Mode",
         "crew_mode_desc": "Lässt einen Chat Aufgaben an eine Crew übergeben und sie auf einem Board verfolgen.",
         "crew_mode_desc_summary": "Übergibt Aufgaben eines Chats an eine Crew.",

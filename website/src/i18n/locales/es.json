@@ -15894,6 +15894,8 @@
         "dashboard_stale_wake": "Despertar a los Bots para actualizar campos desactualizados",
         "dashboard_stale_wake_desc": "Cuando un campo que un Bot escribe en su página del Dashboard queda desactualizado, {{productName}} inicia un turno corto en el chat de ese Bot para pedirle que lo vuelva a escribir, aunque no tenga ningún check-in activado. Como máximo un turno así por Bot cada 30 minutos, y cada uno consume créditos.",
         "dashboard_stale_wake_desc_summary": "Pide a un Bot que actualice sus campos desactualizados.",
+        "visual_refresh": "Renovación visual",
+        "visual_refresh_desc": "Activa el rediseño en curso del panel. Todavía no hay nada rediseñado: las partes aparecen a medida que se terminan y pueden verse sin terminar o cambiar entre actualizaciones. Desactívalo para volver al aspecto actual.",
         "crew_mode": "Ultra Mode",
         "crew_mode_desc": "Permite que un chat entregue tareas a un equipo y las siga en un tablero.",
         "crew_mode_desc_summary": "Entrega las tareas de un chat a un equipo.",

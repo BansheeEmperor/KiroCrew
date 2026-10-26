@@ -15106,6 +15106,8 @@
         "dashboard_stale_wake": "古いフィールドを更新するよう Bot を起こす",
         "dashboard_stale_wake_desc": "Bot が自分の Dashboard ページに書くフィールドが古くなると、チェックインがオフでも、{{productName}} がその Bot のチャットで短いターンを 1 回始め、フィールドを書き直すよう頼みます。Bot ごとに 30 分に最大 1 回で、毎回クレジットを使います。",
         "dashboard_stale_wake_desc_summary": "古いフィールドを更新するよう Bot に頼みます。",
+        "visual_refresh": "ビジュアルリフレッシュ",
+        "visual_refresh_desc": "開発中のダッシュボードの新しいデザインをオンにします。まだ何も変わっていません。完成した部分から順に表示され、未完成に見えたり、アップデートごとに変わったりすることがあります。オフにすると現在の見た目に戻ります。",
         "crew_mode": "Ultra Mode",
         "crew_mode_desc": "チャットがタスクをクルーに任せ、ボードで追跡できるようにします。",
         "crew_mode_desc_summary": "チャットのタスクをクルーに任せます。",
