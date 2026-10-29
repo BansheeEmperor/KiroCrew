@@ -121,6 +121,7 @@ export type {
   ConfigPendingData,
   ConfigPendingLeaf,
   CredentialRedactionState,
+  SshAgentConsentStatus,
   DeniedCommandsData,
   GovernanceScopeDetail,
   GovernanceScope,
