@@ -115,7 +115,7 @@ from kiro_crew.slack.code_channels import lifecycle as code_channel_lifecycle
 from kiro_crew.slack.code_channels.routing import Gate as CodeChannelGate
 from kiro_crew.slack.code_channels.routing import dispatch as code_channel_dispatch
 from kiro_crew.slack.code_channels.routing import inbound_gate as code_channel_gate
-from kiro_crew.slack.code_channels.routing import is_bound_code_channel
+from kiro_crew.slack.code_channels.routing import is_bound_code_channel, shared_user_refused_in
 from kiro_crew.slack.code_channels.store import store as code_channel_store
 from kiro_crew.slack.enterprise import trusted_bot_admission, validated_self_user_id
 from kiro_crew.slack.files import (
@@ -135,6 +135,8 @@ from kiro_crew.slack.handler import (
     handle_message,
     is_allowed_user,
     is_owner,
+    is_shared_listed,
+    is_shared_user,
     is_yolo_mode,
     set_allowed_users,
     set_dashboard_state,
@@ -143,6 +145,7 @@ from kiro_crew.slack.handler import (
     set_owner_id,
     set_tracking_channels,
     set_yolo_mode,
+    shared_user_refused_for_session,
     slack_cfg,
 )
 from kiro_crew.slack.interactions import dispatch as dispatch_interactive
@@ -155,6 +158,8 @@ from kiro_crew.slack.sessions_view import (
     _message_surface_limit,
     sessions_include_ended,
 )
+from kiro_crew.slack.shared_access import install as install_shared_access
+from kiro_crew.slack.shared_access import prime_shared_user
 
 # The proxy-selecting subclass under the SDK client's name, which is this
 # module's patch surface for the Socket Mode client.
@@ -291,6 +296,8 @@ async def init_socket_mode(orch: GatewayOrchestrator, seen: SeenCache) -> None:
         return
 
     web_client = AsyncWebClient(token=orch._bot_token)
+    # slack.shared_access checks each listed id with this client (users.info).
+    install_shared_access(web_client)
     orch._socket_client = WSSocketModeClient(
         app_token=orch._app_token,
         web_client=web_client,
@@ -346,6 +353,7 @@ async def init_socket_mode(orch: GatewayOrchestrator, seen: SeenCache) -> None:
         if event_type == "app_home_opened":
             user = event.get("user")
             if event.get("tab") == "home" and user:
+                # Owner-only: the Home tab lists sessions and settings.
                 if is_allowed_user(user):
                     sel().log_api_access(
                         caller=user,
@@ -618,7 +626,13 @@ async def _route_message(
     _turn_capped = from_trusted_bot and _trusted_bot_turns.count(_thread_key) >= max(
         1, slack_cfg(orch).slack.trusted_bot_turn_limit
     )
-    _owner_authorized = is_allowed_user(sender_id)
+    # A shared user (slack.shared_access) is checked with Slack before the gate
+    # reads it, so a newly listed person is admitted on their first message.
+    await prime_shared_user(sender_id, orch)
+    _owner_authorized = is_allowed_user(sender_id) or is_shared_user(sender_id)
+    # From the list, not the confirmation: a confirmation ageing out between these
+    # reads must not leave a shared user's queued message untagged.
+    _shared_sender = is_shared_listed(sender_id)
     _trusted_bot_admitted = (
         from_trusted_bot
         and not _turn_capped
@@ -631,7 +645,9 @@ async def _route_message(
             operation="slack.message",
             outcome="allowed",
             source="slack",
-            resources="" if _owner_authorized else "trusted_bot",
+            resources=(
+                "shared_access" if _shared_sender else ("" if _owner_authorized else "trusted_bot")
+            ),
         )
     else:
         logger.warning("Ignoring message from unauthorized user %s", sender_id)
@@ -867,13 +883,27 @@ async def _route_message(
     # and a message addressed only to other people are dropped, and the sender
     # is authorized against the channel's ORIGIN conversation (the gate audits
     # every decision). Everywhere else this is PASS and nothing below changes.
+    # Code channels stay the owner's: a shared user is refused in a bound one and
+    # cannot open one (the dispatch below is skipped for them). Refused quietly,
+    # with the audit row only: a channel member posts many messages that are not
+    # for the bot, and a reply to each would be noise.
+    if _shared_sender and await asyncio.to_thread(shared_user_refused_in, channel):
+        sel().log_api_access(
+            caller=sender_id,
+            operation="slack.message",
+            outcome="denied",
+            source="slack",
+            resources=f"channel={channel}",
+            error="code channel is owner-only",
+        )
+        return
     _code_channel = await code_channel_gate(
         orch,
         event,
         text=text,
         address_text=address_text if own_text is None else own_text,
         sender_id=sender_id,
-        authorized=_user_authorized,
+        authorized=_user_authorized and not _shared_sender,
         from_trusted_bot=from_trusted_bot,
     )
     if _code_channel.gate is CodeChannelGate.DROP:
@@ -1067,7 +1097,7 @@ async def _route_message(
 
     # ── !stop: intercept BEFORE handle_message to bypass session semaphore ──
     if clean_text.strip().lower() == "!stop":
-        if not (is_owner(sender_id) or is_allowed_user(sender_id)):
+        if not (is_owner(sender_id) or is_allowed_user(sender_id) or is_shared_user(sender_id)):
             sel().log_api_access(
                 caller=sender_id,
                 operation="slack.stop_command",
@@ -1078,6 +1108,16 @@ async def _route_message(
             )
             if orch.slack:
                 await orch.slack.post_message(channel, "⛔ Not authorized.", thread_ts or msg_ts)
+            return
+        # A shared user (slack.shared_access) stops nothing in a code channel's session.
+        _stop_owner = (
+            orch.sessions.get_session_for_thread(thread_ts or msg_ts)
+            if orch.sessions is not None
+            else None
+        )
+        if await shared_user_refused_for_session(
+            sender_id, str(_stop_owner or ""), thread_ts or msg_ts, channel
+        ):
             return
         if not orch.sessions:
             sel().log_tool_invocation(
@@ -1306,9 +1346,10 @@ async def _route_message(
                         # entries go back to their stash for the same reason.
                         _held[0].clear()
                         await hand_queue_to_successor(orch.sessions, session_key, queued_at_press)
-                    elif outcome == "hard":
+                    elif outcome == "hard" and not is_shared_listed(sender_id):
                         # An escalated stop reset the session: the queue goes for
-                        # everybody, with every detached entry's files.
+                        # everybody, with every detached entry's files. A shared
+                        # user's (slack.shared_access) drops only their own, below.
                         orch.sessions.clear_queue(session_key, only=queued_at_press)
                         for _item in pending_at_press:
                             unlink_queued_temp_paths(_item[2])
@@ -1400,7 +1441,7 @@ async def _route_message(
     #    open a code channel for a mention, or a reply in a thread the bot
     #    already answers, that asks for multi-step work. False (always, with
     #    slack.code_channels off) continues the normal path. ──
-    if await code_channel_dispatch(
+    if not _shared_sender and await code_channel_dispatch(
         orch,
         _code_channel,
         event=event,
@@ -1442,7 +1483,7 @@ async def _route_message(
             spool_text=_spool_text,
             spool_attachments=_spool_attachments,
             had_voice_input=_had_voice_input,
-            **_queue_tags(sender_id, channel),
+            **_queue_tags(sender_id, channel, shared=_shared_sender),
         )
         if not _queued:
             # Session object not created yet — stash on orch._pending_queue,
@@ -1464,7 +1505,7 @@ async def _route_message(
                         spool_text=_spool_text,
                         spool_attachments=_spool_attachments,
                         had_voice_input=_had_voice_input,
-                        **_queue_tags(sender_id, channel),
+                        **_queue_tags(sender_id, channel, shared=_shared_sender),
                     ),
                 )
             )
@@ -1495,7 +1536,7 @@ async def _route_message(
         spool_text=_spool_text,
         spool_attachments=_spool_attachments,
         had_voice_input=_had_voice_input,
-        **_queue_tags(sender_id, channel),
+        **_queue_tags(sender_id, channel, shared=_shared_sender),
     ):
         logger.info("Message %s queued for busy session %s", msg_ts, session_key)
         if orch.slack:
