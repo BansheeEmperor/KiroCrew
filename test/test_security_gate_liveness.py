@@ -737,7 +737,9 @@ def _url_payload_command(n: int) -> str:
 #: and its facade row, so a glob operand after a bare glob verb (the ``* * * *`` of a
 #: cron schedule) is not read as this host; and ``helpers``' RLIMIT_AS key, now
 #: ``max_address_space_mb``. Re-measured.
-_PACKAGE_LINE_BUDGET = 35_143
+#: Raised by 18, from 35,143, for ``paths.py``'s scratch tree-index fence:
+#: artifact reads refuse the canonical index path even during replacement.
+_PACKAGE_LINE_BUDGET = 35_161
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
