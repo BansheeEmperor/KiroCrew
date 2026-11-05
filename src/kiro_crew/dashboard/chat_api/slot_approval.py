@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         row_mid,
         safety_override,
         sel,
+        session_approval_refusal,
         session_grant,
         session_mode_permitted,
         slot_not_found,
@@ -129,13 +130,7 @@ async def deny_session_approval_caller(request: web.Request, operation: str) -> 
         )
     except Exception:  # pragma: no cover - audit is best-effort
         logger.debug("SEL audit failed for %s denial", operation, exc_info=True)
-    return web.json_response(
-        {
-            "error": "app cannot manage session approvals",
-            "code": "session_approval_not_granted",
-        },
-        status=403,
-    )
+    return await session_approval_refusal(request_app)
 
 
 def bare_approval_decide_allowed(request: web.Request) -> bool:
