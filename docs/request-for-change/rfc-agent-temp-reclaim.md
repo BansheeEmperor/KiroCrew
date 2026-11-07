@@ -3,10 +3,10 @@ title: A checked way for agents to remove temp trees they left behind
 status: draft
 author: pearcekieser
 created: 2026-10-28
-last-audited: 2026-10-28
-audited-at: c6789799df
+last-audited: 2026-11-04
+audited-at: 4c44943e28
 doc-pr: 25401
-implementation-prs: []
+implementation-prs: [29396]
 tracking-issues: [25400]
 supersedes: []
 superseded-by: []
@@ -28,7 +28,7 @@ using it. The deny rules stay as they are.
   may go and removes it by descriptor through `pinned_fs.remove_tree_pinned`.
 - It accepts two scopes. The caller's own scratch tree can be removed at any
   time. A child of `/tmp` or `/var/tmp` can be removed when the user owns it,
-  it holds no repository, nothing has written to it for 30 minutes, and no
+  it holds no repository, nothing has changed in it for 30 minutes, and no
   process uses it.
 - Agents reach the routine through the gateway, which runs outside the agent
   sandbox. Inside the sandbox, `/proc` shows 13 of the user's 1,273 processes,
@@ -131,9 +131,19 @@ there.
      `messaging/outbound_files.session_scratch_root` applies to a staged
      file: one allocation, not a link, whose parent is the managed scratch
      root.
-   - **S2, system temp.** It lies inside `/tmp` or `/var/tmp`, and both the
-     path and the root's direct child that contains it are owned by the
-     gateway's uid.
+   - **S2, system temp.** It is a direct child of `/tmp` or `/var/tmp`,
+     owned by the gateway's uid. A deeper path is refused. A process can
+     look things up below a directory it names, such as a `PYTHONPATH`
+     entry, its `HOME` or its working directory. With no directory between
+     the temp root and the target, each such directory is inside the target,
+     or is the temp root itself. The path is not a mount point and holds
+     none. Its device must be the temp root's, and no mount point in
+     `/proc/self/mountinfo` may be at or below it. A user-owned
+     `rclone mount` or `sshfs -o idmap=user` mount passes every other check,
+     and the pinned walk takes its device from the target, so without this
+     the whole mounted filesystem would be removed. The approval reads the
+     mount table again, because a bind mount of the same filesystem keeps
+     its device.
    Anything else is kept with `outside-scope`.
 3. **Sandbox parity.** For an agent caller, the path is not inside any tree
    the caller's sandbox plan seals or hides. The gateway must never delete
@@ -141,17 +151,19 @@ there.
    `/tmp`, and other sessions' scratch is hidden (the `scratch` leaf in `sandbox_leaves.py`),
    which S1 already excludes. The check is still made, so a future tier that
    seals `/tmp` is respected.
-4. **Idle.** In S2, the newest `mtime` anywhere in the tree is at least 30
-   minutes old. This is the same tree walk as
-   `agent_scratch._tree_newest_mtime`. For a regular file, the routine reads
-   the file's own `mtime` from the `lstat` in step 1, because the tree walk
-   cannot open a file. A tree written more recently is kept with `recent`.
+4. **Idle.** In S2, the newest change anywhere in the tree, the later of
+   `mtime` and `ctime`, is at least 30 minutes old. `tar`, `cp -a`,
+   `rsync -a` and `mv` put an old `mtime` back, but each sets `ctime` to now,
+   and nothing can set it back. For a regular file, the routine reads the
+   file's own times from the `lstat` in step 1, because the tree walk cannot
+   open a file. A tree changed more recently is kept with `recent`.
    S1 has no idle check, because the tree belongs to the caller's own
    session.
 5. **Not a repository.** This check applies to directories only. A regular
    file cannot be a repository, so the ancestor check below is all it gets.
-   For a directory, `agent_scratch.holds_git_repository(tree)` is false,
-   and no ancestor up to the temp root holds a `.git` entry. A tree that fails
+   For a directory, `agent_scratch.holds_git_repository(tree)` is false.
+   In S1, no ancestor up to the scratch root holds a `.git` entry. In S2 the
+   path is a direct child of the temp root, so it has no such ancestor. A tree that fails
    is kept with `holds-repository`, and the reason points at
    `git worktree remove` or moving the work. One addition is needed. A
    `.cache/uv` directory directly under the tree is treated as regenerable,
@@ -160,20 +172,70 @@ there.
    names `.cache/uv` only, so a clone someone put elsewhere under `.cache` is
    still found and kept.
 6. **Not in use.** The gateway scans `/proc/<pid>/cwd`, `root`, `exe`,
-   `fd/*` and `maps` for every process, and the bound paths in
-   `/proc/net/unix`. It also reads `/proc/<pid>/environ` and treats a
-   `HOME`, `TMPDIR`, `PYTHONPATH`, `XDG_*` or `*_CACHE_DIR` value that names
-   a path inside the tree as use. A sibling that has a shared home on its
-   `PYTHONPATH` but no file open there is the case this catches. A hit
+   `fd/*` and `maps` for every process. A link the kernel prints with
+   ` (deleted)` counts both as printed and without the suffix, because a
+   live directory can carry that text in its name. It also reads
+   `/proc/<pid>/environ`. A `TMPDIR`, `TMP` or `TEMP` value inside the tree
+   is use. A `HOME`, `PYTHONPATH` entry, `XDG_*` or `*_CACHE_DIR` directory
+   is use when it is inside the tree or holds it, because the process looks
+   things up below it. A sibling that has a shared home on its `PYTHONPATH`
+   but no file open there is the case this catches. Only `PYTHONPATH`,
+   `XDG_DATA_DIRS` and `XDG_CONFIG_DIRS` are split at `:`. A relative or
+   empty entry keeps every tree as unprovable, because the process resolved
+   it against the directory it started in, and `/proc` shows only the one it
+   is in now. A relative `XDG_*` entry is skipped, as the XDG specification
+   says. A process in another mount namespace, such as a rootless container
+   started with `-v /tmp/models:/models`, prints its own view of every path,
+   so its working directory, root, open and mapped files are also matched by
+   `(st_dev, st_ino)` against every entry of the tree. The paths it names in
+   text are its own spellings and are never translated: instead, a mount in
+   another namespace's `mountinfo` whose root is the temp root or a directory
+   above it (`-v /tmp:/tmp`, a snap's view of the host) keeps every tree in
+   that temp root while it runs. That fails closed: snap apps and such
+   containers delay reclaim until they exit. A working directory
+   that is the temp root itself is use of every entry in it, because the
+   process looks them up by name (`python3 -m http.server` run from `/tmp`);
+   in another mount namespace that is a working directory or open directory
+   with the temp root's `(st_dev, st_ino)`. A mount in any
+   process's `/proc/<pid>/mountinfo`, whatever its uid, whose root is the
+   tree or inside it is use: a rootful container, or one running as a subuid,
+   still mounts the tree. Any environment value not named above (`PATH`,
+   `VIRTUAL_ENV`) is use when its text holds the tree's path. Each argument in
+   `/proc/<pid>/cmdline` names a path too: one inside
+   the tree is use, so is one whose text mentions the tree's path anywhere
+   (`--directory=/tmp/site`), and the directory of a file an argument names
+   is a lookup root, because `python /tmp/job/main.py` closes the script and
+   later imports from `/tmp/job`. Each path counts as written and resolved, because
+   `/tmp/venv/bin/python` resolves out of the venv it runs from. A relative
+   argument is joined to the working directory the process has now: nearly
+   every process has one, such as a flag, so keeping every tree for it would
+   keep every tree on every host. A tree that holds a socket file is always
+   kept as unprovable. The kernel keeps the name a socket was bound by, which can be relative or can
+   have moved, so `/proc/net/unix` cannot tie a live socket to its file. On
+   the host where Phase 1 was built, 1 of 1,135 top-level temp entries held
+   a socket file. A hit
    inside the tree keeps it with
    `in-use: pid <n> (<comm>)`. If the gateway cannot read one of the user's
    own processes, the tree is kept with `unprovable: <n> processes
    unreadable`. A process owned by another uid is skipped. In S2 that process
    could only reach the tree through a mode the user chose, and the ownership
-   check in step 2 limits the scope to the user's own trees.
+   check in step 2 limits the scope to the user's own trees. A process of the
+   user that the kernel marks not dumpable, such as `ssh-agent`, `gpg-agent` or
+   a setuid `sudo`, is skipped the same way and named in the output, and only
+   its command line, which anyone may read, counts: the kernel makes root the
+   owner of its `/proc/<pid>/fd` (not of `/proc/<pid>`, which keeps the
+   effective uid), which is how it is told apart from a process another user
+   namespace hides, and that one stays unprovable. So does one not dumpable
+   because it holds a capability, a non-zero `CapPrm` in its world-readable
+   `status`, such as a `setcap` server or `gnome-keyring-daemon`: it can be an
+   ordinary program working in a tree, so it keeps every path.
 7. **Remove.** `pinned_fs.remove_tree_pinned` with an `approve` callback that
    re-checks, through the pinned descriptor, that `(st_dev, st_ino)` and
-   `st_uid` match what the checks saw. A regular file is unlinked through its
+   `st_uid` match what the checks saw. It then reads the change times again, and
+   looks for a socket file, through that descriptor, reads the process table
+   again, and confirms the path still
+   names the pinned directory, so a tree renamed during the check is kept with
+   everything in it. A regular file is unlinked through its
    pinned parent after the same identity check. A tree that does not fully go
    reports `kept: partial (<survivors> left)`.
 
@@ -196,7 +258,7 @@ leftover, `/tmp/p14-floor.B10Z` with 57,858 entries, takes 0.6 seconds for a
   trees in place. The safety rests on steps 2 to 6, not on a person reading
   each call. No approval rule changes. Open question 5 asks whether to carve
   the tool out of the server-wide grant instead.
-- **`kirocrew tmp reclaim <path>... [--dry-run] [--json]`.** It runs the same
+- **`kirocrew tmp reclaim <path>... [--dry-run]`.** It runs the same
   routine in-process with scope S2 only, for a person in their own terminal.
   Run inside an agent sandbox, it finds unreadable processes and keeps every
   S2 tree with `unprovable`, and its message points at `tmp_reclaim`. Exit 0
