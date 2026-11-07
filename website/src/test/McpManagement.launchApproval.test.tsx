@@ -4,11 +4,14 @@
 // redesign, in the page's current vocabulary. A launch the gateway refused (a
 // changed command, or one declared outside the dashboard) runs nothing shared
 // until the person approves it on its own button:
-// - the row's switch reads off and, when pressed, writes NOTHING and reads
-//   nothing: it moves focus to the row's Approve button
+// - the row draws no switch: its two controls are Approve and Stop sharing,
+//   with a hint that nothing is approved
 // - Approve re-sends stub=true pinned to the refusal's own expected_launch
 // - an Approve the gateway answers with the launch the server runs now (the
 //   refusal was moved past) shows that launch in Details and pins it next
+// - Stop sharing takes the mark off (stub=false) and approves nothing
+// - below md, the paused row's buttons and hint take a full-width line under
+//   the server's name, so the hint cannot squeeze the name column
 // - a refusal with no approvable identity has no approve control, only a
 //   Remove button that takes the mark off (stub=false), never an approval
 // - an older gateway that sends no `launch_refused` keeps the plain states
@@ -78,22 +81,46 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('a refused launch', () => {
-  it('sends the switch of a refused row to its Approve button, reading nothing and writing nothing', async () => {
+  it('draws a refused row as Approve and Stop sharing with a hint, and no switch', async () => {
     vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(status({ launch_refused: { 'alpha-mcp': changed } }) as never)
     vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({ servers: [server] } as never)
-    const read = vi.spyOn(api, 'mcpGatewayLaunchPreview')
     const setStub = vi.spyOn(api, 'mcpGatewaySetStub')
 
     mount()
-    const control = await screen.findByRole('switch', { name: rowName('share_toggle') }, { timeout: 5000 })
-    expect(control.getAttribute('aria-checked')).toBe('false')
-    fireEvent.click(control)
-
-    const approve = screen.getByRole('button', { name: rowName('new_command_button') })
-    expect(document.activeElement).toBe(approve)
-    // The press is synchronous: it only moves focus, so nothing can be in flight.
-    expect(read).not.toHaveBeenCalled()
+    const stop = await screen.findByRole('button', { name: rowName('stop_sharing') }, { timeout: 5000 })
+    expect(screen.getByRole('button', { name: rowName('new_command_button') })).toBeTruthy()
+    expect(screen.queryByRole('switch', { name: rowName('share_toggle') })).toBeNull()
+    expect(stop.getAttribute('aria-describedby')).toContain('mcp-stop-hint-alpha-mcp')
+    expect(screen.getByText(M('stop_sharing_hint'))).toBeTruthy()
     expect(setStub).not.toHaveBeenCalled()
+  })
+
+  it('moves the paused row controls and hint to a full-width line below md', async () => {
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(
+      status({ stub: ['alpha-mcp'], launch_refused: { 'alpha-mcp': changed } }) as never,
+    )
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({
+      servers: [server, { ...server, name: 'beta-mcp', stub: false }],
+    } as never)
+
+    mount()
+    const stop = await screen.findByRole('button', { name: rowName('stop_sharing') }, { timeout: 5000 })
+    // jsdom has no layout, so this pins the rule. Below md each row is a
+    // `minmax(0,1fr)_auto` grid; a hint in the `auto` track grows it to the
+    // sentence's width and leaves the server name no room. The paused cell
+    // spans both tracks on a row of its own, and is a table cell again from md.
+    const paused = (stop.closest('td') as HTMLElement).className.split(' ')
+    expect(paused).toEqual(expect.arrayContaining(['col-span-2', 'col-start-1', 'row-start-4', 'md:table-cell']))
+    expect(paused).not.toContain('col-start-2')
+    expect(paused).not.toContain('row-start-1')
+    expect((screen.getByText(M('stop_sharing_hint')).closest('td') as HTMLElement).className).toBe(
+      (stop.closest('td') as HTMLElement).className,
+    )
+    // A row with a switch keeps its control beside the name.
+    const plain = screen.getByRole('switch', { name: rowName('share_toggle', 'beta-mcp') })
+    const beside = (plain.closest('td') as HTMLElement).className.split(' ')
+    expect(beside).toEqual(expect.arrayContaining(['col-start-2', 'row-start-1']))
+    expect(beside).not.toContain('col-span-2')
   })
 
   it('approves by re-sending stub=true pinned to the refused launch', async () => {
@@ -203,6 +230,18 @@ describe('a refused launch', () => {
     mount()
     expect(await screen.findByRole('button', { name: rowName('remove_mark', name) }, { timeout: 5000 })).toBeTruthy()
     expect(screen.queryByRole('button', { name: rowName('new_command_button', name) })).toBeNull()
+  })
+
+  it('stops sharing a refused row with stub=false, approving nothing', async () => {
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(status({ launch_refused: { 'alpha-mcp': changed } }) as never)
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({ servers: [server] } as never)
+    const setStub = vi.spyOn(api, 'mcpGatewaySetStub').mockResolvedValue({ ok: true, name: 'alpha-mcp', stub: false } as never)
+
+    mount()
+    fireEvent.click(await screen.findByRole('button', { name: rowName('stop_sharing') }, { timeout: 5000 }))
+    await waitFor(() => expect(setStub).toHaveBeenCalledWith('alpha-mcp', false, undefined), { timeout: 5000 })
+    expect(setStub).toHaveBeenCalledTimes(1)
+    expect(setStub).not.toHaveBeenCalledWith('alpha-mcp', true, expect.anything())
   })
 
   it('offers no approve control for a refusal with no approvable identity, only a Remove button', async () => {
