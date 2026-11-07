@@ -307,7 +307,7 @@ async def handle_register_external(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except json.JSONDecodeError:
-        return web.json_response({"error": "invalid JSON"}, status=400)
+        return web.json_response({"error": "invalid JSON", "code": "invalid_json"}, status=400)
     not_object = body_not_object_error(body)
     if not_object is not None:
         return not_object
@@ -390,7 +390,7 @@ async def handle_install_app(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except json.JSONDecodeError:
-        return web.json_response({"error": "invalid JSON"}, status=400)
+        return web.json_response({"error": "invalid JSON", "code": "invalid_json"}, status=400)
     not_object = body_not_object_error(body)
     if not_object is not None:
         return not_object

@@ -177,13 +177,15 @@ async def api_agent_detail(request: web.Request) -> web.Response:
         try:
             patch_body = await request.json()
         except ValueError:
-            return web.json_response({"error": "invalid JSON"}, status=400)
+            return web.json_response({"error": "invalid JSON", "code": "invalid_json"}, status=400)
         # Valid JSON is not necessarily an object. A top-level array makes
         # ``"skills" in patch_body`` a LIST-membership test (true for
         # ``["skills"]``), and the subscript that follows then raises TypeError
         # -> HTTP 500. Reject the shape once, here, rather than per-field.
         if not isinstance(patch_body, dict):
-            return web.json_response({"error": "body must be a JSON object"}, status=400)
+            return web.json_response(
+                {"error": "body must be a JSON object", "code": "body_not_object"}, status=400
+            )
 
     state: DashboardState = request.app["state"]
     # The directory walk and the per-file parse run in a thread: a large agents
