@@ -42,6 +42,7 @@ FEATURE_PREVIEW_FLAGS: tuple[str, ...] = (
     "mate_sessions",
     "remote_crew_chat",
     "session_environments",
+    "visual_refresh",
     "webhooks",
 )
 

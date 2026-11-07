@@ -12,7 +12,7 @@ import { Btn } from '../../components/ui'
 import { api } from '../../api/client'
 import { ApiError } from '../../api/apiError'
 import { useSharedCrewPreviewSetting } from './sharedCrewPreviewSetting'
-import { PREVIEW_ARTIFACT_DEPLOY, PREVIEW_CREW_MODE, PREVIEW_EXPLORE, PREVIEW_FOLDER_CONDUCTOR, PREVIEW_LAYOUT_HARNESS, PREVIEW_MATE_SESSIONS, PREVIEW_REMOTE_CREW_CHAT, PREVIEW_SESSION_ENVIRONMENTS, PREVIEW_WEBHOOKS, setPreviewFlag, setRemoteCrewChat } from '../../utils/previewFlags'
+import { PREVIEW_ARTIFACT_DEPLOY, PREVIEW_CREW_MODE, PREVIEW_EXPLORE, PREVIEW_FOLDER_CONDUCTOR, PREVIEW_LAYOUT_HARNESS, PREVIEW_MATE_SESSIONS, PREVIEW_REMOTE_CREW_CHAT, PREVIEW_SESSION_ENVIRONMENTS, PREVIEW_VISUAL_REFRESH, PREVIEW_WEBHOOKS, setPreviewFlag, setRemoteCrewChat } from '../../utils/previewFlags'
 import ErrorBoundary from '../../components/ErrorBoundary'
 import { KasBundleCard } from '../developer/KasBundleCard'
 import { KIRO_SIGN_IN_BACKEND } from '../developer/kiroSignInLink'
@@ -128,6 +128,7 @@ function previewFlagLabel(flag: string): string {
     case PREVIEW_FOLDER_CONDUCTOR: return i18nT('pages.developer.featurePreviewsTab.folder_conductor')
     case PREVIEW_MATE_SESSIONS: return i18nT('pages.developer.featurePreviewsTab.mate_sessions')
     case PREVIEW_SESSION_ENVIRONMENTS: return i18nT('sessionEnvironments.title')
+    case PREVIEW_VISUAL_REFRESH: return i18nT('pages.developer.featurePreviewsTab.visual_refresh')
     default: return i18nT('pages.settings.developerPanel.feature_previews')
   }
 }
@@ -158,6 +159,7 @@ export function FeaturePreviewsSection() {
   const sessionEnvironments = usePreviewFlag(PREVIEW_SESSION_ENVIRONMENTS)
   const crewMode = usePreviewFlag(PREVIEW_CREW_MODE)
   const explore = usePreviewFlag(PREVIEW_EXPLORE)
+  const visualRefresh = usePreviewFlag(PREVIEW_VISUAL_REFRESH)
   const writeError = usePreviewFlagWriteError()
   const [gatewayRestarting, setGatewayRestarting] = useState(false)
   const [restartFailed, setRestartFailed] = useState(false)
@@ -432,6 +434,17 @@ export function FeaturePreviewsSection() {
           hint={i18nT('pages.developer.featurePreviewsTab.mate_sessions_desc')}
           checked={mateSessions}
           onChange={v => setPreviewFlag(PREVIEW_MATE_SESSIONS, v)}
+        />
+      </SettingsCard>
+      {/* The visual refresh. NO ingress button and NO capture: it restyles pages
+          already on screen, and nothing is restyled yet. */}
+      <SettingsCard>
+        <SettingsToggle
+          label={i18nT('pages.developer.featurePreviewsTab.visual_refresh')}
+          description={i18nT('pages.developer.featurePreviewsTab.visual_refresh_desc_summary')}
+          hint={i18nT('pages.developer.featurePreviewsTab.visual_refresh_desc')}
+          checked={visualRefresh}
+          onChange={v => setPreviewFlag(PREVIEW_VISUAL_REFRESH, v)}
         />
       </SettingsCard>
       {/* Conductor remote dispatch (`work_ledger.remote_dispatch`). Like the KAS card
