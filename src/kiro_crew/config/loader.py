@@ -848,6 +848,7 @@ if TYPE_CHECKING:  # every owner-defined name this module forwards, for type che
         _SIDECAR_BASE_SHADOW,
         _SIDECAR_BASE_UNREADABLE,
         _SIDECAR_OVERLAY_UNREADABLE,
+        _SIDECAR_TELEMETRY_UNREADABLE,
         ConfigReadError,
         ConfigWriteRefused,
         PendingEditBlocksSave,

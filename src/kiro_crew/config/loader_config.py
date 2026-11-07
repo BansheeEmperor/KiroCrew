@@ -52,6 +52,7 @@ from kiro_crew.config.loader_document import (
     _config_write_lock,
     _invalidate_config_cache,
     _notify_live_watch,
+    _raw_agent_section,
     read_config_for_update,
     stamp_config_meta,
     strip_undeclared_resolved_defaults,
@@ -530,6 +531,10 @@ class KiroCrewConfig:
     #: answer this for one load: its whole-config marker lasts the process.
     _overlay_unreadable: bool = field(default=False, repr=False, compare=False)
 
+    #: True when the load that built this instance found a ``telemetry`` that is not
+    #: an object or an ``enabled`` that is not a bool. Describes this read only.
+    _telemetry_unreadable: bool = field(default=False, repr=False, compare=False)
+
     @property
     def degraded_sections(self) -> frozenset[str]:
         """Sections this load discarded (see ``_degraded_sections``)."""
@@ -879,6 +884,24 @@ class KiroCrewConfig:
         # ``agent.kas_bundle`` is stripped the same way: undeclared, it resolves
         # through ``kas_bundle_build_default()`` (on in a nightly build only).
         strip_undeclared_resolved_defaults(d)
+        # Same rule for ``telemetry.enabled``: its absence is load-bearing too.
+        # The default is on, and ``metrics.provider.outbound_consented`` reads a
+        # WRITTEN ``true`` as the operator's own opt-in to recording, which also
+        # permits export. A whole-document save (the boot default-config write,
+        # a CLI one-shot) would otherwise freeze the default in as that opt-in.
+        # Absent stays absent until someone writes the key through a delta
+        # writer (Settings, the Privacy chapter, ``kirocrew telemetry``).
+        # The base file only: an overlay value is not in config.json, and keeping
+        # the snapshot's default there would invent an opt-in under the overlay.
+        # A stored value that is not a bool (a quoted "false") goes back as stored,
+        # so the next load still holds recording rather than reading a ``true``.
+        base_telemetry = _raw_agent_section(config_path(), "telemetry") or {}
+        telemetry_section = d.get("telemetry")
+        if isinstance(telemetry_section, dict):
+            if "enabled" not in base_telemetry:
+                telemetry_section.pop("enabled", None)
+            elif not isinstance(base_telemetry["enabled"], bool):
+                telemetry_section["enabled"] = base_telemetry["enabled"]
         # The harness fields go back to disk exactly as ``config.json`` stores
         # them, never from the in-memory value, which is RESOLVED: "no choice"
         # (absent or "") reads as today's default, and a pick this deployment

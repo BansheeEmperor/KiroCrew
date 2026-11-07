@@ -197,18 +197,19 @@ def _backend_choice_declared(key: str) -> bool:
 _ABSENT_AGENT_KEY = object()
 
 
-def _raw_agent_section(path: Path) -> dict | None:
-    """The raw ``agent`` object of the config document at *path*, or ``None``.
+def _raw_agent_section(path: Path, section: str = "agent") -> dict | None:
+    """The raw *section* object (``agent`` by default) of the config document at *path*.
 
-    An unreadable or non-object document contributes nothing: a corrupt config is
-    not a declaration. Read as the load reads it (:func:`read_endorsed_config_text`).
+    ``None`` when absent. An unreadable or non-object document contributes
+    nothing: a corrupt config is not a declaration. Read as the load reads it
+    (:func:`read_endorsed_config_text`).
     """
     try:
         doc = json.loads(read_endorsed_config_text(path))
     except (OSError, ValueError):
         return None
-    agent = doc.get("agent") if isinstance(doc, dict) else None
-    return agent if isinstance(agent, dict) else None
+    node = doc.get(section) if isinstance(doc, dict) else None
+    return node if isinstance(node, dict) else None
 
 
 def _raw_stt_provider(path: Path) -> object:
@@ -224,12 +225,16 @@ def _raw_stt_provider(path: Path) -> object:
     return stt.get("provider") if isinstance(stt, dict) else None
 
 
-def _stored_agent_value(key: str) -> object:
-    """The raw stored ``agent.<key>`` a load would read: overlay first, then base."""
+def _stored_agent_value(key: str, section: str = "agent") -> object:
+    """The raw stored ``<section>.<key>`` a load would read: overlay first, then base.
+
+    *section* is ``agent`` unless named. No field default is filled in, so this
+    tells a written value from a default one.
+    """
     for path in (config_local_path(), config_path()):
-        agent = _raw_agent_section(path)
-        if agent is not None and key in agent:
-            return agent[key]
+        node = _raw_agent_section(path, section)
+        if node is not None and key in node:
+            return node[key]
     return _ABSENT_AGENT_KEY
 
 
@@ -1306,6 +1311,10 @@ _SIDECAR_BASE_UNREADABLE = "base_unreadable"
 #: Whether the load that filled this cache entry found ``config.local.json`` present
 #: but unparseable, carried forward the same way for ``_overlay_unreadable``.
 _SIDECAR_OVERLAY_UNREADABLE = "overlay_unreadable"
+
+#: Whether the load that filled this cache entry found a ``telemetry`` section that
+#: is not an object or an ``enabled`` that is not a bool, carried forward the same way.
+_SIDECAR_TELEMETRY_UNREADABLE = "telemetry_unreadable"
 
 #: Whether the load that filled this cache entry dropped the ``agents`` value or an
 #: ``agents`` entry in validation, carried forward so a hit reports it the same way.

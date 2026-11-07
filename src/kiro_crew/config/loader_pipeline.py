@@ -45,6 +45,7 @@ from kiro_crew.config.loader_document import (
     _SIDECAR_BASE_SHADOW,
     _SIDECAR_BASE_UNREADABLE,
     _SIDECAR_OVERLAY_UNREADABLE,
+    _SIDECAR_TELEMETRY_UNREADABLE,
     PendingEditBlocksSave,
     _config_fingerprint,
     _content_digest_of,
@@ -340,6 +341,8 @@ class ConfigDocument:
     base_unreadable: bool = False
     #: ``config.local.json`` was present but unreadable or not a JSON object.
     overlay_unreadable: bool = False
+    #: The merged ``telemetry`` is not an object, or its ``enabled`` is not a bool.
+    telemetry_unreadable: bool = False
     #: The base document's copy of each top-level section the overlay touched.
     base_shadow: dict = field(default_factory=dict)
     #: ``config.local.json`` as this read parsed it; ``{}`` on a cache hit.
@@ -409,6 +412,7 @@ def read_config_document() -> ConfigDocument:
             content_digest=content_digest,
             base_unreadable=bool(sidecar.get(_SIDECAR_BASE_UNREADABLE, False)),
             overlay_unreadable=bool(sidecar.get(_SIDECAR_OVERLAY_UNREADABLE, False)),
+            telemetry_unreadable=bool(sidecar.get(_SIDECAR_TELEMETRY_UNREADABLE, False)),
             base_shadow=sidecar.get(_SIDECAR_BASE_SHADOW, {}),
             agents_repaired=bool(sidecar.get(_SIDECAR_AGENTS_REPAIRED, False)),
         )
@@ -652,6 +656,29 @@ def read_config_document() -> ConfigDocument:
                     type(_agent_section[_fail_closed_key]).__name__,
                 )
                 _agent_section[_fail_closed_key] = False
+    # ``telemetry.enabled`` defaults to TRUE (local recording on). A ``telemetry``
+    # that is not an object (an overlay's ``null`` replacing the base section), or
+    # an ``enabled`` that is not a bool (a quoted ``"false"``), is dropped by
+    # validation below and loads as the field default. Record it for THIS load
+    # (not the process-wide degraded set): ``consent_pins._held_consent`` then
+    # keeps that default from turning on a recorder the malformed value may have
+    # meant to switch off, and a repaired file is read normally again.
+    _telemetry_section = data.get("telemetry")
+    telemetry_unreadable = "telemetry" in data and (
+        not isinstance(_telemetry_section, dict)
+        or ("enabled" in _telemetry_section and not isinstance(_telemetry_section["enabled"], bool))
+    )
+    if telemetry_unreadable:
+        logger.warning(
+            "telemetry.enabled is unreadable (%s); treating the telemetry section "
+            "as degraded, so local recording does not start from its default. "
+            "Write true or false without quotes to choose.",
+            type(
+                _telemetry_section.get("enabled")
+                if isinstance(_telemetry_section, dict)
+                else _telemetry_section
+            ).__name__,
+        )
     # Keep a genuinely absent default backward-compatible with older
     # configs, but normalize a PRESENT malformed value before advisory
     # schema validation can delete it and turn corruption into the
@@ -710,6 +737,7 @@ def read_config_document() -> ConfigDocument:
                 _SIDECAR_BASE_SHADOW: base_shadow,
                 _SIDECAR_BASE_UNREADABLE: base_unreadable,
                 _SIDECAR_OVERLAY_UNREADABLE: overlay_unreadable,
+                _SIDECAR_TELEMETRY_UNREADABLE: telemetry_unreadable,
                 _SIDECAR_AGENTS_REPAIRED: agents_repaired,
             },
             expected_generation=read_generation,
@@ -724,6 +752,7 @@ def read_config_document() -> ConfigDocument:
         content_digest=content_digest,
         base_unreadable=base_unreadable,
         overlay_unreadable=overlay_unreadable,
+        telemetry_unreadable=telemetry_unreadable,
         base_shadow=base_shadow,
         overlay=local_data,
         adoptable=adoptable,
@@ -1290,6 +1319,7 @@ def build_config(
 
     cfg._base_unreadable = doc.base_unreadable
     cfg._overlay_unreadable = doc.overlay_unreadable
+    cfg._telemetry_unreadable = doc.telemetry_unreadable
     return cfg
 
 
