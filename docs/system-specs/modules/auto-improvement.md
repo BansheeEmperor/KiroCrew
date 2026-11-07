@@ -577,6 +577,17 @@ are seen too. An option's VALUE goes with it (`nice -n 5 git push` must not leav
 like the command), and the recursion budget REFUSES on exhaustion — for a denylist, "gave up"
 must not mean "allowed".
 
+`eval` and `script -c` / `script --command` run a script too, so their script is re-analyzed
+the same way, and `watch` runs its joined arguments through `sh -c`. Two splits find the
+commands. A quote-aware split walks the characters with quote state and splits only on
+UNQUOTED separators, so `sh -c 'git push; true'` still yields `git push` while quoted data
+(`printf '%s\n' ';' curl`, `rg -F '$(curl' src`) runs nothing. Main's quote-blind split
+always runs as well, so anything it refuses stays refused. When the quote-aware split cannot
+read the text (an apostrophe in a `# it's` comment), or the text uses bash's `$'...'` /
+`$"..."` quoting (which shlex reads as a literal `$`), a nested script would pass unseen:
+the gate refuses when such text holds `eval`, `watch`, `script` or a shell's `-c`.
+A redirect target is a file name, so `echo hi > ./curl` stays allowed.
+
 Reaching the subcommand also means skipping GLOBAL OPTIONS correctly. A valueless option must not
 swallow the verb: `git --no-pager push`, `--paginate`, `--bare`, `--literal-pathspecs` and
 `--no-replace-objects` must be refused like a bare `git push`. Value-taking global options are
@@ -607,6 +618,7 @@ pushing) and `exec pytest -q` stay allowed. A dedicated test pins that non-over-
 - Value-taking global options are enumerated per binary (`_VALUE_TAKING_OPTIONS`) and everything else is valueless, so `git --no-pager push` is refused like `git push`; `--exec-path` is excluded because its value is optional. (D-63)
 - Value-taking wrapper long options (`_WRAPPER_VALUE_TAKING_LONG_OPTIONS`, such as `env --unset`) consume their value, so the command behind them is inspected. (D-117)
 - A bare `&` splits commands like `;`, and `(` and `)` split too, so `true & gh pr comment …` and `echo $(gh pr ready)` are refused; a benign trailing `& true` passes. (D-128)
+- `eval`, `script -c` and `watch` scripts are re-analyzed; a quoted separator stays in its word, while main's quote-blind split still runs; text the quote-aware split cannot read, or text using `$'...'` / `$"..."`, is refused when it holds `eval`, `watch`, `script` or a shell's `-c`, so `eval 'gh pr ready 1' # it's` and `eval $'gh pr ready 1'` are refused while `echo hi # don't` and `printf '%s\n' ';' curl` pass. (D-143)
 
 ### Why the protected-branch denylist normalizes before it matches
 
