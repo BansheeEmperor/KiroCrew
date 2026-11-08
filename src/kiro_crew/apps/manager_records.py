@@ -21,7 +21,7 @@ import threading
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Sequence
 
@@ -147,6 +147,23 @@ def _read_schema_version(data: dict[str, Any]) -> int:
         return 1
 
 
+#: A member slug, as ``members_parts.member_space`` validates it.
+_BOT_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?\Z")
+#: Most Bots one app's ticked list may name.
+MAX_BOT_GRANTS = 200
+
+
+def _read_bot_grants(value: Any) -> list[str]:
+    """``botGrants`` as stored: valid slugs, each once, capped. Anything else is none."""
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for entry in value:
+        if isinstance(entry, str) and _BOT_SLUG_RE.match(entry) and entry not in out:
+            out.append(entry)
+    return out[:MAX_BOT_GRANTS]
+
+
 @dataclass
 class InstalledApp:
     """Metadata persisted in ``installed.json`` for each installed app.
@@ -223,6 +240,10 @@ class InstalledApp:
     # it (an install from before the set was stored) approves what its
     # manifest declares.
     approvedGrantsStored: bool = False  # noqa: N815
+    # The Bots (member slugs) the owner ticked for this app in its settings
+    # (``apps.bot_grants``). Only the owner's ``PUT /api/apps/{name}/bot-grants``
+    # writes it; an update keeps it, a reinstall starts empty.
+    botGrants: list[str] = field(default_factory=list)  # noqa: N815
 
     def validate_fields(self) -> list[str]:
         """Validate classification field values. Returns error list (empty = valid)."""
@@ -262,6 +283,7 @@ class InstalledApp:
             sessionApprovalConsentPending=bool(data.get("sessionApprovalConsentPending", False)),
             memberThreadsConsented=data.get(MEMBER_THREADS_CONSENT_KEY) is True,
             approvedGrantsStored=data.get("approvedGrantsStored") is True,
+            botGrants=_read_bot_grants(data.get("botGrants")),
         )
         # Migrate old "managed" field to new classification fields
         if inst.schemaVersion < 2 and "origin" not in data:

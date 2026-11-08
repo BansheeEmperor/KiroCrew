@@ -59,6 +59,7 @@ import AppDetailAdoptionNotice from './AppDetailAdoptionNotice'
 import AppDetailLinks from './AppDetailLinks'
 import AppDetailPageLocalOnlyNotice from './AppDetailPageLocalOnlyNotice'
 import { openLocalSourceSwitch } from './appDetailPageLocalSwitch'
+import AppDetailBotGrants, { StagedBotScopes, stagedBotScopes } from './AppDetailBotGrants'
 import { selectionActionGrantLabel } from '../selectionActions/selectionActionRegistry'
 import type { AppInfo, NormalizedRegistryEntry, RegistryEntry } from './appDetailPageTypes'
 import { actionGrant } from '../composerActions/composerActionRegistry'
@@ -130,9 +131,10 @@ export default function AppDetailPage() {
   // Selection actions an update added or changed (a new source, more text, a new effect).
   const stagedSelection = app?.selectionActionGrant?.staged || []
   const declaredSelectionActions = (app?.manifest as { contributes?: { selectionActions?: unknown } } | undefined)?.contributes?.selectionActions
-  // An update that added `permissions.workerAutoApprove` waits the same way.
+  // An update that added `permissions.workerAutoApprove` waits the same way, as do Bot scopes.
   const stagedWorkerAutoApprove = app?.workerAutoApproveGrant?.staged === true
-  const hasStagedGrants = stagedApi.length + stagedEvents.length + stagedLinkHosts.length + stagedLinkPatterns.length + stagedMessageActions.length + stagedOpenHosts.length + stagedComposerActions.length + stagedSelection.length > 0 || stagedFullUrl || stagedOpenFullUrl || stagedWorkerAutoApprove
+  const stagedBots = stagedBotScopes(app)
+  const hasStagedGrants = stagedApi.length + stagedEvents.length + stagedBots.length + stagedLinkHosts.length + stagedLinkPatterns.length + stagedMessageActions.length + stagedOpenHosts.length + stagedComposerActions.length + stagedSelection.length > 0 || stagedFullUrl || stagedOpenFullUrl || stagedWorkerAutoApprove
   // Shown where the notice was once the owner approves, so the moment is confirmed.
   const [grantsApprovedMsg, setGrantsApprovedMsg] = useState('')
   const enableLabel = app?.sessionApprovalConsentPending
@@ -1164,6 +1166,7 @@ export default function AppDetailPage() {
                   </div>
                 </div>
               )}
+              <StagedBotScopes scopes={stagedBots} />
               {stagedLinkHosts.length > 0 && (
                 <div>
                   <div className="text-[13px]">{i18nT('pages.appDetailPage.grants_reconsent_link_hosts')}</div>
@@ -1245,11 +1248,12 @@ export default function AppDetailPage() {
               primary
               onClick={async () => {
                 startAction('approve_grants')
-                const approved = [...stagedApi, ...stagedEvents, ...stagedLinkHosts, ...stagedLinkPatterns, ...(stagedFullUrl ? ['fullUrl'] : []), ...stagedMessageActions.map(e => messageActionGrantLabel(e, declaredMessageActions)), ...stagedOpenHosts, ...(stagedOpenFullUrl ? ['fullUrl'] : []), ...stagedComposerActions, ...stagedSelection.map(e => selectionActionGrantLabel(e, declaredSelectionActions)), ...(stagedWorkerAutoApprove ? ['workerAutoApprove'] : [])].join(', ')
+                const approved = [...stagedApi, ...stagedEvents, ...stagedBots, ...stagedLinkHosts, ...stagedLinkPatterns, ...(stagedFullUrl ? ['fullUrl'] : []), ...stagedMessageActions.map(e => messageActionGrantLabel(e, declaredMessageActions)), ...stagedOpenHosts, ...(stagedOpenFullUrl ? ['fullUrl'] : []), ...stagedComposerActions, ...stagedSelection.map(e => selectionActionGrantLabel(e, declaredSelectionActions)), ...(stagedWorkerAutoApprove ? ['workerAutoApprove'] : [])].join(', ')
                 try {
                   const result = await api.enableApp(app.name, false, {
                     api: stagedApi,
                     events: stagedEvents,
+                    bots: stagedBots,
                     linkPreviewHosts: stagedLinkHosts,
                     linkPreviewTextPatterns: stagedLinkPatterns,
                     linkPreviewFullUrl: stagedFullUrl ? ['fullUrl'] : [],
@@ -1823,6 +1827,8 @@ export default function AppDetailPage() {
               </div>
             </Card>
           )}
+
+          {app.installed && <AppDetailBotGrants appName={app.name} declared={app.manifest?.permissions?.bots} />}
 
           {/* MCP Servers */}
           {app.manifest?.mcpServers && Object.keys(app.manifest.mcpServers).length > 0 && (

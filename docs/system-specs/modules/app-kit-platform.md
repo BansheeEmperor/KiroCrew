@@ -6652,6 +6652,67 @@ Writers: `apps/lifecycle_sdk.py`, `apps/context.py`, `apps/app_sdk_level.py`,
 `test/test_app_sdk_level_mirror.py`. App authors: `docs/app-kit/api-reference.md`
 "App lifecycle".
 
+## 32c. App Kit seam level 4: an app reads and wakes the Bots the owner gave it
+
+Every Crew Members route refuses an app token with a 404 (`_deny_app_caller`). Level 4
+opens three of them to an app, and only this far. An app passes two checks, both in
+`handlers/members_access._app_bot_gate`, and every failure is the same 404, so an app
+cannot tell a Bot it was not given from one that does not exist:
+
+1. **A scope.** `permissions.bots` holds `"read"`, `"wake"` or both. Any other entry
+   is dropped at parse (`manifest_sections._bot_scopes`). `bots` is a staged grant
+   family (`point_grants.PERMISSION_GRANT_FAMILIES`, `manager_records.STAGED_GRANT_FAMILIES`):
+   an install approves what it declares, and a scope an update adds waits for the
+   owner's approval on the app detail page, like a new `permissions.api` path.
+2. **A ticked Bot.** The owner ticks Bots for the app in the app detail page's "Bots
+   this app can reach" card (`website/src/pages/AppDetailBotGrants.tsx`), which writes
+   `PUT /api/apps/{name}/bot-grants`. Owner only: the path is in the app's own
+   namespace, so `require_owner_dashboard_request` is what keeps an app from ticking
+   Bots for itself. The list is `InstalledApp.botGrants` (member slugs, at most
+   `MAX_BOT_GRANTS`, a proposal), starts empty, survives an update and is gone with a
+   reinstall. `bot-grants` is in `CORE_APP_ROUTE_SEGMENTS`.
+
+A disabled app holds no Bot scope: `apps/bot_grants.app_bot_scopes` reads
+`is_app_enabled` on every call, because an app token minted before the owner disabled
+the app still verifies (pinned by `test_app_bot_disabled_token.py`).
+
+The app's requests still pass the path gate, so it also declares `/api/members` in
+`permissions.api`. The token allowlist, CORS and frame-ancestors are unchanged.
+
+| Route | Scope | What the app gets |
+|---|---|---|
+| `GET /api/members` | `read` | `BotList` of the ticked Bots, in the owner's order: `id` (the member slug), `object`, `name`, `description`, `avatar_url`, `status` (`busy` / `idle`), `has_goal`. Built from its own allowlist in `handlers/members_app.py`, never the owner's rows. |
+| `GET /api/members/{slug}/goals` | `read` | `BotGoals`: `goals` (`id`, `number`, `text`) and `key_results` (`id`, `text`, `target`, `current`, `updated_at`, `goal_ids`, `history`). No schedules, reports or undo state. |
+| `POST /api/members/{slug}/wake` | `wake` | One hidden turn in the Bot's thread whose text the gateway writes (`dashboard/app_bot_wake.wake_prompt`, envelope `[App wake from "<app>"]`). The body is `{"ref": "<id>"}` and nothing else: any other key is 400 `unexpected_field`, and `ref` must match `WAKE_REF_RE`. App tokens only. |
+
+Neither scope reaches a Bot's DM thread, briefing, rules, activity, projections,
+dashboard, export or import: those routes keep `_deny_app_caller` or the owner gate,
+pinned by `test_bot_scopes_never_open_a_private_member_route`.
+
+**The wake.** The turn runs through `mate_welcome.dispatch_hidden_turn` with crew-log
+actor `app`, so nothing in it speaks as the owner, and the Bot is told that what it
+reads through the app's tools is data, not instructions. A busy Bot keeps the refs per
+thread and app (at most `MAX_PENDING_REFS`) and gets one turn for all of them when its
+running turn ends; a closed thread is loaded from its transcript first, as a goal
+check-in does; a Bot whose thread was never opened answers 409 `bot_unavailable`. At
+most `WAKE_LIMIT` accepted wakes per app and Bot in `WAKE_WINDOW_SECS` (6 per 60 s, a
+proposal), past which the route answers 429 with `Retry-After`. Pending wakes and the
+counters live on the dashboard state, so a restart drops both.
+
+**Dashboard SDK.** `useBots()`, `useBot(id)` and `useWakeBot()` join
+`@kirocrew/app-sdk` (`website/src/app-sdk/bots.ts`) and its vendor stub, and
+`APP_SDK_LEVEL` is 4 on both sides. The hooks call the routes above; the Crew API
+draft's `/v1/crew/bots` carries the same shapes, so only the paths change when they
+move there.
+
+Writers: `apps/bot_grants.py`, `apps/routes_bot_grants.py`, `apps/manifest_sections.py`,
+`apps/point_grants.py`, `apps/manager_records.py`, `apps/routes_enable.py`,
+`apps/app_sdk_level.py`, `dashboard/handlers/members_access.py`,
+`dashboard/handlers/members_app.py`, `dashboard/handlers/members_roster.py`,
+`dashboard/handlers/member_goals.py`, `dashboard/app_bot_wake.py`,
+`dashboard/mate_welcome.py`, `website/src/app-sdk/bots.ts`,
+`website/src/pages/AppDetailBotGrants.tsx`.
+
 ## 33. Former built-in adoption
 
 A built-in app that moves to its own repository keeps working for everyone who

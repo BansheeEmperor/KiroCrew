@@ -70,7 +70,7 @@ type AppInfo = Pick<RegistryApp, '_registry' | 'provenance'> & {
   installedVersion?: string
   enabled?: boolean
   sessionApprovalConsentPending?: boolean
-  approvedGrants?: { api?: string[]; events?: string[] }
+  approvedGrants?: { api?: string[]; events?: string[]; bots?: string[] }
   linkPreviewGrant?: LinkPreviewGrantRow
   messageActionGrant?: MessageActionGrantRow
   linkOpenGrant?: LinkOpenGrantRow
@@ -117,6 +117,8 @@ interface AppPermissions {
   sessionApproval?: boolean
   memberThreads?: boolean
   workerAutoApprove?: boolean
+  /** Bot scopes, `"read"` and `"wake"`. */
+  bots?: string[]
   [key: string]: unknown
 }
 

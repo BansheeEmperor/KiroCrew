@@ -145,6 +145,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
     )
     from kiro_crew.apps.manager_records import (  # noqa: F401
         _ALWAYS_STORED_FAMILIES,
+        _BOT_SLUG_RE,
         _GRANT_AND_SCOPE_WIDENING,
         _GRANT_WIDENING,
         _SCOPE_WIDENING,
@@ -155,6 +156,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         APP_MANIFEST_FILENAME,
         APPROVED_GRANTS_FILENAME,
         INSTALLED_META_FILENAME,
+        MAX_BOT_GRANTS,
         MEMBER_THREADS_CONSENT_KEY,
         SESSION_APPROVAL_PENDING_KEY,
         STAGED_GRANT_FAMILIES,
@@ -174,6 +176,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _parse_approved_grants,
         _pending_session_approval_after_manifest_change,
         _read_approved_grants,
+        _read_bot_grants,
         _read_enabled,
         _read_installed,
         _read_schema_version,

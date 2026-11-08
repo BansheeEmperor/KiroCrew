@@ -141,6 +141,14 @@ from kiro_crew.apps.worker_auto_approve import (  # noqa: E402
 
 register_permission_grants(WORKER_AUTO_APPROVE_GRANT_FAMILIES, worker_auto_approve_grant_entries)
 
+# ``permissions.bots`` (``apps.bot_grants``): the Bot scopes an app holds.
+from kiro_crew.apps.manifest_sections import (  # noqa: E402
+    BOT_GRANT_FAMILIES,
+    bot_grant_entries,
+)
+
+register_permission_grants(BOT_GRANT_FAMILIES, bot_grant_entries)
+
 
 __all__ = [
     "EntriesFn",
