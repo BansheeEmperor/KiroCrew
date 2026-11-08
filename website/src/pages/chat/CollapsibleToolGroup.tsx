@@ -5,6 +5,7 @@ import { purposeFromToolArgs } from '../../utils/toolPurpose'
 import { deriveToolCallTitle } from '../../utils/toolCallTitle'
 import { ToolInputText } from '../../components/ToolInputText'
 import ErrorNotice from '../../components/ErrorNotice'
+import StatusNotice from '../../components/StatusNotice'
 import { ApiError } from '../../api/client'
 import { isTerminalApprovalRefusal } from '../../api/apiError'
 import { useRowDisclosure } from './rowDisclosure'
@@ -130,7 +131,8 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, reasoni
   const [submitting, setSubmitting] = useState(false)
   const [localResolved, setLocalResolved] = useState<string | null>(null)
   const [failure, setFailure] = useState<{ terminal: boolean; message: string; attempted: string } | null>(null)
-  const needsAttention = !!hasPermission && !localResolved
+  // A gone approval (terminal refusal) no longer asks for a decision.
+  const needsAttention = !!hasPermission && !localResolved && !failure?.terminal
 
   // Skip the first run: on mount the disclosure already starts from
   // `restingExpanded` (the fallback above), and writing it here would overwrite
@@ -141,12 +143,13 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, reasoni
     if (!userToggled.current) setExpanded(restingExpanded)
   }, [restingExpanded, setExpanded])
 
-  // Reset approval state when permission props change (new approval arrives)
+  // Reset approval state when permission props change (new approval arrives),
+  // including a new approval at the same count: a gone one must not hide it.
   useEffect(() => {
     setLocalResolved(null)
     setSubmitting(false)
     setFailure(null)
-  }, [hasPermission, pendingPermCount])
+  }, [hasPermission, pendingPermCount, permissionMeta?.approval_id])
 
   // Return to the resting state when tools finish running (unless user manually
   // toggled): collapsed by default, still open when the chat setting is on.
@@ -163,6 +166,8 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, reasoni
   const decisionLabel: Record<string, ReactNode> = { approved: <><CheckCircle className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.approved')}</>, trust: <><Handshake className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.trusted')}</>, rejected: <><Ban className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.rejected')}</> }
   const labelNode = localResolved
     ? (decisionLabel[localResolved] || <><CheckCircle className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.resolved')}</>)
+    : failure?.terminal
+      ? <>{i18nT('pages.chat.collapsibleToolGroup.resolved')}</>
     : needsAttention
       ? (pendingPermCount && pendingPermCount > 1 ? <><AlertTriangle className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.approvals_pending_count', { count: pendingPermCount })}</> : <><AlertTriangle className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.approval_needed')}</>)
       : isRunning
@@ -172,7 +177,7 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, reasoni
           : <><Wrench className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.tool_call', { count: count })}</>
   const labelText = localResolved
     ? (localResolved === 'approved' ? i18nT('pages.chat.collapsibleToolGroup.approved') : localResolved === 'trust' ? i18nT('pages.chat.collapsibleToolGroup.trusted') : i18nT('pages.chat.collapsibleToolGroup.rejected'))
-    : needsAttention ? i18nT('pages.chat.collapsibleToolGroup.approval_needed') : isRunning ? i18nT('pages.chat.collapsibleToolGroup.running_tools') : reasoningOnly ? i18nT('pages.chat.turnBlock.worked_through_step', { count }) : i18nT('pages.chat.collapsibleToolGroup.tool_call', { count: count })
+    : failure?.terminal ? i18nT('pages.chat.collapsibleToolGroup.resolved') : needsAttention ? i18nT('pages.chat.collapsibleToolGroup.approval_needed') : isRunning ? i18nT('pages.chat.collapsibleToolGroup.running_tools') : reasoningOnly ? i18nT('pages.chat.turnBlock.worked_through_step', { count }) : i18nT('pages.chat.collapsibleToolGroup.tool_call', { count: count })
 
   const preview = needsAttention ? sanitizeLlmOutput(extractPreview(permissionMeta)) : ''
   // Heading over the single-call preview; '' when the command is already the
@@ -305,7 +310,7 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, reasoni
           )}
         </div>
       )}
-      {needsAttention && (onApprove || onApproveBatch) && !failure?.terminal && (
+      {needsAttention && (onApprove || onApproveBatch) && (
         <div ref={buttonsRef} className="mt-1 ml-4 pl-3 flex gap-2 flex-wrap">
           <button disabled={submitting} className="px-3 py-1 rounded-md border border-border bg-transparent text-muted text-[13px] leading-5 cursor-pointer font-body hover:text-text hover:border-border-strong hover:bg-bg-hover transition-all disabled:opacity-50 disabled:cursor-not-allowed" onClick={e => { e.stopPropagation(); submitDecision('approved') }}><CheckCircle className="lucide-inline" /> {isBatch ? i18nT('pages.chat.collapsibleToolGroup.approve_all', { count: pendingPermCount }) : i18nT('pages.chat.collapsibleToolGroup.approve')}</button>
           {canTrust && !isBatch && <button disabled={submitting} className="px-3 py-1 rounded-md border border-border bg-transparent text-muted text-[13px] leading-5 cursor-pointer font-body hover:text-text hover:border-border-strong hover:bg-bg-hover transition-all disabled:opacity-50 disabled:cursor-not-allowed" onClick={e => { e.stopPropagation(); submitDecision('trust') }}><Handshake className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.trust')}</button>}
@@ -313,17 +318,17 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, reasoni
         </div>
       )}
 
-      {failure !== null && (
+      {/* A gone approval is status: nothing the user did failed. */}
+      <StatusNotice tone="info" className="mt-1 ml-4" message={failure?.terminal ? i18nT('components.approvalCard.approval_no_longer_pending') : null} />
+      {failure !== null && !failure.terminal && (
         // Hand-off on by default. The approval buttons hold no draft of their
         // own, and the main chat's composer draft is persisted per slot (ChatPage
         // saves it on slot switch) while the hand-off opens a FRESH slot.
         // No hand-off when the host passes `askAgent={false}`: ChatEmbed's
         // composer draft is unsaved local state the navigation would drop.
-        <ErrorNotice variant="inline" className="mt-1 ml-4 pl-3" askAgent={askAgent} message={failure.terminal
-          ? i18nT('components.approvalCard.approval_no_longer_pending')
-          : failure.message
-            ? i18nT('components.approvalCard.decision_not_recorded_error', { error: failure.message })
-            : i18nT('components.approvalCard.decision_failed')} />
+        <ErrorNotice variant="inline" className="mt-1 ml-4 pl-3" askAgent={askAgent} message={failure.message
+          ? i18nT('components.approvalCard.decision_not_recorded_error', { error: failure.message })
+          : i18nT('components.approvalCard.decision_failed')} />
       )}
 
       {expanded && <div className="mt-1 ml-4 pl-3 shadow-[inset_2px_0_0_0_var(--border)] forced-colors:border-l-2 flex flex-col gap-1">

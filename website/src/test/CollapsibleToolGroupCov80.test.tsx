@@ -156,11 +156,34 @@ describe('CollapsibleToolGroup approval dispatch', () => {
 
     fireEvent.click(screen.getByText(T('approve')))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(
+    // A gone approval is status, not an error (#18203).
+    expect(await screen.findByRole('status')).toHaveTextContent(
       i18nT('components.approvalCard.approval_no_longer_pending'),
     )
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.queryByText(T('approve'))).not.toBeInTheDocument()
     expect(screen.queryByText(T('reject'))).not.toBeInTheDocument()
+    // Nothing waits on it any more, so the header stops asking for a decision.
+    expect(screen.queryAllByLabelText(T('approval_needed'))).toHaveLength(0)
+    expect(header().textContent).toContain(T('resolved'))
+  })
+
+  it('asks again for a new approval that arrives at the same count after a gone one', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const onApprove = vi.fn().mockRejectedValue(new ApiError(404, 'not found'))
+    const group = (id: string) => (
+      <CollapsibleToolGroup count={1} hasPermission pendingPermCount={1} permissionMeta={{ approval_id: id }} onApprove={onApprove}>
+        <div>zzq-child</div>
+      </CollapsibleToolGroup>
+    )
+    const { rerender } = renderWithProviders(group('apr-a'))
+    fireEvent.click(screen.getByText(T('approve')))
+    await screen.findByRole('status')
+    expect(screen.queryByText(T('approve'))).not.toBeInTheDocument()
+
+    rerender(group('apr-b'))
+    expect(screen.getByText(T('approve'))).toBeInTheDocument()
+    expect(screen.getAllByLabelText(T('approval_needed')).length).toBeGreaterThan(0)
   })
 
   it('keeps an auth-required 404 retryable and shows the server refusal', async () => {

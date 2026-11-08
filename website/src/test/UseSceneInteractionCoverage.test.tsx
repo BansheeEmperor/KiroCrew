@@ -1140,6 +1140,24 @@ describe('useSceneInteraction — pending approval bar', () => {
     expect(screen.getByText(i18nT('hooks.useSceneInteraction.failed'))).toBeInTheDocument()
   })
 
+  it('shows a gone approval as status with no buttons; a redelivery under the same id gets them back (#18203)', async () => {
+    // Duck-typed 404 (api/apiError.ts): the mocked client is not ApiError.
+    apiMocks.resolveApproval.mockRejectedValue(Object.assign(new Error('not found'), { status: 404 }))
+    const view = renderScene(withApproval())
+    await clickAt(100, 100)
+    const approve = () => screen.queryByRole('button', { name: i18nT('hooks.useSceneInteraction.approve') })
+    fireEvent.click(approve()!)
+    await flush()
+    const gone = i18nT('components.approvalCard.approval_no_longer_pending')
+    expect(screen.getByText(gone)).toHaveAttribute('role', 'status')
+    expect(screen.queryByText(i18nT('hooks.useSceneInteraction.failed'))).not.toBeInTheDocument()
+    expect(approve()).not.toBeInTheDocument()
+    // Request ids recur: a new delivery of req-9 is a new request.
+    view.rerender(<Harness sources={[source({ id: 'slot-a', pendingApproval: { tool: 'execute_bash', requestId: 'req-9', instance: 'mid-2' } })]} />)
+    expect(approve()).toBeInTheDocument()
+    expect(screen.queryByText(gone)).not.toBeInTheDocument()
+  })
+
   it('omits the bar when nothing is waiting on the user', async () => {
     renderScene({ sources: [source({ id: 'slot-a' })] })
     await clickAt(100, 100)

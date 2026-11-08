@@ -770,6 +770,15 @@ custom-rules:
         happen, a save that did not persist), that state is ALSO rendered
         in-page through `ErrorNotice`; a toast as the ONLY report of it is a
         violation.
+      - A decide refused because the server no longer holds the approval
+        (`isTerminalApprovalRefusal` in `src/api/apiError.ts`: it expired, was
+        decided elsewhere, or was replaced). Nothing the user did failed and
+        nothing is left to retry, so it renders as status (`StatusNotice`, or
+        the `role="status"` line the composer bar and the scene popover's dark
+        chrome already draw), and the `role="status"` shape below does not
+        apply to it. A decide that failed while the approval may still be
+        pending (a network error, a 5xx, a 403 that asks for a sign-in) stays
+        an `ErrorNotice`.
 
       The ban is on the SURFACE, not on a class name. Because the test is
       "where does the value come from", these shapes are the same violation

@@ -385,17 +385,16 @@ describe('ActivityViewer — subagent card controls', () => {
       expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
     })
     expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent(
-      i18nT('components.approvalCard.approval_no_longer_pending'),
-    )
+    // Status, not an error: nothing the user did failed (#18203).
+    const gone = i18nT('components.approvalCard.approval_no_longer_pending')
+    expect(screen.getByText(gone).closest('[role]')).toHaveAttribute('role', 'status')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     // This card sent the refused request, so it keeps reporting it once the
     // store carries the verdict too: the one surface that owns the sentence.
     await waitFor(() => expect(store.getState().chat.subagents.p1?.approvalGone).toBe('ap-1'))
     rerender(<ActivityViewer {...baseProps} view="subagents" subagents={{ p1: store.getState().chat.subagents.p1! }} />)
-    expect(screen.getAllByRole('alert')).toHaveLength(1)
-    expect(screen.getByRole('alert')).toHaveTextContent(
-      i18nT('components.approvalCard.approval_no_longer_pending'),
-    )
+    expect(screen.getAllByText(gone)).toHaveLength(1)
+    expect(screen.getByText(gone).closest('[role]')).toHaveAttribute('role', 'status')
   })
 
   it('a terminal refusal here withdraws the composer banner copy of the same approval', async () => {
@@ -726,9 +725,10 @@ describe('ActivityViewer — spawn approval entries', () => {
       expect(screen.queryByRole('button', { name: /Approve/ })).not.toBeInTheDocument()
     })
     expect(screen.queryByRole('button', { name: /Reject/ })).not.toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent(
-      i18nT('components.approvalCard.approval_no_longer_pending'),
-    )
+    expect(screen.getByText(i18nT('components.approvalCard.approval_no_longer_pending')).closest('[role]')).toHaveAttribute('role', 'status')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    // Nothing waits on it any more, so the entry stops saying approval is needed.
+    expect(screen.queryByText('Approval Needed')).not.toBeInTheDocument()
   })
 
   it('offers only Approve / Reject and never reports a trust grant (#5400)', async () => {

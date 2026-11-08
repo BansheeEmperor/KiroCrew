@@ -341,6 +341,17 @@ describe('ProjectDetailPage approve and reject', () => {
     await waitFor(() => expect(onRefresh).toHaveBeenCalled(), { timeout: 5_000 })
   })
 
+  it('shows a gate the decide found gone as status, not an error (#18203)', async () => {
+    vi.mocked(api.approvals).mockResolvedValue(gates(1))
+    // Duck-typed 404 (api/apiError.ts): the mocked client is not ApiError.
+    vi.mocked(api.resolveApproval).mockRejectedValue(Object.assign(new Error('no pending approval'), { status: 404 }))
+    renderWithProviders(<ProjectDetailPage run={runningRun()} />)
+    await waitFor(() => expect(dag()).toHaveAttribute('data-approvals', '1'), { timeout: 5_000 })
+    fireEvent.click(screen.getByRole('button', { name: 'dag-ok-1' }))
+    expect(await screen.findByTestId('project-detail-gate-gone', undefined, { timeout: 5_000 })).toHaveAttribute('role', 'status')
+    expect(screen.queryByTestId('project-detail-action-error')).toBeNull()
+  })
+
   it('opens the rejected task in the panel so the user can see why', async () => {
     vi.mocked(api.approvals).mockResolvedValue(gates(1))
     renderWithProviders(<ProjectDetailPage run={runningRun()} />)

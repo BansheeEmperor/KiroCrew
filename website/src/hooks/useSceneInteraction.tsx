@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAppDispatch } from '../store'
 import { switchSlot } from '../store/chatSlice'
 import { api } from '../api/client'
+import { isTerminalApprovalRefusal } from '../api/apiError'
 import { sendTurn } from '../chat-core/transport/sendTurn'
 import type { AgentSource } from './useAgentSync'
 import { useImeGuard } from './useImeGuard'
@@ -12,6 +13,9 @@ import ErrorNotice from '../components/ErrorNotice'
 import { sliceCodePoints } from '../utils/codePoints'
 
 import { i18nT } from '../i18n/t'
+/** One delivery of a pending approval: a request id can recur. */
+const deliveryKey = (p: { requestId: string; instance?: string }) => `${p.requestId}\n${p.instance ?? ''}`
+
 /** Minimal agent shape for hit-testing — all scene agent types satisfy this */
 export interface SceneAgent {
   id: string; name: string; x: number; y: number; running: boolean; detail: string
@@ -252,6 +256,9 @@ export function useSceneInteraction(
   /** A send that FAILED (refused / never left) -- the state the Retry treatment is for. */
   const sendFailedHard = sendState === 'failed' && !sendUnconfirmed
   const [approvalState, setApprovalState] = useState<'idle' | 'resolving' | 'failed'>('idle')
+  // The delivery a decide found gone (request id + instance; ids recur), so a
+  // replacement keeps its buttons.
+  const [approvalGoneFor, setApprovalGoneFor] = useState<string | null>(null)
   // Which agent the composer state (draft + sendState) belongs to RIGHT NOW,
   // and a GENERATION for that binding. `sendToAgent` is deliberately
   // dependency-free, so it reads both through refs: a send outcome that lands
@@ -266,7 +273,7 @@ export function useSceneInteraction(
   useEffect(() => {
     composerTargetRef.current = threadView?.agent.id ?? null
     composerEpochRef.current += 1
-    setDraft(''); setSendState('idle'); setSendFailReason(''); setApprovalState('idle')
+    setDraft(''); setSendState('idle'); setSendFailReason(''); setApprovalState('idle'); setApprovalGoneFor(null)
   }, [threadView?.agent.id])
 
   // Draggable popover: dragPos overrides the anchored position once the user
@@ -419,8 +426,10 @@ export function useSceneInteraction(
     try {
       await api.resolveApproval(src.pendingApproval.requestId, action)
       setApprovalState('idle')
-    } catch {
-      setApprovalState('failed')
+    } catch (e) {
+      const gone = isTerminalApprovalRefusal(e)
+      if (gone) setApprovalGoneFor(deliveryKey(src.pendingApproval))
+      setApprovalState(gone ? 'idle' : 'failed')
     }
   }, [])
 
@@ -528,6 +537,11 @@ export function useSceneInteraction(
       </div>
       {(() => {
         const src = sourceFor(threadView.agent)
+        // A gone approval is status, not a failure: no red, and no button that
+        // could only re-send it.
+        if (src?.pendingApproval && deliveryKey(src.pendingApproval) === approvalGoneFor) {
+          return <div role="status" style={{ padding: '6px 8px', borderTop: '1px solid #333', color: '#aaa' }}>{i18nT('components.approvalCard.approval_no_longer_pending')}</div>
+        }
         return src?.pendingApproval ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderTop: '1px solid #333', background: '#241d10' }}>
             <span style={{ color: '#fb0', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -547,7 +561,9 @@ export function useSceneInteraction(
             >
               {i18nT('hooks.useSceneInteraction.deny')}
             </button>
-            {approvalState === 'failed' ? <span style={{ color: '#c66' }}>{i18nT('hooks.useSceneInteraction.failed')}</span> : null}
+            {/* No hand-off: the message box below may hold an unsent draft. The
+                popover's dark-safe red wins over the theme's danger token. */}
+            <ErrorNotice variant="inline" className="!text-[#f88]" message={approvalState === 'failed' ? i18nT('hooks.useSceneInteraction.failed') : null} />
           </div>
         ) : null
       })()}

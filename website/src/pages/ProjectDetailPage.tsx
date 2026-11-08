@@ -13,6 +13,8 @@ import { api } from '../api/client';
 import { AlertTriangle, Download, Hourglass, Zap } from 'lucide-react';
 import { Badge } from '../components/ui';
 import ErrorNotice from '../components/ErrorNotice';
+import StatusNotice from '../components/StatusNotice';
+import { isTerminalApprovalRefusal } from '../api/apiError';
 import { RadioChipGroup, radioChip } from '../components/RadioChipGroup';
 import Tablist from '../components/Tablist';
 
@@ -75,6 +77,12 @@ export default function ProjectDetailPage({ run, onRetry, onRefresh }: Props) {
   // to vanish: the mutations had no onError and nothing read isError, so a
   // refused decision looked like one that had not been clicked.
   const [actionError, setActionError] = useState('');
+  // A decide that found its gate gone: status, not an error.
+  const [gateGone, setGateGone] = useState(false);
+  const decideFailed = (e: unknown) => {
+    if (isTerminalApprovalRefusal(e)) setGateGone(true);
+    else setActionError(errText(e));
+  };
 
   const queryClient = useQueryClient();
   const { mutate: handleApprove } = useMutation({
@@ -82,13 +90,13 @@ export default function ProjectDetailPage({ run, onRetry, onRefresh }: Props) {
       if (!selected || !approvalMap[selected.index]) return;
       return api.resolveApproval(approvalMap[selected.index], decision);
     },
-    onMutate: () => setActionError(''),
+    onMutate: () => { setActionError(''); setGateGone(false); },
     onSuccess: (_, decision) => {
       queryClient.invalidateQueries({ queryKey: ['approvals', run.task_id] });
       onRefresh?.();
       if (decision === 'reject' && selected) setSelectedTask(selected.index);
     },
-    onError: (e) => setActionError(errText(e)),
+    onError: decideFailed,
   });
   const { mutate: dagApprove } = useMutation({
     mutationFn: async ({ index, decision }: { index: number; decision: 'approve' | 'reject' }) => {
@@ -96,13 +104,13 @@ export default function ProjectDetailPage({ run, onRetry, onRefresh }: Props) {
       if (!approvalId) return;
       return api.resolveApproval(approvalId, decision);
     },
-    onMutate: () => setActionError(''),
+    onMutate: () => { setActionError(''); setGateGone(false); },
     onSuccess: (_, { index, decision }) => {
       queryClient.invalidateQueries({ queryKey: ['approvals', run.task_id] });
       onRefresh?.();
       if (decision === 'reject') setSelectedTask(index);
     },
-    onError: (e) => setActionError(errText(e)),
+    onError: decideFailed,
   });
   const { mutateAsync: toggleApprovalMut } = useMutation({
     mutationFn: ({ index, updates }: { index: number; updates: Record<string, boolean> }) =>
@@ -265,6 +273,7 @@ export default function ProjectDetailPage({ run, onRetry, onRefresh }: Props) {
             override. A hand-off unmounts all of it. */}
         <ErrorNotice message={approvalsFailed ? errText(approvalsError) : ''} className="mx-4 mt-2 shrink-0" testId="project-detail-approvals-error" />
         <ErrorNotice message={actionError} onDismiss={() => setActionError('')} className="mx-4 mt-2 shrink-0" testId="project-detail-action-error" />
+        <StatusNotice tone="info" message={gateGone ? i18nT('components.approvalCard.approval_no_longer_pending') : null} onDismiss={() => setGateGone(false)} className="mx-4 mt-2 shrink-0" testId="project-detail-gate-gone" />
         <ErrorNotice message={exportMutation.isError ? errText(exportMutation.error) : ''} onDismiss={() => exportMutation.reset()} className="mx-4 mt-2 shrink-0" testId="project-detail-export-error" />
 
         {/* Approval banner */}

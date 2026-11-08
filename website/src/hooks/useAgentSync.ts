@@ -21,8 +21,9 @@ export interface AgentSource {
   lastMessage?: string
   /** True when the session is waiting for user input */
   waitingForInput?: boolean
-  /** Pending tool approval blocking the session, if any */
-  pendingApproval?: { tool: string; requestId: string } | null
+  /** Pending tool approval blocking the session, if any. `instance` names this
+   *  delivery: a request id can recur. */
+  pendingApproval?: { tool: string; requestId: string; instance?: string } | null
 }
 
 const MAX_AGENTS = 8
@@ -61,7 +62,7 @@ export function useAgentSync() {
     lastMessage: sl.last_message || '',
     waitingForInput: !!sl.waiting_for_input,
     pendingApproval: sl.pending_approval_info
-      ? { tool: sl.pending_approval_info.tool, requestId: sl.pending_approval_info.request_id }
+      ? { tool: sl.pending_approval_info.tool, requestId: sl.pending_approval_info.request_id, instance: sl.pending_approval_info.request_mid || sl.pending_approval_info.request_instance || '' }
       : null,
   })), [slots, defaultAgent, langGen])
 
