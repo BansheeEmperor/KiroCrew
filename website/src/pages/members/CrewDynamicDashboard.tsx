@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Lock, RotateCw, SendHorizontal } from 'lucide-react'
+import { Lock, PencilRuler, RotateCw, SendHorizontal } from 'lucide-react'
 import { api, type DashboardManifest } from '../../api/client'
 import { apiErrorCode, isNotFoundError } from '../../api/apiError'
 import { retryPolicy } from '../../api/queryClient'
@@ -22,6 +22,13 @@ import CrewDashboardBehindBand from './CrewDashboardBehindBand'
 import CrewDashboardDownload from './CrewDashboardDownload'
 import { applyPushedRead, withIslandRead, type DashboardRead } from './dashboardDownloadFile'
 import { CREW_DASHBOARD_SANDBOX } from '../../lib/crewDashboardSandbox'
+import { usePreviewFlag } from '../../hooks/usePreviewFlag'
+import { useServerPreviewFlag } from '../../hooks/usePreviewFlagServerSync'
+import { PREVIEW_DASHBOARD_EDIT_MODE } from '../../utils/previewFlags'
+import { EDIT_MESSAGE_TYPE, type ChangeRequestOutcome } from './dashboardEdit'
+
+// Edit mode is held behind its preview and loaded only when the person turns it on.
+const CrewDashboardEditLayer = lazy(() => import('./CrewDashboardEditLayer'))
 
 // The grant set lives in lib/crewDashboardSandbox.ts so the artifact viewer can
 // open a crewmate's report in the same sandbox without loading this page.
@@ -211,7 +218,9 @@ function postRefill(win: Window, html: string): boolean {
 
 /** Which page a document is: a change to any part of this is a new document. */
 function pageKey(page: Loaded): string {
-  return `${page.instanceVersion}:${page.templateId}:${page.templateVersion}`
+  // The edit bridge is part of the DOCUMENT: a read composed with it is a new document,
+  // never a refill of one composed without it, which could never gain the bridge.
+  return `${page.instanceVersion}:${page.templateId}:${page.templateVersion}${page.editBridge ? ':edit' : ''}`
 }
 
 interface Loaded {
@@ -223,6 +232,9 @@ interface Loaded {
   /** Whether this page may run script. Carried WITH the page rather than read
    *  from the latest response, so the grants always match the markup mounted. */
   scripts: boolean
+  /** Whether the gateway composed edit mode's bridge into this html (preview
+   *  `dashboard_edit_mode`), read off the html itself so it names what is mounted. */
+  editBridge: boolean
   /** The SURFACE this page belongs to: the package slug it was read for, or `''` for
    *  the crewmate's template instance.
    *
@@ -274,8 +286,11 @@ export function dashboardQueryKey(target: DashboardTarget): readonly string[] {
     : [SESSION_DASHBOARD_QUERY_PREFIX, target.slot]
 }
 
-export default function CrewDynamicDashboard({ target, displayName, avatar, onAct, onActKeep, onSend, preview = false, onPreviewGone, onPreviewLoaded, onOpenProfileTab, dashboardSlug = '', relayWheel = false }: {
+export default function CrewDynamicDashboard({ target, displayName, avatar, onAct, onActKeep, onSend, onChangeRequest, preview = false, onPreviewGone, onPreviewLoaded, onOpenProfileTab, dashboardSlug = '', relayWheel = false }: {
   target: DashboardTarget
+  /** Send the person's own chat message to this Bot (Dashboard edit mode's change
+   *  request). Resolves whether it went. Absent: the request box says there is no chat. */
+  onChangeRequest?: (text: string) => Promise<ChangeRequestOutcome>
   /** Report the frame's horizontal wheel runs to the host (see `relayWheel` in
    *  lib/widgetSrcdoc). Only a host that listens may ask: the relay cancels the
    *  browser's back swipe over the frame. The Mates side panel does. */
@@ -317,6 +332,15 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
   dashboardSlug?: string
 }) {
   const frameRef = useRef<HTMLIFrameElement | null>(null)
+  /** Dashboard edit mode: offered only with its preview on, on a Bot's live page, and
+   *  only once the GATEWAY holds it on. The gateway composes the edit bridge into the
+   *  document per read, so a read made before it accepted the toggle has none; the
+   *  read key and the document identity both carry it, so the accepted toggle fetches
+   *  a page with the bridge and mounts that document in place of the old one. */
+  const editLocal = usePreviewFlag(PREVIEW_DASHBOARD_EDIT_MODE)
+  const editComposed = useServerPreviewFlag(PREVIEW_DASHBOARD_EDIT_MODE)
+  const editPreview = editLocal && editComposed
+  const [editing, setEditing] = useState(false)
   /** A gap recovery that did not arrive. The page keeps its values; this says they
    *  are older than the record, which nothing else on screen can say: the read
    *  that would have moved them never came. */
@@ -365,7 +389,8 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
   const timingLabel =
     target.kind === 'member' ? `member:${target.slug}` : `session:${target.slot}`
   const { data, dataUpdatedAt, isLoading, isError, isFetching, error, refetch } = useQuery({
-    queryKey: [...dashboardQueryKey(target), locale, staged ? 'preview' : 'live'],
+    // 'preview' / 'live' stays LAST: the preview hand-over reads the key's tail.
+    queryKey: [...dashboardQueryKey(target), locale, ...(editComposed ? ['edit'] : []), staged ? 'preview' : 'live'],
     queryFn: async () => {
       // A live load only; a staged/preview read is a person action, not the
       // every-open path #20952 is about, so it is not timed.
@@ -763,6 +788,7 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
       // the owner agent's egress sends `false`, so an older gateway keeps the
       // behaviour it shipped with instead of going silently static.
       scripts: (data as { scripts?: boolean }).scripts !== false,
+      editBridge: data.rendered_html.includes(EDIT_MESSAGE_TYPE),
       dashboard: identity,
       stagedMs: 'staged_ms' in data && typeof data.staged_ms === 'number' ? data.staged_ms : 0,
     }
@@ -878,6 +904,15 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
   const failed = mint.failed || mint.stalled
   const runsScript = Boolean(mayRunScript && shown?.scripts)
   const grantKey = crewDashboardSandbox(runsScript)
+  // Edit needs the frame's bridge to answer: a page that runs no script, or one
+  // rendered without the bridge, would sit under a capture layer that nothing answers.
+  // Not over an older page kept on screen while a newer version waits (or failed): the
+  // gateway traces against the active version's manifest, which may bind a field elsewhere.
+  // An open edit layer stays mounted (its drafts live in it) but is paused: it takes
+  // no new picks and re-reads no lineage until the newer page is shown.
+  const retainsOlder = !!candidate && !!shown && candidate.instanceVersion !== shown.instanceVersion
+  const editable = editPreview && runsScript && Boolean(shown?.editBridge)
+  const canInspect = editable && !retainsOlder
 
   /**
    * A NEW DOCUMENT LOADS OFF SCREEN, AND THE OPEN FRAME IS REPLACED ONLY WHEN IT IS UP.
@@ -1430,12 +1465,25 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
     <div className="group relative h-full min-h-0 flex flex-col" data-testid="crew-dashboard-frame" data-preview={preview ? 'true' : undefined}>
       {lockBadge}
       {cardSendBadge}
-      {target.kind === 'member' && !preview && (
+      {target.kind === 'member' && !preview && !(editable && editing) && (
+        // Not while editing: the edit bar holds this corner, and its Done sits here.
         // The bot's live page only: a staged preview is not the page anyone keeps,
         // and a session's page is not a bot's Dashboard. Floated over the page's
         // top-right corner and shown on hover, so it takes no row of its own; a
         // device with no hover and a keyboard focus both keep it visible.
         <div className="absolute right-2 top-2 z-10 flex max-w-[80%] items-start justify-end gap-2" style={badgeRows ? { top: `${2.25 * badgeRows}rem` } : undefined}>
+          {canInspect && url && !editing && (
+            <Btn
+              onClick={() => setEditing(true)}
+              data-testid="crew-dashboard-edit"
+              // Shown at rest: every use of edit mode starts here, so it is not
+              // hidden behind a hover the way Download is.
+              className="border border-border bg-bg-elevated text-text shadow-sm"
+            >
+              <PencilRuler size={13} className="lucide-inline" aria-hidden />
+              {i18nT('pages.membersPage.dashboardEdit.edit')}
+            </Btn>
+          )}
           <CrewDashboardDownload
             name={displayName}
             ready={visibleIsCurrent}
@@ -1617,6 +1665,23 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
             {i18nT('pages.membersPage.webview_retry')}
           </Btn>
         </div>
+      )}
+      {editable && editing && url && target.kind === 'member' && !preview && (
+        <Suspense fallback={null}>
+          <CrewDashboardEditLayer
+            frameRef={frameRef}
+            frameKey={`${grantKey}-${url}`}
+            slug={target.slug}
+            member={target.member}
+            botName={displayName}
+            manifest={shown.manifest}
+            board={shown.dashboard || shown.templateId}
+            instanceVersion={shown.instanceVersion}
+            onSend={onChangeRequest}
+            onDone={() => setEditing(false)}
+            paused={retainsOlder}
+          />
+        </Suspense>
       )}
       {url ? [
         <iframe

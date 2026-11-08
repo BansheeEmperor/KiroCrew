@@ -17,6 +17,7 @@ This module holds what more than one gateway file needs to agree on:
 from __future__ import annotations
 
 import re
+from html.parser import HTMLParser
 from typing import Any, Final, Mapping
 
 #: The feature preview name under ``dashboard.feature_previews``.
@@ -34,9 +35,6 @@ MAX_BLOCKS: Final[int] = 64
 
 #: Longest field path a pick may name, in characters.
 MAX_PATH_LEN: Final[int] = 200
-
-#: A ``data-dashboard-block`` attribute in page markup, in either quote or bare.
-_BLOCK_ATTR_RE = re.compile(r"data-dashboard-block\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>=`]+))")
 
 #: One step of a field path after its root: ``.key``, ``[3]`` or ``[*]``.
 _STEP_RE = re.compile(r"\.([A-Za-z0-9_]{1,64})|\[(\d{1,4}|\*)\]")
@@ -59,13 +57,39 @@ def edit_mode_on(cfg: Any = None) -> bool:
                 cfg = KiroCrewConfig.load()
         except Exception:
             return False
-    previews = getattr(getattr(cfg, "dashboard", None), "feature_previews", None)
+    from kiro_crew import edition_locks
+
+    # Through the edition lock, like every preview reader: an LTS build reads it off.
+    previews = edition_locks.feature_previews(
+        getattr(getattr(cfg, "dashboard", None), "feature_previews", None)
+    )
     return isinstance(previews, Mapping) and previews.get(PREVIEW) is True
 
 
+class _BlockIds(HTMLParser):
+    """The ``data-dashboard-block`` values on START TAGS, in page order.
+
+    A selector in a script (``querySelector('[data-dashboard-block="x"]')``), a style
+    rule or a comment names no component: the parser reads script and style bodies as
+    text and comments as comments, so only an attribute on an element counts.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.ids: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name == BLOCK_ATTRIBUTE:
+                self.ids.append(value or "")
+
+
 def block_ids(html: str) -> list[str]:
-    """Every component id *html* names, in page order, duplicates kept."""
-    return [a or b or c for a, b, c in _BLOCK_ATTR_RE.findall(html)]
+    """Every component id *html* names on an element, in page order, duplicates kept."""
+    parser = _BlockIds()
+    parser.feed(html)
+    parser.close()
+    return parser.ids
 
 
 def block_id_refusal(html: str) -> str:

@@ -1007,6 +1007,7 @@ def read_fields(
     *,
     slot: str | None = None,
     prime_wait: float | None = None,
+    session: str | None = None,
 ) -> Any:
     """One read of *manifest*'s field values for this crewmate, as the page gets them.
 
@@ -1026,11 +1027,9 @@ def read_fields(
     # A root session's page is read by its own slot and has no publish of its own,
     # whatever crew name the caller carries.
     own_slot = slot is None
-    if slot is None:
-        slot = _dashboard_slot(member, slug)
-        session = _write_session(slug, member)
-    else:
-        session = _newest_unit(slot)
+    # *session*: the unit a caller tracing the page's own read names (the page's unit).
+    slot = _dashboard_slot(member, slug) if slot is None else slot
+    session = session or (_write_session(slug, member) if own_slot else _newest_unit(slot))
     # The reader's OWN panel record, picked by the panel read route's own rule, so the
     # page shows what that route shows and a crew sharing this slot never fills it. A
     # root session publishes no panel, so it has no owner and reads an empty one.
