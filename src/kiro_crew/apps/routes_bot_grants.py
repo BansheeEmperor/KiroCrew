@@ -11,8 +11,8 @@ import asyncio
 
 from aiohttp import web
 
-from kiro_crew.apps.bot_grants import app_bot_scopes, app_granted_bots, set_app_granted_bots
-from kiro_crew.apps.manager_records import MAX_BOT_GRANTS
+from kiro_crew.apps.bot_grant_store import MAX_BOT_GRANTS, read_approved_scopes
+from kiro_crew.apps.bot_grants import app_granted_bots, set_app_granted_bots
 from kiro_crew.sel import sel
 
 
@@ -22,14 +22,27 @@ async def _owner_denial(request: web.Request, operation: str) -> web.Response | 
     return await require_owner_dashboard_request(request, operation)
 
 
+def _not_installed(name: str) -> web.Response:
+    return web.json_response(
+        {"error": f"app {name!r} not installed", "code": "app_not_installed"}, status=404
+    )
+
+
 def _view(name: str) -> dict[str, object]:
     from kiro_crew.apps.manager import get_app_manifest
 
     manifest = get_app_manifest(name)
+    declared = list(manifest.permissions.bots) if manifest else []
+    # What the owner approved, whether or not the app is enabled right now: a disabled
+    # app's card still shows its approvals, so it does not read as "not approved".
+    try:
+        approved = read_approved_scopes(name) or []
+    except (OSError, ValueError):
+        approved = []
     return {
         "bots": list(app_granted_bots(name)),
-        "declaredScopes": list(manifest.permissions.bots) if manifest else [],
-        "scopes": sorted(app_bot_scopes(name)),
+        "declaredScopes": declared,
+        "scopes": sorted(s for s in declared if s in approved),
     }
 
 
@@ -44,12 +57,12 @@ async def handle_bot_grants(request: web.Request) -> web.Response:
         from kiro_crew.apps.manager import get_app
 
         if not await asyncio.to_thread(get_app, name):
-            return web.json_response({"error": f"app {name!r} not installed"}, status=404)
+            return _not_installed(name)
         return web.json_response(await asyncio.to_thread(_view, name))
     try:
         body = await request.json()
     except Exception:
-        return web.json_response({"error": "invalid JSON"}, status=400)
+        return web.json_response({"error": "invalid JSON", "code": "invalid_json"}, status=400)
     bots = body.get("bots") if isinstance(body, dict) else None
     if (
         not isinstance(bots, list)
@@ -57,14 +70,18 @@ async def handle_bot_grants(request: web.Request) -> web.Response:
         or not all(isinstance(b, str) for b in bots)
     ):
         return web.json_response(
-            {"error": f"bots must be a list of at most {MAX_BOT_GRANTS} Bot ids"}, status=400
+            {
+                "error": f"bots must be a list of at most {MAX_BOT_GRANTS} Bot ids",
+                "code": "invalid_bot_grants",
+            },
+            status=400,
         )
-    from kiro_crew.apps.manager_install import app_lifecycle_lock
+    from kiro_crew.apps.manager import app_lifecycle_lock
 
     async with app_lifecycle_lock(name):
         stored = await asyncio.to_thread(set_app_granted_bots, name, bots)
     if stored is None:
-        return web.json_response({"error": f"app {name!r} not installed"}, status=404)
+        return _not_installed(name)
     sel().log_api_access(
         caller=str(request.get("user", "") or "dashboard"),
         operation="apps.bot_grants.write",

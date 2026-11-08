@@ -52,7 +52,8 @@ WAKE_REF_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}\Z")
 
 def _bot_row(slug: str, name: str, agent_cfg: Any, has_goal: bool) -> dict:
     """One ``Bot``: an explicit allowlist, every free-text value masked like the roster's."""
-    from kiro_crew.dashboard.agent_admin.roster import _roster_mask
+    # The roster's redaction chokepoint, through the agents handlers' facade.
+    from kiro_crew.dashboard.handlers.agents import _roster_mask
 
     display = _roster_mask(getattr(agent_cfg, "display_name", ""))
     return {
@@ -73,7 +74,11 @@ def _resolve(cfg: KiroCrewConfig, slug: str) -> str | None:
 
 
 def _thread_key(slug: str, name: str) -> str:
-    """*name*'s DM thread slot key, or ``""`` when it has none. File IO: off the loop."""
+    """*name*'s DM thread slot key, or ``""`` when it has none. File IO: off the loop.
+
+    The binding check of ``members_roster.read_dm_thread_message_state``, which this
+    owner cannot import: members_roster loads after it and imports it.
+    """
     binding = members_mod.read_dm_binding(slug)
     if not binding or binding.get("member") != name:
         return ""
@@ -188,9 +193,14 @@ async def api_member_wake(request: web.Request) -> web.Response:
     key is refused, so no text an app writes reaches the Bot; the line it reads is
     the gateway's (``app_bot_wake.wake_prompt``).
     """
-    from kiro_crew.dashboard import app_bot_wake
+    from kiro_crew.dashboard import app_bot_wake, create_rate_limit
 
+    retry_after = {"Retry-After": str(int(create_rate_limit.WINDOW_SECS))}
     slug = request.match_info.get("slug", "")
+    if not request.get("app", ""):
+        # A dashboard session, the owner's included, never wakes a Bot here: it
+        # talks to the Bot in its thread. Refused like every gated write.
+        return _bad("app_token_required", "only an app token may wake a Bot here", status=403)
     gate = await _app_bot_gate(request, BOT_SCOPE_WAKE, "members.wake", slug)
     if isinstance(gate, web.Response):
         return gate
@@ -217,7 +227,16 @@ async def api_member_wake(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "too many wakes for this Bot; try again later", "code": "rate_limited"},
             status=429,
-            headers={"Retry-After": str(app_bot_wake.WAKE_WINDOW_SECS)},
+            headers=retry_after,
+        )
+    if outcome == app_bot_wake.QUEUE_FULL:
+        return web.json_response(
+            {
+                "error": "this Bot already holds the most wakes it keeps from this app",
+                "code": "wake_queue_full",
+            },
+            status=429,
+            headers=retry_after,
         )
     if outcome == app_bot_wake.NO_BOT:
         return _not_found()

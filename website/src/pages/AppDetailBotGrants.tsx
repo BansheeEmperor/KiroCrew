@@ -8,11 +8,12 @@
  * any other caller, the app's own token included.
  */
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
 import type { AppBotGrants } from '../api/client/apps'
 import { membersRosterQuery } from '../api/membersQuery'
-import { Btn, Card, CardTitle } from '../components/ui'
+import { Btn, Card, CardTitle, Checkbox } from '../components/ui'
 import ErrorNotice from '../components/ErrorNotice'
 import { i18nT } from '../i18n/t'
 import { compareText } from '../i18n/format'
@@ -60,6 +61,8 @@ export default function AppDetailBotGrants({ appName, declared }: { appName: str
   const current = ticked ?? grants.data?.bots ?? []
   const approved = grants.data?.scopes ?? []
   const bots = [...(roster.data ?? [])].sort((a, b) => compareText(a.display_name || a.name, b.display_name || b.name))
+  // With no Bot to tick, the card points at creating one instead of a Save that can never apply.
+  const noBots = Boolean(roster.data) && bots.length === 0
   const toggle = (slug: string) => {
     setSaved(false)
     setTicked(current.includes(slug) ? current.filter(s => s !== slug) : [...current, slug])
@@ -90,26 +93,40 @@ export default function AppDetailBotGrants({ appName, declared }: { appName: str
           </li>
         ))}
       </ul>
-      <div className="mt-3 text-[12px] text-muted">{i18nT('pages.appDetailPage.bots_pick_hint')}</div>
-      {roster.data && bots.length === 0 && <div className="mt-2 text-[13px] text-muted">{i18nT('pages.appDetailPage.bots_none')}</div>}
+      {noBots ? (
+        <div className="mt-3 text-[13px] text-muted">
+          {i18nT('pages.appDetailPage.bots_none')}{' '}
+          <Link to="/members?create=1" className="text-accent hover:underline">{i18nT('pages.membersPage.add_member')}</Link>
+        </div>
+      ) : (
+        <div className="mt-3 text-[12px] text-muted">{i18nT('pages.appDetailPage.bots_pick_hint')}</div>
+      )}
       <div className="mt-2 grid gap-1">
         {bots.map(bot => {
           const id = `bot-grant-${appName}-${bot.slug}`
           return (
             <label key={bot.slug} htmlFor={id} className="flex items-center gap-2 text-[13px] text-text cursor-pointer select-none">
-              <input id={id} type="checkbox" className="rounded" aria-label={bot.display_name || bot.name} checked={current.includes(bot.slug)} onChange={() => toggle(bot.slug)} disabled={!grants.data || saving} />
+              <Checkbox id={id} aria-label={bot.display_name || bot.name} checked={current.includes(bot.slug)} onChange={() => toggle(bot.slug)} disabled={!grants.data || saving} />
               <span className="truncate">{bot.display_name || bot.name}</span>
             </label>
           )
         })}
       </div>
       {(error || grants.error || roster.error) && (
-        <ErrorNotice message={error || String((grants.error ?? roster.error)?.message ?? '')} variant="inline" />
+        ticked === null ? (
+          <ErrorNotice message={error || String((grants.error ?? roster.error)?.message ?? '')} variant="inline" askAgent />
+        ) : (
+          // No hand-off: the unsaved ticks are local state that the hand-off's
+          // navigation to chat would discard.
+          <ErrorNotice message={error || String((grants.error ?? roster.error)?.message ?? '')} variant="inline" />
+        )
       )}
-      <div className="mt-3 flex items-center gap-2">
-        <Btn onClick={save} disabled={!grants.data || saving || ticked === null}>{i18nT('pages.appDetailPage.bots_save')}</Btn>
-        {saved && <span className="text-[12px] text-ok-text" role="status">{i18nT('pages.appDetailPage.bots_saved')}</span>}
-      </div>
+      {!noBots && (
+        <div className="mt-3 flex items-center gap-2">
+          <Btn onClick={save} disabled={!grants.data || saving || ticked === null}>{i18nT('pages.appDetailPage.bots_save')}</Btn>
+          {saved && <span className="text-[12px] text-ok-text" role="status">{i18nT('pages.appDetailPage.bots_saved')}</span>}
+        </div>
+      )}
     </Card>
   )
 }

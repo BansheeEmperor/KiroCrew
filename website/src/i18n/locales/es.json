@@ -11850,7 +11850,7 @@
       "bots_title": "Bots a los que llega esta app",
       "bots_scope_read": "Ver los Bots que marques: nombre, descripción, ocupado o libre, objetivos y progreso. Nunca sus chats, resúmenes ni reglas.",
       "bots_scope_wake": "Despertar a un Bot que marques con un aviso fijo que nombra esta app. La app no puede escribir lo que lee el Bot.",
-      "bots_pick_hint": "La app solo llega a los Bots que marques aquí. Desmarca uno para quitárselo.",
+      "bots_pick_hint": "La app solo llega a los Bots que marques aquí.",
       "bots_none": "Todavía no tienes Bots.",
       "bots_save": "Guardar acceso a Bot",
       "bots_saved": "Guardado.",

@@ -22,6 +22,7 @@ from typing import Iterator
 
 from kiro_crew.apps import credential_masks
 from kiro_crew.apps.admission import app_admission_denied
+from kiro_crew.apps.bot_grant_store import restore_approved_scopes, snapshot_approved_scopes
 from kiro_crew.apps.execution import repository_bound_grant_denied
 from kiro_crew.apps.manager_records import (
     APP_MANIFEST_FILENAME,
@@ -452,7 +453,7 @@ def install_app(
     )
     # Installing is the consent moment for everything the manifest declares.
     # Written before the record, so no record ever sits beside a missing set.
-    _write_approved_grants(name, _declared_grant_entries(grant_source(manifest)))
+    _write_approved_grants(name, _declared_grant_entries(grant_source(manifest)), consent=True)
     _write_installed(name, meta)
 
     # Create data directory
@@ -757,6 +758,8 @@ def update_app(
         update_marker = _UpdateMarker.hold(name)
     except OSError as exc:
         return AppResult(ok=False, name=name, error=f"failed to update app files: {exc}")
+    # The approved Bot scopes live outside the tree, so a rollback restores them by hand.
+    prior_bot_scopes = snapshot_approved_scopes(name)
     with _tree_swap(name), update_marker:
         try:
             # The swap below takes the approved-set file with the old tree. A record
@@ -821,6 +824,7 @@ def update_app(
                     _remove_any_shape(restored_secret)
                     shutil.move(str(tmp_secret), str(restored_secret))
                 _write_installed(name, existing)
+                restore_approved_scopes(name, prior_bot_scopes)
             except (OSError, shutil.Error, ValueError) as rollback_exc:
                 rollback_error = f"; rollback failed: {rollback_exc}"
                 logger.error("Failed to restore app %s after update error", name, exc_info=True)

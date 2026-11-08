@@ -21,13 +21,19 @@ import threading
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Sequence
 
 from kiro_crew.apps import credential_masks
+from kiro_crew.apps.bot_grant_store import (
+    read_approved_scopes,
+    remove_approved_scopes,
+    write_approved_scopes,
+)
 from kiro_crew.apps.host_exec_grants import revoke_host_exec
 from kiro_crew.apps.manifest import AppManifest, Permissions
+from kiro_crew.apps.manifest_sections import BOT_GRANT_FAMILY
 from kiro_crew.apps.point_grants import point_grant_families
 from kiro_crew.apps.worker_auto_approve import WORKER_AUTO_APPROVE_GRANT_FAMILIES
 from kiro_crew.apps.worker_auto_approve import revoke_app as revoke_worker_auto_approve
@@ -147,23 +153,6 @@ def _read_schema_version(data: dict[str, Any]) -> int:
         return 1
 
 
-#: A member slug, as ``members_parts.member_space`` validates it.
-_BOT_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?\Z")
-#: Most Bots one app's ticked list may name.
-MAX_BOT_GRANTS = 200
-
-
-def _read_bot_grants(value: Any) -> list[str]:
-    """``botGrants`` as stored: valid slugs, each once, capped. Anything else is none."""
-    if not isinstance(value, list):
-        return []
-    out: list[str] = []
-    for entry in value:
-        if isinstance(entry, str) and _BOT_SLUG_RE.match(entry) and entry not in out:
-            out.append(entry)
-    return out[:MAX_BOT_GRANTS]
-
-
 @dataclass
 class InstalledApp:
     """Metadata persisted in ``installed.json`` for each installed app.
@@ -240,10 +229,6 @@ class InstalledApp:
     # it (an install from before the set was stored) approves what its
     # manifest declares.
     approvedGrantsStored: bool = False  # noqa: N815
-    # The Bots (member slugs) the owner ticked for this app in its settings
-    # (``apps.bot_grants``). Only the owner's ``PUT /api/apps/{name}/bot-grants``
-    # writes it; an update keeps it, a reinstall starts empty.
-    botGrants: list[str] = field(default_factory=list)  # noqa: N815
 
     def validate_fields(self) -> list[str]:
         """Validate classification field values. Returns error list (empty = valid)."""
@@ -283,7 +268,6 @@ class InstalledApp:
             sessionApprovalConsentPending=bool(data.get("sessionApprovalConsentPending", False)),
             memberThreadsConsented=data.get(MEMBER_THREADS_CONSENT_KEY) is True,
             approvedGrantsStored=data.get("approvedGrantsStored") is True,
-            botGrants=_read_bot_grants(data.get("botGrants")),
         )
         # Migrate old "managed" field to new classification fields
         if inst.schemaVersion < 2 and "origin" not in data:
@@ -641,9 +625,16 @@ def _read_approved_grants(name: str) -> dict[str, list[str]] | None:
         logger.warning("Failed to read %s: %s", path, exc)
         return {family: [] for family in STAGED_GRANT_FAMILIES}
     try:
-        return _parse_approved_grants(json.loads(text))
+        grants = _parse_approved_grants(json.loads(text))
     except json.JSONDecodeError:
         return {family: [] for family in STAGED_GRANT_FAMILIES}
+    # The ``bots`` family is read from the gateway-only record the Bot gate reads,
+    # so an approval, an update and the app row all see that value.
+    try:
+        grants[BOT_GRANT_FAMILY] = read_approved_scopes(name) or []
+    except (OSError, ValueError):
+        grants[BOT_GRANT_FAMILY] = []
+    return grants
 
 
 def _effective_approved_grants(name: str, meta: InstalledApp | None) -> dict[str, list[str]] | None:
@@ -660,17 +651,26 @@ def _effective_approved_grants(name: str, meta: InstalledApp | None) -> dict[str
     return grants
 
 
-def _write_approved_grants(name: str, grants: dict[str, list[str]] | None) -> None:
+def _write_approved_grants(
+    name: str, grants: dict[str, list[str]] | None, *, consent: bool = False
+) -> None:
     """Atomically store *name*'s approved set; ``None`` removes the file.
 
     Only the grant-owning paths call this: install, update, registration and
     an owner approval. Every other record write leaves the set alone because it
     never touches this file.
+
+    The ``bots`` family is also stored in the gateway-only record the Bot gate reads
+    (``bot_grant_store.write_approved_scopes``). *consent* is True only at a consent moment (install, a first
+    registration, the owner's approval); any other write can only keep or drop a Bot
+    scope already recorded there.
     """
     path = _approved_grants_path(name)
     if grants is None:
+        remove_approved_scopes(name)
         path.unlink(missing_ok=True)
         return
+    write_approved_scopes(name, grants.get(BOT_GRANT_FAMILY, ()), widen=consent)
     body = {
         family: list(grants.get(family, ()))
         for family in STAGED_GRANT_FAMILIES

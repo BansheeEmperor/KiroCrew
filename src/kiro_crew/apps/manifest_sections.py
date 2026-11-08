@@ -554,8 +554,7 @@ def _granted_list(value: Any) -> list[str]:
     return [str(v) for v in value if v]
 
 
-#: The entries ``permissions.bots`` may hold. Mirrored by ``BOT_SCOPES`` in
-#: ``apps.bot_grants``, which the enforcement points read.
+#: The entries ``permissions.bots`` may hold; ``apps.bot_grants`` grants only these.
 BOT_SCOPE_NAMES = ("read", "wake")
 
 

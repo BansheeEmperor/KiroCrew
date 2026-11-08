@@ -58,6 +58,7 @@ import { messageActionGrantLabel } from '../messageActions/messageActionRegistry
 import AppDetailAdoptionNotice from './AppDetailAdoptionNotice'
 import AppDetailLinks from './AppDetailLinks'
 import AppDetailPageLocalOnlyNotice from './AppDetailPageLocalOnlyNotice'
+import AppDetailPageMcpServers from './AppDetailPageMcpServers'
 import { openLocalSourceSwitch } from './appDetailPageLocalSwitch'
 import AppDetailBotGrants, { StagedBotScopes, stagedBotScopes } from './AppDetailBotGrants'
 import { selectionActionGrantLabel } from '../selectionActions/selectionActionRegistry'
@@ -1830,28 +1831,7 @@ export default function AppDetailPage() {
 
           {app.installed && <AppDetailBotGrants appName={app.name} declared={app.manifest?.permissions?.bots} />}
 
-          {/* MCP Servers */}
-          {app.manifest?.mcpServers && Object.keys(app.manifest.mcpServers).length > 0 && (
-            <Card>
-              <CardTitle>{i18nT('pages.appDetailPage.mcp_servers')}</CardTitle>
-              <div className="grid gap-2 mt-2 text-[13px]">
-                {Object.entries(app.manifest.mcpServers).map(([sName, sConfig]) => (
-                  <div key={sName} className="bg-bg-elevated border border-border rounded-md px-2.5 py-2">
-                    <div className="font-mono font-medium text-text text-[12px]">{sName}</div>
-                    {sConfig.url && <div className="text-muted text-[11px] mt-0.5">{sConfig.url}</div>}
-                    {sConfig.command && <div className="text-muted text-[11px] mt-0.5">{sConfig.command}</div>}
-                    {(sConfig.autoApprove || []).length > 0 && (
-                      <div className="flex flex-wrap gap-1 mt-1.5">
-                        {(sConfig.autoApprove || []).map((t: string) => (
-                          <span key={t} className="bg-ok-subtle border border-ok/20 px-1 py-0 rounded text-[10px] text-ok-text">{t}</span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </Card>
-          )}
+          <AppDetailPageMcpServers servers={app.manifest?.mcpServers} />
 
           {/* Tags */}
           {(app.tags || []).length > 0 && (

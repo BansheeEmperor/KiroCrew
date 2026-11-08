@@ -6,6 +6,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const api = vi.hoisted(() => ({
@@ -19,7 +20,7 @@ import AppDetailBotGrants from './AppDetailBotGrants'
 
 function wrap(children: ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  return <MemoryRouter><QueryClientProvider client={client}>{children}</QueryClientProvider></MemoryRouter>
 }
 
 beforeEach(() => {
@@ -49,8 +50,17 @@ describe('AppDetailBotGrants', () => {
     expect(screen.getAllByText(/not approved/)).toHaveLength(1)
 
     fireEvent.click(reviewer)
-    fireEvent.click(screen.getByRole('button', { name: 'Save Bot access' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save bot access' }))
     await waitFor(() => expect(api.setAppBotGrants).toHaveBeenCalledWith('notes', ['writer', 'code-reviewer']))
     expect(await screen.findByRole('status')).toHaveTextContent('Saved.')
+  })
+
+  it('with no Bots, links to New bot and shows no Save', async () => {
+    api.members.mockResolvedValue({ members: [] })
+    api.getAppBotGrants.mockResolvedValue({ bots: [], declaredScopes: ['read'], scopes: ['read'] })
+    render(wrap(<AppDetailBotGrants appName="notes" declared={['read']} />))
+    expect(await screen.findByText('You have no bots yet.')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'New bot' })).toHaveAttribute('href', '/members?create=1')
+    expect(screen.queryByRole('button', { name: 'Save bot access' })).toBeNull()
   })
 })

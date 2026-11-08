@@ -312,17 +312,17 @@ _sys.modules[__name__].__class__ = _facade_mirror.MirroredModule
 __all__ = sorted(n for n in set(globals()) | set(_EXPORTS) if not n.startswith("_"))
 
 if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and IDEs
+    from kiro_crew.apps.bot_grant_store import (  # noqa: F401
+        MAX_BOT_GRANTS,
+        read_approved_scopes,
+    )
     from kiro_crew.apps.bot_grants import (  # noqa: F401
-        app_bot_scopes,
         app_granted_bots,
         set_app_granted_bots,
     )
     from kiro_crew.apps.bridges import (  # noqa: F401
         _prune_stale_app_resources,
         _registration_source,
-    )
-    from kiro_crew.apps.manager_records import (  # noqa: F401
-        MAX_BOT_GRANTS,
     )
     from kiro_crew.apps.point_grants import (  # noqa: F401
         point_grant_families,
@@ -342,6 +342,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _touch_served_blob,
     )
     from kiro_crew.apps.routes_bot_grants import (  # noqa: F401
+        _not_installed,
         _owner_denial,
         _view,
     )

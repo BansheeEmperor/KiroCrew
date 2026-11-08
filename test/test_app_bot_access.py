@@ -18,8 +18,9 @@ from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from chat_test_helpers import _make_state
 
+from kiro_crew import member_records
 from kiro_crew import members as members_mod
-from kiro_crew.apps import bot_grants
+from kiro_crew.apps import bot_grant_store, bot_grants, manager_records
 from kiro_crew.apps.manager_records import (
     InstalledApp,
     _approved_grants_after_manifest_change,
@@ -27,9 +28,10 @@ from kiro_crew.apps.manager_records import (
 from kiro_crew.apps.manifest_sections import Permissions
 from kiro_crew.apps.point_grants import grant_source
 from kiro_crew.config.loader import KiroCrewAgentConfig
-from kiro_crew.dashboard import app_bot_wake
+from kiro_crew.dashboard import app_bot_wake, create_rate_limit, mate_thread_wakes
 from kiro_crew.dashboard.handlers import member_goals as goals_handlers
 from kiro_crew.dashboard.handlers import members as m
+from kiro_crew.testing.wait import await_until
 
 APP = "notes-app"
 CREW = "code-reviewer"
@@ -276,7 +278,7 @@ async def test_wake_past_the_limit_is_429(tmp_path, grants):
     with patch.object(app_bot_wake, "request_wake", _limited):
         resp = await m.api_member_wake(req)
     assert resp.status == 429
-    assert resp.headers["Retry-After"] == str(app_bot_wake.WAKE_WINDOW_SECS)
+    assert resp.headers["Retry-After"] == str(int(create_rate_limit.WINDOW_SECS))
 
 
 @pytest.mark.asyncio
@@ -290,8 +292,8 @@ async def test_a_dashboard_user_cannot_use_the_wake_route(tmp_path, grants):
         app_claim="",
         user=OWNER,
     )
-    status, _ = await _call(m.api_member_wake, req)
-    assert status == 404
+    status, body = await _call(m.api_member_wake, req)
+    assert (status, body["code"]) == (403, "app_token_required")
 
 
 class _Slot:
@@ -320,7 +322,8 @@ def wake_world(monkeypatch):
     slot = _Slot(key)
     state = _State(slot)
     dispatched: list[dict] = []
-    monkeypatch.setattr(app_bot_wake, "_thread", lambda _slug: (CREW, key))
+    monkeypatch.setattr(m, "_resolve", lambda _cfg, _slug: CREW)
+    monkeypatch.setattr(m, "_thread_key", lambda _slug, _name: key)
 
     async def _loaded(_state, _key):
         return ""
@@ -335,7 +338,18 @@ def wake_world(monkeypatch):
     monkeypatch.setattr("kiro_crew.dashboard.mate_welcome.dispatch_hidden_turn", _dispatch)
     clock = {"now": 1000.0}
     monkeypatch.setattr(app_bot_wake, "_now", lambda: clock["now"])
-    return state, slot, dispatched, clock
+    create_rate_limit.reset_for_tests()
+    # No upgrade notice owed: the turn-end tail would otherwise read the binding from disk.
+    mate_thread_wakes._notice_checked(state).add(key)
+    yield state, slot, dispatched, clock
+    create_rate_limit.reset_for_tests()
+
+
+async def _flushed(state, slot, what):
+    """Wait for *slot*'s wake flush, the one ``mate_thread_wakes`` runs."""
+    task = mate_thread_wakes._tasks(state).get(slot.key)
+    if task is not None:
+        await await_until(task, what=what)
 
 
 @pytest.mark.asyncio
@@ -343,6 +357,7 @@ async def test_an_idle_bot_gets_the_gateways_line_as_an_app_turn(wake_world):
     state, _slot, dispatched, _clock = wake_world
     outcome = await app_bot_wake.request_wake(state, APP, SLUG, "msg-42")
     assert outcome == app_bot_wake.STARTED
+    await _flushed(state, _slot, "the app wake flush")
     assert len(dispatched) == 1
     sent = dispatched[0]
     assert sent["actor"] == "app" and sent["human_seen"] is False
@@ -351,41 +366,87 @@ async def test_an_idle_bot_gets_the_gateways_line_as_an_app_turn(wake_world):
     assert "#msg-42" in sent["prompt"]
 
 
+@pytest.mark.parametrize("busy", ["running", "queue"])
 @pytest.mark.asyncio
-async def test_a_busy_bot_gets_the_wake_when_its_turn_ends(wake_world):
+async def test_a_busy_bot_gets_its_wakes_in_one_turn_at_its_next_turn_end(wake_world, busy):
     state, slot, dispatched, _clock = wake_world
-    slot.running = True
-    loop = asyncio.get_running_loop()
-    slot.task = loop.create_future()
+    if busy == "running":
+        slot.running = True
+    else:
+        slot._queue = ["held prompt"]
     assert await app_bot_wake.request_wake(state, APP, SLUG, "a") == app_bot_wake.QUEUED
     assert await app_bot_wake.request_wake(state, APP, SLUG, "b") == app_bot_wake.QUEUED
+    await _flushed(state, slot, "the flush to find the thread busy")
     assert dispatched == []
+    # The thread's turn ends: the turn-end tail every top-level turn runs delivers it.
     slot.running = False
-    slot.task.set_result(None)
-    flush = app_bot_wake._tasks(state)[slot.key]
-    await asyncio.wait_for(flush, timeout=5)
+    slot._queue = []
+    mate_thread_wakes.note_turn_end(state, slot, "done")
+    await _flushed(state, slot, "the turn-end flush")
     assert [d["prompt"] for d in dispatched] == [app_bot_wake.wake_prompt({APP: ["a", "b"]})]
+    assert dispatched[0]["actor"] == "app"
+    assert mate_thread_wakes.app_wakes(state) == {}
 
 
 @pytest.mark.asyncio
-async def test_wakes_past_the_limit_are_refused_until_the_window_passes(wake_world):
-    state, _slot, dispatched, clock = wake_world
-    for i in range(app_bot_wake.WAKE_LIMIT):
-        assert await app_bot_wake.request_wake(state, APP, SLUG, f"r{i}") == app_bot_wake.STARTED
+async def test_a_turn_end_that_runs_before_the_turn_releases_the_slot_still_delivers(wake_world):
+    state, slot, dispatched, _clock = wake_world
+    slot.running = True
+    slot.task = asyncio.get_running_loop().create_future()
+    assert await app_bot_wake.request_wake(state, APP, SLUG, "r1") == app_bot_wake.QUEUED
+    # The turn-end tail runs while the turn still holds the slot.
+    mate_thread_wakes.note_turn_end(state, slot, "done")
+    flush = mate_thread_wakes._tasks(state)[slot.key]
+    await asyncio.sleep(0)  # flake-ok: lets the flush reach its wait; the result is asserted below
+    assert dispatched == [] and not flush.done()
+    # The turn releases the slot: the waiting flush delivers.
+    slot.running = False
+    slot.task.set_result(None)
+    await await_until(flush, what="the flush waiting on the turn")
+    assert [d["prompt"] for d in dispatched] == [app_bot_wake.wake_prompt({APP: ["r1"]})]
+
+
+@pytest.mark.asyncio
+async def test_a_busy_bots_full_ref_queue_refuses_new_refs_instead_of_dropping_old(
+    wake_world, monkeypatch
+):
+    state, slot, dispatched, _clock = wake_world
+    monkeypatch.setitem(create_rate_limit._BUDGETS, create_rate_limit.APP_BOT_WAKE, 100)
+    monkeypatch.setattr(mate_thread_wakes, "schedule_flush", lambda *_a: None)
+    slot.running = True
+    for i in range(app_bot_wake.MAX_PENDING_REFS):
+        assert await app_bot_wake.request_wake(state, APP, SLUG, f"r{i}") == app_bot_wake.QUEUED
+    assert await app_bot_wake.request_wake(state, APP, SLUG, "over") == app_bot_wake.QUEUE_FULL
+    # A ref already waiting is not new, so it is still taken.
+    assert await app_bot_wake.request_wake(state, APP, SLUG, "r0") == app_bot_wake.QUEUED
+    held = mate_thread_wakes.app_wakes(state)[slot.key][APP]
+    assert held == [f"r{i}" for i in range(app_bot_wake.MAX_PENDING_REFS)]
+    assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_wakes_past_the_limit_are_refused_until_the_window_passes(wake_world, monkeypatch):
+    state, _slot, _dispatched, clock = wake_world
+    # The limit is the budget row; delivery is the flush's, pinned above.
+    monkeypatch.setattr(mate_thread_wakes, "schedule_flush", lambda *_a: None)
+    limit = create_rate_limit.MAX_APP_BOT_WAKES_PER_WINDOW
+    for i in range(limit):
+        assert await app_bot_wake.request_wake(state, APP, SLUG, f"r{i % 5}") != (
+            app_bot_wake.RATE_LIMITED
+        )
     assert await app_bot_wake.request_wake(state, APP, SLUG, "over") == app_bot_wake.RATE_LIMITED
     # The limit is per app: another app still gets through.
     assert await app_bot_wake.request_wake(state, "other-app", SLUG, "x") == app_bot_wake.STARTED
-    clock["now"] += app_bot_wake.WAKE_WINDOW_SECS
-    assert await app_bot_wake.request_wake(state, APP, SLUG, "later") == app_bot_wake.STARTED
-    assert len(dispatched) == app_bot_wake.WAKE_LIMIT + 2
+    clock["now"] += create_rate_limit.WINDOW_SECS + 1
+    assert await app_bot_wake.request_wake(state, APP, SLUG, "r0") == app_bot_wake.STARTED
 
 
 @pytest.mark.asyncio
 async def test_a_bot_without_an_open_thread_cannot_be_woken(wake_world, monkeypatch):
     state, _slot, dispatched, _clock = wake_world
-    monkeypatch.setattr(app_bot_wake, "_thread", lambda _slug: ("", ""))
+    monkeypatch.setattr(m, "_thread_key", lambda _slug, _name: "")
     assert await app_bot_wake.request_wake(state, APP, SLUG, "r") == app_bot_wake.NO_THREAD
-    monkeypatch.setattr(app_bot_wake, "_thread", lambda _slug: None)
+    monkeypatch.setattr(m, "_resolve", lambda _cfg, _slug: None)
     assert await app_bot_wake.request_wake(state, APP, SLUG, "r") == app_bot_wake.NO_BOT
     assert dispatched == []
 
@@ -439,10 +500,87 @@ async def test_the_owner_ticks_bots_for_an_app(tmp_path, monkeypatch):
     assert stored == [[SLUG]]
 
 
-def test_the_record_keeps_only_valid_bot_slugs():
-    meta = InstalledApp.from_dict({"name": APP, "botGrants": [SLUG, "../etc", SLUG, 7, "Bad"]})
-    assert meta.botGrants == [SLUG]
-    assert InstalledApp.from_dict({"name": APP, "botGrants": "code-reviewer"}).botGrants == []
+def _install(installed_at="2026-11-08T00:00:00Z"):
+    """A real install record for APP; returns its ``installed.json`` path."""
+    manager_records.app_dir(APP).mkdir(parents=True, exist_ok=True)
+    manager_records._write_installed(
+        APP, InstalledApp(name=APP, version="1.0.0", enabled=True, installedAt=installed_at)
+    )
+    return manager_records.app_dir(APP) / manager_records.INSTALLED_META_FILENAME
+
+
+def _set_fields(record_path, **fields):
+    """Set *fields* in a JSON record under the app's directory."""
+    data = json.loads(record_path.read_text(encoding="utf-8"))
+    data.update(fields)
+    record_path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_the_owners_ticks_live_outside_the_apps_tree():
+    record = _install()
+    assert bot_grants.set_app_granted_bots(APP, [SLUG, "../etc", SLUG, "Bad"]) == [SLUG]
+    assert bot_grants.app_granted_bots(APP) == (SLUG,)
+    stored = bot_grant_store.grants_path(APP)
+    assert stored.parent.parent.name == member_records.MEMBER_RECORDS_LEAF
+    assert manager_records.apps_dir().resolve() not in stored.parents
+    assert "botGrants" not in json.loads(record.read_text(encoding="utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_an_app_that_edits_installed_json_reaches_no_unticked_bot(tmp_path, monkeypatch):
+    record = _install()
+    bot_grants.set_app_granted_bots(APP, [SLUG])
+    # A `botGrants` key naming the other Bot in the install record is not read.
+    _set_fields(record, botGrants=[SLUG, OTHER])
+    assert bot_grants.app_granted_bots(APP) == (SLUG,)
+    monkeypatch.setattr(bot_grants, "app_bot_scopes", lambda _a: frozenset({"read"}))
+    req = _request(tmp_path, "GET", f"/api/members/{OTHER}/goals", {"slug": OTHER})
+    status, body = await _call(goals_handlers.api_member_goals_get, req)
+    assert (status, body["code"]) == (404, "not_found")
+
+
+@pytest.mark.asyncio
+async def test_an_app_that_writes_wake_into_approved_grants_cannot_wake(tmp_path, monkeypatch):
+    _install()
+    bot_grants.set_app_granted_bots(APP, [SLUG])
+    manifest = SimpleNamespace(permissions=SimpleNamespace(bots=["read", "wake"]))
+    monkeypatch.setattr("kiro_crew.apps.manager.get_app_manifest", lambda _n: manifest)
+    monkeypatch.setattr("kiro_crew.apps.manager.is_app_enabled", lambda _n: True)
+    # Installed with only `read` approved by the owner.
+    manager_records._write_approved_grants(APP, {"bots": ["read"]}, consent=True)
+    # `wake` in `approved-grants.json` is not what the Bot gate reads.
+    grants_file = manager_records._approved_grants_path(APP)
+    _set_fields(grants_file, bots=["read", "wake"])
+    assert bot_grants.app_bot_scopes(APP) == frozenset({"read"})
+    assert manager_records._read_approved_grants(APP)["bots"] == ["read"]
+    req = _json_request(
+        tmp_path, f"/api/members/{SLUG}/wake", {"slug": SLUG}, {"ref": "r1"}, app_claim=APP
+    )
+    with patch.object(app_bot_wake, "request_wake", side_effect=AssertionError("woke")):
+        status, body = await _call(m.api_member_wake, req)
+    assert (status, body["code"]) == (404, "not_found")
+    # An update or rollback that carries that set through adds nothing either.
+    manager_records._write_approved_grants(APP, {"bots": ["read", "wake"]})
+    assert bot_grants.app_bot_scopes(APP) == frozenset({"read"})
+    # Only the owner's approval adds a scope.
+    manager_records._write_approved_grants(APP, {"bots": ["read", "wake"]}, consent=True)
+    assert bot_grants.app_bot_scopes(APP) == frozenset({"read", "wake"})
+
+
+def test_a_list_left_in_an_old_install_record_is_cleared():
+    # No owner write in the gateway-only record: the old key is dropped and the
+    # owner ticks again.
+    _set_fields(_install(), botGrants=[SLUG])
+    assert bot_grants.app_granted_bots(APP) == ()
+
+
+def test_a_reinstall_reaches_no_bot_until_the_owner_ticks_again():
+    _install("2026-11-08T00:00:00Z")
+    bot_grants.set_app_granted_bots(APP, [SLUG])
+    _install("2026-11-09T00:00:00Z")
+    assert bot_grants.app_granted_bots(APP) == ()
+    bot_grant_store.remove_granted_bots(APP)
+    assert not bot_grant_store.grants_path(APP).exists()
 
 
 # ── the manifest scopes ──

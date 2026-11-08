@@ -11850,7 +11850,7 @@
       "bots_title": "Bot che questa app può raggiungere",
       "bots_scope_read": "Vedere i Bot che spunti: nome, descrizione, occupato o libero, obiettivi e progressi. Mai le loro chat, i briefing o le regole.",
       "bots_scope_wake": "Svegliare un Bot che spunti con un avviso fisso che nomina questa app. L’app non può scrivere ciò che il Bot legge.",
-      "bots_pick_hint": "L’app raggiunge solo i Bot che spunti qui. Togli la spunta per revocarne uno.",
+      "bots_pick_hint": "L’app raggiunge solo i Bot che spunti qui.",
       "bots_none": "Non hai ancora nessun Bot.",
       "bots_save": "Salva accesso ai Bot",
       "bots_saved": "Salvato.",

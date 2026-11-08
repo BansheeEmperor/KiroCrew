@@ -20,6 +20,7 @@ from pathlib import Path
 
 from kiro_crew import platform_compat
 from kiro_crew.apps import credential_masks
+from kiro_crew.apps.bot_grant_store import remove_granted_bots
 from kiro_crew.apps.host_exec_grants import revoke_host_exec
 from kiro_crew.apps.manager_builtins import (
     invalidate_orphan_cache,
@@ -128,6 +129,8 @@ def uninstall_app(name: str, *, keep_data: bool = True, retired_builtin: bool = 
         revoke_host_exec(name)
         # And its worker auto-approve grants, so none outlives the app.
         revoke_worker_auto_approve(name)
+        # And the Bots the owner ticked for it, kept outside the app's tree.
+        remove_granted_bots(name)
     except Exception as exc:  # noqa: BLE001 - refuse rather than half-uninstall
         logger.warning("trust-grant cleanup on uninstall of %r failed", name, exc_info=True)
         return AppResult(

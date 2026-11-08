@@ -1,10 +1,8 @@
 """A signed app token for an app the owner then disabled reaches no Bot.
 
-Real tokens through the real ``token_auth_middleware``. A token minted while the
-app was enabled still verifies after the owner disables it (the token carries no
-enablement), so the Bot gate reads the app's switch itself
-(``apps.bot_grants.app_bot_scopes``) and refuses a disabled app the way it refuses
-an app with no Bot scope.
+Real tokens through the real ``token_auth_middleware``. The Bot gate reads the app's
+switch itself (``apps.bot_grants.app_bot_scopes``) and refuses a disabled app the way
+it refuses an app with no Bot scope.
 """
 
 from __future__ import annotations
@@ -65,6 +63,9 @@ def enabled(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "kiro_crew.apps.manager.staged_app_grants",
         lambda _name, _family, read: list(read() or []),
+    )
+    monkeypatch.setattr(
+        "kiro_crew.apps.bot_grant_store.read_approved_scopes", lambda _a: ["read", "wake"]
     )
     monkeypatch.setattr("kiro_crew.apps.manager.is_app_enabled", lambda _n: switch["on"])
     monkeypatch.setattr(bot_grants, "app_granted_bots", lambda _a: (SLUG,))

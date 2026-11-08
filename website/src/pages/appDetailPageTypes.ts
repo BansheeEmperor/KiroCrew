@@ -176,4 +176,4 @@ interface AppManifest {
 }
 
 // `AppDetailPage.tsx` builds and renders these.
-export type { AppInfo, NormalizedRegistryEntry, RegistryEntry }
+export type { AppInfo, McpServerConfig, NormalizedRegistryEntry, RegistryEntry }

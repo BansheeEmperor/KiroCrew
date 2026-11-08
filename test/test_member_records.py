@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from kiro_crew import member_goals, member_records, members, sandbox, sandbox_tiers, security
+from kiro_crew.apps import bot_grant_store
 from kiro_crew.config.paths import data_home
 
 _SLUG = "atlas"
@@ -103,7 +104,25 @@ def test_the_spelled_names_match_their_owners() -> None:
         members.RULES_DIR_NAME,
         member_goals.GOALS_DIR_NAME,
         members.DM_BINDINGS_DIR_NAME,
+        bot_grant_store.APP_BOT_GRANTS_KIND,
     )
+    assert member_records.MIGRATED_KINDS == (
+        members.RULES_DIR_NAME,
+        member_goals.GOALS_DIR_NAME,
+        members.DM_BINDINGS_DIR_NAME,
+    )
+
+
+def test_the_move_never_promotes_a_kind_that_had_no_old_layout(tmp_path: Path) -> None:
+    trust = tmp_path / "trust"
+    planted = trust / bot_grant_store.APP_BOT_GRANTS_KIND
+    planted.mkdir(parents=True)
+    (planted / "notes-app.json").write_text('{"app": "notes-app"}', encoding="utf-8")
+    root = tmp_path / member_records.MEMBER_RECORDS_LEAF
+    moved = member_records.migrate_from_trust(root, trust)
+    assert moved == []
+    assert not (root / bot_grant_store.APP_BOT_GRANTS_KIND / "notes-app.json").exists()
+    assert (root / member_records.MIGRATION_MARKER).is_file()
     assert member_records._IN_SANDBOX_MARKER == sandbox_tiers._IN_SANDBOX_MARKER
 
 

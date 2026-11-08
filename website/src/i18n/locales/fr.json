@@ -11849,7 +11849,7 @@
       "bots_title": "Bots que cette app peut joindre",
       "bots_scope_read": "Voir les Bots que tu coches, avec nom, description, occupé ou libre, objectifs et progrès. Jamais leurs chats, briefings ou règles.",
       "bots_scope_wake": "Réveiller un Bot que tu coches avec une note fixe qui nomme cette app. L’app ne peut pas écrire ce que lit le Bot.",
-      "bots_pick_hint": "L’app n’atteint que les Bots que tu coches ici. Décoche-en un pour le reprendre.",
+      "bots_pick_hint": "L’app n’atteint que les Bots que tu coches ici.",
       "bots_none": "Tu n’as pas encore de Bots.",
       "bots_save": "Enregistrer l’accès Bot",
       "bots_saved": "Enregistré.",

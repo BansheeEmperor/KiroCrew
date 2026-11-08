@@ -16,6 +16,7 @@ from dataclasses import replace
 from typing import Any
 
 from kiro_crew.apps.admission import app_admission_denied
+from kiro_crew.apps.bot_grant_store import restore_approved_scopes, snapshot_approved_scopes
 from kiro_crew.apps.execution import repository_bound_grant_denied
 from kiro_crew.apps.manager_builtins import _builtin_owns_install
 from kiro_crew.apps.manager_records import (
@@ -345,6 +346,8 @@ def register_external_app(
         # before the key existed never had, and could record no consent needed.
         meta_path = dest / INSTALLED_META_FILENAME
         prior_meta_text = meta_path.read_text(encoding="utf-8") if meta_path.is_file() else None
+        # The approved Bot scopes live outside the tree; the rollback restores them by hand.
+        prior_bot_scopes = snapshot_approved_scopes(name)
         manifest_text = json.dumps(manifest_data, indent=2) + "\n" if manifest_data else ""
         try:
             if manifest_data:
@@ -368,6 +371,7 @@ def register_external_app(
                 # while a set file is present.
                 if manifest_data:
                     _write_approved_grants(name, prior_grants if prior_grants_present else None)
+                    restore_approved_scopes(name, prior_bot_scopes)
                 if prior_meta_text is not None:
                     atomic_write(meta_path, prior_meta_text)
                 else:
@@ -406,7 +410,7 @@ def register_external_app(
             approvedGrantsStored=approved_grants is not None,
         )
         if approved_grants is not None:
-            _write_approved_grants(name, approved_grants)
+            _write_approved_grants(name, approved_grants, consent=True)
         _write_installed(name, meta)
         # Persist manifest if provided (so dashboard can show full info).
         if manifest_data:

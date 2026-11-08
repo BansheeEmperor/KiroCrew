@@ -250,7 +250,7 @@ def enable_app(
             kept += [e for e in declared[family] if e in shown and e not in kept]
             approved[family] = kept
             still_staged = still_staged or any(e not in kept for e in declared[family])
-        _write_approved_grants(name, approved)
+        _write_approved_grants(name, approved, consent=True)
         meta.approvedGrantsStored = True
         sel().log_api_access(
             caller="app_enable",

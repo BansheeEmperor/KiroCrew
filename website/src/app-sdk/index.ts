@@ -625,8 +625,5 @@ export { useImeGuard } from '../hooks/useImeGuard'
 export { useLanguageGeneration } from '../i18n/useLanguageGeneration'
 export { activeLocale, fmtNumber, fmtCurrency, fmtDate, fmtTime, fmtDateTime, fmtRelative, compareText } from '../i18n/format'
 export type { NumberOptions, DateStyleOptions, RelativeStyle } from '../i18n/format'
-// The owner's Bots this app was given (`permissions.bots`, level 4).
-export { useBots, useBot, useWakeBot } from './bots'
-export type { Bot, BotList, BotGoals, BotKeyResult, BotQuery, BotWakeResult } from './bots'
 // The App Kit seam level; an app feature-detects the seams above by it.
 export { APP_SDK_LEVEL } from './sdkLevel'

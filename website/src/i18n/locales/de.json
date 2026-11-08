@@ -11599,7 +11599,7 @@
       "bots_title": "Bots, die diese App erreicht",
       "bots_scope_read": "Die angehakten Bots sehen: Name, Beschreibung, beschäftigt oder frei, Ziele und Fortschritt. Nie ihre Chats, Briefings oder Regeln.",
       "bots_scope_wake": "Einen angehakten Bot mit einem festen Hinweis wecken, der diese App nennt. Die App kann nicht schreiben, was der Bot liest.",
-      "bots_pick_hint": "Die App erreicht nur die Bots, die du hier anhakst. Entferne den Haken, um einen zurückzunehmen.",
+      "bots_pick_hint": "Die App erreicht nur die Bots, die du hier anhakst.",
       "bots_none": "Noch keine Bots vorhanden.",
       "bots_save": "Bot-Zugriff speichern",
       "bots_saved": "Gespeichert.",

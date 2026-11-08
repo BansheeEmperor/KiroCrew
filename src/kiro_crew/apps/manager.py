@@ -145,7 +145,6 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
     )
     from kiro_crew.apps.manager_records import (  # noqa: F401
         _ALWAYS_STORED_FAMILIES,
-        _BOT_SLUG_RE,
         _GRANT_AND_SCOPE_WIDENING,
         _GRANT_WIDENING,
         _SCOPE_WIDENING,
@@ -156,7 +155,6 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         APP_MANIFEST_FILENAME,
         APPROVED_GRANTS_FILENAME,
         INSTALLED_META_FILENAME,
-        MAX_BOT_GRANTS,
         MEMBER_THREADS_CONSENT_KEY,
         SESSION_APPROVAL_PENDING_KEY,
         STAGED_GRANT_FAMILIES,
@@ -176,7 +174,6 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _parse_approved_grants,
         _pending_session_approval_after_manifest_change,
         _read_approved_grants,
-        _read_bot_grants,
         _read_enabled,
         _read_installed,
         _read_schema_version,
@@ -294,6 +291,14 @@ if TYPE_CHECKING:  # names it serves from outside the family, from their homes
     from kiro_crew.apps.admission import (  # noqa: F401
         app_admission_denied,
     )
+    from kiro_crew.apps.bot_grant_store import (  # noqa: F401
+        read_approved_scopes,
+        remove_approved_scopes,
+        remove_granted_bots,
+        restore_approved_scopes,
+        snapshot_approved_scopes,
+        write_approved_scopes,
+    )
     from kiro_crew.apps.composer_action_grants import (  # noqa: F401
         composer_action_grant_row,
     )
@@ -325,6 +330,9 @@ if TYPE_CHECKING:  # names it serves from outside the family, from their homes
         contain_command_agents,
         cron_permission_error,
         is_reserved_app_name,
+    )
+    from kiro_crew.apps.manifest_sections import (  # noqa: F401
+        BOT_GRANT_FAMILY,
     )
     from kiro_crew.apps.message_action_grants import (  # noqa: F401
         message_action_grant_row,
