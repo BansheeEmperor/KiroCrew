@@ -101,6 +101,7 @@ import { useAppShell } from './shell/appShell'
 import { ShellHeader } from './shell/topbar/shellHeader'
 import { ShellNavRail } from './shell/nav/navRail'
 import { NavItem, NavBadge } from './shell/nav/navRow'
+import { menulessRailStatus } from './shell/nav/appRailStatus'
 import { DockMatesTiles, useDockMates } from './shell/nav/matesDock'
 
 // Lazy on purpose: the update-found popup (its policy module, Trans runtime
@@ -324,7 +325,7 @@ export default function App() {
     topReservePx, focusActive, topPeek, railPeek, topPeekTrigger, railPeekTrigger, topChromeShown,
     gatewayStatusMsg, focusModeExitMsg, focusChromeInert,
     localHeaderDragGaps, shellEntered, setShellEntered, shellRef, setMembersBar, advertisedNavItems,
-    sortedAppGroup, slotOwners, appBadges, discoverBadges, railAppBadges, railAppRunStates, shortcutsOpen,
+    sortedAppGroup, slotOwners, appBadges, discoverBadges, railAppBadges, railAppRunStates, railAppStatus, shortcutsOpen,
     setShortcutsOpen, toggleShortcutsModal, commandPalette, agentSwitchNotice, kiroUsageOpen, setKiroUsageOpen,
     kiroUsageState, kiroAccountEntry, metrics, subscribeLogs, subscribeSubagents, forceReconnect,
     updateFlow, updating, setUpdating, showUpdateModal, setShowUpdateModal, showChangelog, updateError,
@@ -402,7 +403,7 @@ export default function App() {
             replace
             caption={n.id === 'capabilities' ? i18nT('nav.agent_capabilities_short') : undefined}
             onClickOverride={active ? onActivate : undefined}
-            badge={<NavBadge navId={n.id} collapsed appBadges={isAppNavId(n.id) ? railAppBadges : appBadges} runState={n.appName ? railAppRunStates[n.appName] : undefined} />}
+            badge={<NavBadge navId={n.id} collapsed appBadges={isAppNavId(n.id) ? railAppBadges : appBadges} runState={n.appName ? railAppRunStates[n.appName] : undefined} appStatus={n.appName ? menulessRailStatus(railAppStatus[n.appName]) : undefined} />}
           />
         )
       }
