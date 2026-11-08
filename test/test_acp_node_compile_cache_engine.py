@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import stat
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -57,7 +59,9 @@ def _writable(path: Path) -> None:
         entry.chmod(entry.stat().st_mode | stat.S_IWUSR)
 
 
-def _initialize(argv: list[str], cache: str, home: Path) -> tuple[dict | None, list[bytes], int]:
+def _initialize(
+    argv: list[str], cache: str, home: Path
+) -> tuple[dict | None, list[bytes], int | None]:
     env = {"PATH": os.defpath, "HOME": str(home), ncc.NODE_COMPILE_CACHE_ENV: cache}
     proc = subprocess.Popen(
         argv,
@@ -78,29 +82,50 @@ def _initialize(argv: list[str], cache: str, home: Path) -> tuple[dict | None, l
         },
     }
     assert proc.stdin is not None and proc.stdout is not None
-    proc.stdin.write((json.dumps(request) + "\n").encode())
-    proc.stdin.flush()
+    stdout = proc.stdout
+    # The read runs on a thread so the deadline bounds it: a blocking
+    # readline() on the main thread never returns to check the clock.
+    lines: queue.Queue[bytes] = queue.Queue()
+
+    def _pump() -> None:
+        for line in iter(stdout.readline, b""):
+            lines.put(line)
+
+    reader = threading.Thread(target=_pump, daemon=True)
     stray: list[bytes] = []
     reply = None
-    deadline = time.monotonic() + _INIT_TIMEOUT_SECS
-    while time.monotonic() < deadline:
-        line = proc.stdout.readline()
-        if not line:
-            break
-        try:
-            message = json.loads(line)
-        except ValueError:
-            stray.append(line[:120])
-            continue
-        if message.get("id") == 1:
-            reply = message
-            break
-    proc.stdin.close()
+    code = None
     try:
+        proc.stdin.write((json.dumps(request) + "\n").encode())
+        proc.stdin.flush()
+        reader.start()
+        deadline = time.monotonic() + _INIT_TIMEOUT_SECS
+        while reply is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                line = lines.get(
+                    timeout=remaining
+                )  # flake-ok: the rest of the 90 s upper bound, not a barrier
+            except queue.Empty:
+                break
+            try:
+                message = json.loads(line)
+            except ValueError:
+                stray.append(line[:120])
+                continue
+            if message.get("id") == 1:
+                reply = message
+        proc.stdin.close()
         code = proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        code = proc.wait(timeout=30)
+        code = None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=30)
+        reader.join(timeout=30)
     return reply, stray, code
 
 
