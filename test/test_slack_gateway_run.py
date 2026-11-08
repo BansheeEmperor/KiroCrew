@@ -1353,9 +1353,16 @@ class TestBgSessionDashboardBranch:
             stack.enter_context(
                 patch("kiro_crew.slack.gateway.resolve_dashboard_host", return_value="127.0.0.1")
             )
-            # The real formatter, kept off the host's own name and proxy.
+            # The real formatter, kept off the host's own name and proxy. The
+            # SSM pin keeps the boot path host independent: both the formatter
+            # and the auto-open skip read is_ssm_session from this module at
+            # call time, so one patch covers both and the test does not read the
+            # runner's real /proc ancestry.
             stack.enter_context(
                 patch("kiro_crew.dashboard.urls.machine_hostname", return_value="localhost")
+            )
+            stack.enter_context(
+                patch("kiro_crew.dashboard.urls.is_ssm_session", return_value=False)
             )
             stack.enter_context(
                 patch("kiro_crew.dashboard.urls.devspaces_proxy_url", return_value=None)
