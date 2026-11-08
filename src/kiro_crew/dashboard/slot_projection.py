@@ -8,6 +8,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from kiro_crew.dashboard.slot_preparing import is_preparing, preparing_caption
+from kiro_crew.dashboard.slot_queue_repository import is_held_queue_entry
 from kiro_crew.history_schema import transcript_sort_key
 from kiro_crew.safety_override import safety_override, yolo_policy_permits
 from kiro_crew.session_lifecycle import STOP_DECLINED_ESCALATION_SECS
@@ -563,6 +564,9 @@ class SlotProjection:
             # the backend's answer cannot disagree.
             "stop_declined": stop_declined_armed(slot),
             "queue_depth": slot.queue_depth,
+            # Of those, the restored cards no drain starts on its own: they wait
+            # for the person, so "is work coming?" readers do not count them.
+            "queue_held_depth": sum(1 for item in slot._queue if is_held_queue_entry(item)),
             "stopping": slot._stopping,
             "pending_approval": pending_approval,
             "pending_approval_info": pending_approval_info,
