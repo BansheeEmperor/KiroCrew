@@ -712,6 +712,38 @@ _MASKED_VALUE_KEYS = frozenset({"worker_session_key", "crew_key"})
 _KEY_BEARING_EVENT_KINDS = frozenset({"bind"})
 
 
+#: The page theme tokens the CHAT follows (#20635): the two whose role is
+#: unambiguous. A page's tokens are free-form custom-property names its author
+#: picks, so the chat reads exactly these two by name -- the page background and
+#: the page accent, the same names the app's own theme uses -- and derives every
+#: text colour itself on the client. The crewmate-chat-page-colours preview flag
+#: gates whether the client applies them; the server just names them.
+_CHAT_PAGE_THEME_TOKENS = ("--bg", "--accent")
+
+
+def _page_theme(package: Mapping[str, Any]) -> dict[str, str]:
+    """The colour tokens the chat may follow from *package*'s theme, or ``{}``.
+
+    Only :data:`_CHAT_PAGE_THEME_TOKENS`, and only when the package declares them, so
+    the body names a bounded, predictable set rather than a page's whole palette. The
+    values are already the validator's own: a theme token value is a single printable
+    line with no ``;``/``{``/``}``/``<``/``>`` (``_THEME_VALUE_RE``), so a colour
+    literal passes and a style statement cannot. The chat derives readable text from
+    these on the client; the page's own text tokens are not read, since readability
+    cannot be left to the page author.
+    """
+    raw_theme = package.get("theme")
+    theme: Mapping[str, Any] = raw_theme if isinstance(raw_theme, Mapping) else {}
+    raw_tokens = theme.get("tokens")
+    tokens: Mapping[str, Any] = raw_tokens if isinstance(raw_tokens, Mapping) else {}
+    out: dict[str, str] = {}
+    for name in _CHAT_PAGE_THEME_TOKENS:
+        value = tokens.get(name)
+        if isinstance(value, str) and value:
+            out[name] = value
+    return out
+
+
 def _page_safe(value: Any) -> Any:
     """*value* made safe to put on a page: session keys removed, strings redacted.
 
@@ -1965,6 +1997,12 @@ async def _serve_package(
             # amendment's fourth reason, and why the profile has to be read too.
             "scripts": scripts,
             "locale": read.get("locale", locale) if isinstance(read, dict) else locale,
+            # THE CHAT'S COLOUR SOURCE (#20635): the bounded set of page colour
+            # tokens the Crewmates-page chat may follow, off the package's own
+            # theme. Absent for a page that declares neither, so an untinted page
+            # adds no key and the chat keeps its default look. The dashboard gates
+            # whether it applies them behind a default-off preview flag.
+            **({"page_theme": theme_tokens} if (theme_tokens := _page_theme(package)) else {}),
         }
     )
 

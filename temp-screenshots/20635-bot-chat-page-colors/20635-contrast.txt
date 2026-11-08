@@ -1,0 +1,3 @@
+page --bg=#2a1a4d --accent=#f59e0b
+after-dark  body text #ffffff on #2a1a4d = 15.52:1 ; accent label #000000 on #f59e0b = 9.78:1
+after-light body text #ffffff on #2a1a4d = 15.52:1 ; accent label #000000 on #f59e0b = 9.78:1
