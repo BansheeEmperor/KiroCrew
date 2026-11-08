@@ -13,7 +13,6 @@ import NotificationDetailPanel from '../components/notifications/NotificationDet
 import { buildNotificationPrompt, wholeCronResult } from '../components/notifications/notificationHandoff.prompt'
 import { sendErrorToChat, setGatewayConnected } from '../utils/errorReport'
 import { api } from '../api/client'
-import { cronJobsQuery } from '../api/cronJobsQuery'
 import type { Notification } from '../types'
 
 vi.mock('../utils/errorReport', async (importOriginal) => ({
@@ -21,7 +20,7 @@ vi.mock('../utils/errorReport', async (importOriginal) => ({
   sendErrorToChat: vi.fn(() => true),
 }))
 vi.mock('../api/client', () => ({
-  api: { taskRunToChat: vi.fn(), cronToChat: vi.fn(), crons: vi.fn(), resolveApproval: vi.fn(), ackNotification: vi.fn().mockResolvedValue({}) },
+  api: { taskRunToChat: vi.fn(), cronToChat: vi.fn(), cron: vi.fn(), resolveApproval: vi.fn(), ackNotification: vi.fn().mockResolvedValue({}) },
 }))
 vi.mock('../components/MarkdownRenderer', () => ({
   default: ({ content }: { content: string }) => <span>{content}</span>,
@@ -46,13 +45,13 @@ const storeCut = (text: string) => text.slice(0, 19_999) + '…'
 const RESULT_TS = 1_760_511_655.25
 const report = 'one row of the nightly report\n'.repeat(1000) + 'the end of the report'
 const cutNote: Notification = { ...cronNote, body: storeCut(report), result_ts: RESULT_TS }
-const serveJob = (last_result_ts: number) => vi.mocked(api.crons).mockResolvedValue(
-  { jobs: [{ id: 'job-20971', last_result: report, last_result_ts }] } as Awaited<ReturnType<typeof api.crons>>,
+const serveJob = (last_result_ts: number) => vi.mocked(api.cron).mockResolvedValue(
+  { id: 'job-20971', last_result: report, last_result_ts } as Awaited<ReturnType<typeof api.cron>>,
 )
 
 beforeEach(() => {
   vi.mocked(sendErrorToChat).mockReset().mockReturnValue(true)
-  vi.mocked(api.crons).mockReset()
+  vi.mocked(api.cron).mockReset()
   setGatewayConnected(true)
 })
 
@@ -74,7 +73,7 @@ describe('NotificationDetailPanel -- "Fix with Crew"', () => {
     serveJob(RESULT_TS)
     const onClose = vi.fn()
     const { queryClient } = renderWithProviders(<NotificationDetailPanel n={cutNote} onClose={onClose} />)
-    await waitFor(() => expect(queryClient.getQueryData(cronJobsQuery.queryKey)).toBeDefined())
+    await waitFor(() => expect(queryClient.getQueryData(['crons', 'job', 'job-20971'])).toBeDefined())
     await userEvent.click(fixButton()!)
     expect(sendErrorToChat).toHaveBeenCalledTimes(1)
     const prompt = vi.mocked(sendErrorToChat).mock.calls[0][0] as string

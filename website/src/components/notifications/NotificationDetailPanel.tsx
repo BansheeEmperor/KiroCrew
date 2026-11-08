@@ -20,7 +20,6 @@ import { CrewmateNoteFace, CrewmateNoteName, CrewmateRosterError, noteMember } f
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { isGatewayConnected, sendErrorToChat, subscribeGatewayConnected } from '../../utils/errorReport'
 import { buildNotificationPrompt, isCutCronResult, wholeCronResult } from './notificationHandoff.prompt'
-import { cronJobsQuery } from '../../api/cronJobsQuery'
 import { isMemberThreadSlot } from '../../hooks/unreadOnAttention'
 
 import { i18nT } from '../../i18n/t'
@@ -140,10 +139,11 @@ export default function NotificationDetailPanel({ n, onClose, onLeave }: { n: No
   // gateway is down: the composer it lands in could not send.
   const gatewayConnected = useSyncExternalStore(subscribeGatewayConnected, isGatewayConnected)
   // A cron note whose body the store cut hands over the job's whole result,
-  // read ahead so the click stays synchronous inside the leave guard.
-  const { data: cronJobs } = useQuery({ ...cronJobsQuery, enabled: isCutCronResult(n) })
+  // read ahead so the click stays synchronous inside the leave guard. The job's
+  // own read, since the list carries only a preview of it.
+  const { data: cronJob } = useQuery({ queryKey: ['crons', 'job', n.job_id], queryFn: () => api.cron(n.job_id!), enabled: isCutCronResult(n) })
   const fixWithCrew = () => leave(() => {
-    const whole = wholeCronResult(n, cronJobs?.find(j => j.id === n.job_id))
+    const whole = wholeCronResult(n, cronJob)
     const prompt = buildNotificationPrompt(n, i18nT('components.notifications.notificationDetailPanel.fix_with_crew_ask'), whole)
     // `leaveGranted`: the guard above already asked the host page.
     if (sendErrorToChat(prompt, { leaveGranted: true })) onClose()

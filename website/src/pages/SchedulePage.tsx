@@ -1810,6 +1810,15 @@ function JobDetailDialog({ job, prefill, prefillWrites, agents, defaultAgent, ro
   const onSaved = () => { onChanged(); if (live.current) onClose() }
   // A live form shows its own error; a closed one hands it to the page.
   const onSubmitError = (message: string, confirmed: boolean, name = '') => { if (!live.current) onLateFailure({ name, message, confirmed }) }
+  // The list cuts a long last result or error to a preview; this reads them whole,
+  // under `crons` so every cron refresh push re-reads it. Its row is used only while
+  // the run left text and is the run the list row names, so a pending or failed
+  // re-read never shows an earlier run's text.
+  const hasRunText = !!(job?.last_result || job?.last_error)
+  const fullJob = useQuery({ queryKey: ['crons', 'job', job?.id], queryFn: () => api.cron(job!.id), enabled: hasRunText })
+  const runText = hasRunText && fullJob.data && fullJob.data.last_run_ts === job?.last_run_ts ? fullJob.data : job
+  const lastError = runText?.last_error
+  const lastResult = runText?.last_result
 
   return (
     <DialogContent maxWidth={720} className="max-h-[86vh]">
@@ -1859,6 +1868,8 @@ function JobDetailDialog({ job, prefill, prefillWrites, agents, defaultAgent, ro
             <ErrorNotice message={panelError} testId="schedule-job-panel-error" />
             {job?.script && <ScriptSourcePanel jobId={job.id} />}
             {job && job.script && <JobSecretsPanel job={job} onSaved={onSaved} />}
+            {/* No hand-off: JobForm draft. Only while the list's preview stands in for the whole text. */}
+            {hasRunText && fullJob.isError && runText === job && <ErrorNotice message={i18nT('pages.schedulePage.full_run_text_load_failed')} testId="schedule-job-full-text-error" />}
             {/* The run's persisted `last_error` is an error by origin (the job
                 FAILED), so it takes the shared surface with the 'Last Error'
                 label as its title. `whitespace-pre-wrap` on the notice body
@@ -1871,7 +1882,7 @@ function JobDetailDialog({ job, prefill, prefillWrites, agents, defaultAgent, ro
                 `title=` tooltip alone -- invisible on touch, unreadable to a
                 screen reader, and no hand-off. The failure decides the
                 surface, never the shape of the job that produced it. */}
-            {job?.last_error && (
+            {lastError && (
               <>
                 {/* No hand-off: JobForm draft */}
                 {/* A `last_error` is often a multi-frame Python traceback. The
@@ -1892,19 +1903,19 @@ function JobDetailDialog({ job, prefill, prefillWrites, agents, defaultAgent, ro
                     499px traceback; with it, the full height the cap allows. */}
                 <ErrorNotice
                   title={i18nT('pages.schedulePage.last_error')}
-                  message={job.last_error}
+                  message={lastError}
                   className="shrink-0 max-h-[min(45vh,420px)] overflow-y-auto font-mono"
                   testId="schedule-job-last-error"
                 />
               </>
             )}
-            {job && !job.last_error && job.last_result && (
+            {job && !lastError && lastResult && (
               <div className="flex flex-col gap-1.5">
                 <div className="text-[12px] text-muted font-medium">{i18nT('pages.schedulePage.last_output')}</div>
                 {/* Same viewport-relative cap as the Last Error notice above
                     (#21061): a fixed 200px left most of a long output behind
                     the inner scrollbar. */}
-                <pre data-testid="schedule-job-last-output" className="text-[12px] font-mono whitespace-pre-wrap break-words rounded border px-2.5 py-2 shrink-0 max-h-[min(45vh,420px)] overflow-y-auto bg-bg-elevated border-border text-text">{job.last_result}</pre>
+                <pre data-testid="schedule-job-last-output" className="text-[12px] font-mono whitespace-pre-wrap break-words rounded border px-2.5 py-2 shrink-0 max-h-[min(45vh,420px)] overflow-y-auto bg-bg-elevated border-border text-text">{lastResult}</pre>
               </div>
             )}
             {job?.last_run_ts && (
