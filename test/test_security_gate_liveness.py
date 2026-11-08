@@ -742,7 +742,10 @@ def _url_payload_command(n: int) -> str:
 #: Raised by 14, from 35,146, for ``DeniedCommandRule.note``: the optional field and its
 #: docstring, and ``edition_denied_rules`` carrying an edition rule's note through. It
 #: changes only the refusal text; no rule, pattern or match changed. Re-measured.
-_PACKAGE_LINE_BUDGET = 35_160
+#: Raised by 92, from 35,160, for ``shell_commands.xargs_pipelines``: each pipeline that
+#: feeds ``xargs`` is also read as a line of its own, so a command chained before it no
+#: longer changes what the xargs rebuild sees. Deny-only: no allow widened. Re-measured.
+_PACKAGE_LINE_BUDGET = 35_252
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

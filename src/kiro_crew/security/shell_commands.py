@@ -395,6 +395,70 @@ def redirect_hidden_payloads(command: str) -> "list[str]":
     return cache[command]
 
 
+#: What closes each group opener: the separator ending ``( … )``, ``$( … )`` and a
+#: backtick body, and the reserved word ending a ``{ …; }`` group or a compound command.
+_GROUP_CLOSERS = {"(": ")", "`": "`", "{": "}", "if": "fi", "case": "esac"}
+_GROUP_CLOSERS.update(dict.fromkeys(("for", "select", "while", "until"), "done"))
+
+
+def xargs_pipelines(command: str) -> "list[tuple[str, str, int]]":
+    """Each pipeline in *command*, cut out to be judged as a line: the text before its own
+    first pipe, the text after it, and its number of pipes of its own. Whether it feeds
+    ``xargs`` is the rebuild's to decide, on the words the shell would run.
+
+    The xargs rebuild takes the piped words from the start of the text it reads, so a
+    command chained in front (``echo x; echo <name> | xargs <kill>``) left the name out
+    of the rebuilt argv. A pipeline is cut at the list separators of its own group, past
+    the reserved words that keep command position (``then``, ``do``), so it reads as the
+    line it would be typed alone; a compound command is one group, so its own separators
+    end only the commands inside it, and its reserved words count only where a command
+    starts; ``|&`` pipes like ``|``, and so does ``|`` before a newline."""
+    views: list[tuple[str, str, int]] = []
+    groups: list[list] = [[-1, 0, "", 0]]  # per open group: item start, pipes, opener, 1st pipe
+    boundary = end = 0
+    previous, branch_end = "", False  # the last separator; did it end a case branch (``;;``)
+
+    def close(item: list) -> None:
+        if item[1] and command[item[0] : end].strip() != command.strip():
+            views.append((command[item[0] : item[3]], command[item[3] + 1 : end], item[1]))
+        item[:2] = [-1, 0]
+
+    for cmd in read_commands(command, nested=False, heredocs=True):
+        sep, at = cmd.separator, cmd.steps[-1].end if cmd.steps else boundary
+        boundary = max(boundary, at + len(sep), *(doc.tail + 1 for doc in cmd.heredocs))
+        if previous == "|" and sep in ("&", "\n") and not cmd.words:
+            continue  # ``|&``, or the pipeline goes on past a newline
+        last, after_branch = previous, branch_end
+        previous, branch_end = sep, not cmd.words and last == sep == ";"
+        piped = last == "|"
+        for word in cmd.words:  # the leading words that open, close or keep a command
+            # a compound keyword counts where a command starts, not past ``)`` (``$(date) for``)
+            reserved = piped or groups[-1][0] < 0 or word.raw in ("{", "}")
+            if reserved and word.raw == _GROUP_CLOSERS.get(groups[-1][2]):
+                close(groups.pop())
+            elif reserved and word.raw in _GROUP_CLOSERS:
+                groups[-1][0] = word.start if groups[-1][0] < 0 else groups[-1][0]
+                groups.append([-1, 0, word.raw, 0])
+            elif groups[-1][0] >= 0 or word.raw not in _shell._KEEPS_COMMAND_POSITION:
+                groups[-1][0] = word.start if groups[-1][0] < 0 else groups[-1][0]
+                break
+        end = at
+        # a ``(`` right after ``in`` or ``;;`` opens a case pattern, not a subshell
+        after_in = cmd.words[-1].raw == "in" if cmd.words else after_branch
+        pattern = groups[-1][2] == "case" and after_in
+        if sep == _GROUP_CLOSERS.get(groups[-1][2]):
+            close(groups.pop())
+        elif sep == "`" or sep == "(" and not pattern:
+            groups[-1][0] = at if groups[-1][0] < 0 else groups[-1][0]
+            groups.append([-1, 0, sep, 0])
+        elif sep == "|":
+            groups[-1][3] = groups[-1][3] if groups[-1][1] else at
+            groups[-1][1] += 1
+        else:
+            close(groups[-1])
+    return views
+
+
 def without_substitutions(command: str) -> str:
     """*command* with each unquoted ``$(…)`` / ``<(…)`` / ``>(…)`` as the word ``_``, which
     :func:`read_commands` would cut (``bash -c 2>$(x) '<script>'``)."""
