@@ -247,7 +247,7 @@ class TestLaunchDiscovery:
 
     def test_choosing_a_new_installation_among_several_stacks_keeps_none(self, monkeypatch, capsys):
         monkeypatch.setattr(ui, "choose", lambda title, options, default_index=0: len(options) - 1)
-        assert wizard._choose_existing_launch(self.LAUNCHES, LaunchState()) is None
+        assert wizard._choose_existing_launch(self.LAUNCHES) is None
         assert "Creating a new installation; existing stacks are unchanged." in (
             capsys.readouterr().out
         )
