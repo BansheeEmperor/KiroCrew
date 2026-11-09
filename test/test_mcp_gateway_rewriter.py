@@ -247,6 +247,7 @@ def test_disabled_poolable_server_is_not_wrapped(tmp_path: Path) -> None:
     ``disabled`` intact and is NOT wrapped into a running stub."""
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "muted": {"command": "some-mcp", "poolable": True, "disabled": True},
         },
@@ -270,6 +271,7 @@ def test_a_non_boolean_mute_is_not_wrapped_either(tmp_path: Path, value: object)
     """
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {"muted": {"command": sys.executable, "disabled": value}},
     }
     new_spec, wrapped = _rewrite(spec, tmp_path, stub_servers=frozenset({"muted"}))
@@ -288,6 +290,7 @@ def test_a_registry_governed_server_is_not_wrapped(tmp_path: Path) -> None:
     """
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {"governed": {"command": sys.executable, "type": "registry"}},
     }
     new_spec, wrapped = _rewrite(spec, tmp_path, stub_servers=frozenset({"governed"}))
@@ -303,6 +306,7 @@ def test_a_plain_type_does_not_block_pooling(tmp_path: Path) -> None:
     """Guard against over-correction: ``type: stdio`` is not a registry marker."""
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {"live": {"command": sys.executable, "type": "stdio"}},
     }
     _, wrapped = _rewrite(spec, tmp_path, stub_servers=frozenset({"live"}))
@@ -313,12 +317,32 @@ def test_an_explicit_false_is_not_a_mute(tmp_path: Path) -> None:
     """Fail-closed must not swallow the spelling that means "enabled"."""
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {"live": {"command": sys.executable, "disabled": False}},
     }
     new_spec, wrapped = _rewrite(spec, tmp_path, stub_servers=frozenset({"live"}))
 
     assert wrapped == 1
     assert new_spec["mcpServers"]["live"].get(_WRAPPER_MARKER) is True
+
+
+def test_only_a_server_the_tools_allowlist_names_is_wrapped(tmp_path: Path) -> None:
+    """The session mounts every stub it is sent, whatever ``tools`` says, while
+    kiro-cli mounts a declared server only when ``tools`` names it. A stub for the
+    server the author left out would offer it anyway."""
+    tickets = {"command": sys.executable, "args": ["-t"]}
+    spec = {
+        "name": "agent-a",
+        "tools": ["read", "@notes-mcp"],
+        "mcpServers": {"notes-mcp": {"command": sys.executable}, "tickets-mcp": tickets},
+    }
+    new_spec, wrapped = _rewrite(
+        spec, tmp_path, stub_servers=frozenset({"notes-mcp", "tickets-mcp"})
+    )
+
+    assert wrapped == 1
+    assert new_spec["mcpServers"]["notes-mcp"].get(_WRAPPER_MARKER) is True
+    assert new_spec["mcpServers"]["tickets-mcp"] == tickets
 
 
 class TestTheRegistryPredicate:
@@ -368,6 +392,7 @@ def test_enabled_listed_server_is_still_wrapped(tmp_path: Path) -> None:
     denylisted is still wrapped into a stub."""
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "live": {"command": sys.executable},
         },
@@ -389,6 +414,7 @@ def test_unstubbed_server_is_left_for_the_session_to_launch(
     """
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "stateful": {"command": "some-mcp"},
         },
@@ -406,6 +432,7 @@ def test_unstubbed_server_is_left_for_the_session_to_launch(
 def test_allowlisted_server_gets_the_poolable_flag(tmp_path: Path) -> None:
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "shareable": {"command": sys.executable},
         },
@@ -425,6 +452,7 @@ def test_private_server_with_declared_env_is_not_warned_about(tmp_path: Path, ca
 
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "needs-env": {
                 "command": sys.executable,
@@ -456,6 +484,7 @@ def test_shared_server_with_declared_env_is_still_warned_about(tmp_path: Path, c
 
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "needs-env": {"command": sys.executable, "env": {"REGION": "us-west-2"}},
         },
@@ -476,6 +505,7 @@ def test_unresolvable_bare_command_is_not_stubbed(tmp_path: Path, caplog) -> Non
 
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "ghost": {
                 "command": "kirocrew-test-definitely-missing-cmd",
@@ -502,6 +532,7 @@ def test_resolvable_bare_command_lands_absolute_in_the_stub(tmp_path: Path) -> N
     exe_dir, exe_name = str(Path(sys.executable).parent), Path(sys.executable).name
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "bare": {"command": exe_name, "env": {"PATH": exe_dir}},
         },
@@ -526,6 +557,7 @@ def test_env_declaring_server_is_declassified_when_forwarding_is_off(
 
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "needs-env": {
                 "command": sys.executable,
@@ -564,6 +596,7 @@ def test_secret_env_server_is_declassified_even_with_forwarding_on(
     crash-loop, so it must be declassified like the forwarding-off case."""
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "needs-secret": {
                 "command": sys.executable,
@@ -670,6 +703,7 @@ def test_pooling_disabled_still_wraps_but_shares_nothing(tmp_path: Path) -> None
     """
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "declared": {"command": sys.executable, "poolable": True},
             "listed": {"command": sys.executable},
@@ -709,6 +743,7 @@ def test_rewriter_calls_restrict_to_owner_on_windows(tmp_path: Path, monkeypatch
     source_dir.mkdir()
     spec = {
         "name": "test-agent",
+        "tools": ["*"],
         "mcpServers": {
             "myserver": {
                 "command": sys.executable,
@@ -885,6 +920,7 @@ def _spec_with_env(source_dir: Path) -> None:
     source_dir.mkdir(parents=True, exist_ok=True)
     spec = {
         "name": "test-agent",
+        "tools": ["*"],
         "mcpServers": {
             "myserver": {
                 "command": sys.executable,
@@ -1040,6 +1076,7 @@ def test_stub_fingerprint_is_the_module_on_the_launch_line(tmp_path: Path) -> No
         json.dumps(
             {
                 "name": "test-agent",
+                "tools": ["*"],
                 "mcpServers": {"myserver": {"command": sys.executable, "args": ["hello"]}},
             }
         ),
@@ -1127,6 +1164,7 @@ def test_rewriter_writes_resolved_env_to_sidecar(tmp_path: Path, monkeypatch) ->
     monkeypatch.delenv("MISSING", raising=False)
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "srv": {
                 "command": sys.executable,
@@ -1164,6 +1202,7 @@ def test_the_sidecar_resolves_a_variable_set_only_in_agent_env(tmp_path: Path, m
     )
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {
             "srv": {
                 "command": sys.executable,
@@ -1199,6 +1238,7 @@ def test_two_agents_declaring_one_server_alike_share_its_sidecar(
     for agent in ("gpu-dev", "kirocrew"):
         spec = {
             "name": agent,
+            "tools": ["*"],
             "mcpServers": {
                 "srv": {"command": sys.executable, "env": {"AUTH": "${env:MYVAR}"}},
             },
@@ -1224,6 +1264,7 @@ def test_a_rotating_secret_alone_still_splits_the_sidecars(tmp_path: Path, monke
     for agent, token in (("gpu-dev", "token-a"), ("kirocrew", "token-b")):
         spec = {
             "name": agent,
+            "tools": ["*"],
             "mcpServers": {
                 "srv": {
                     "command": sys.executable,
@@ -1333,7 +1374,7 @@ def test_wrapped_argv_is_cmd_safe_under_a_spaced_interpreter_path(
     monkeypatch.setattr("kiro_crew.mcp_gateway.rewriter.platform_compat.IS_WINDOWS", True)
     monkeypatch.setattr("kiro_crew.platform_compat.short_path_name", lambda p: short)
 
-    spec = {"name": "agent-a", "mcpServers": {"svc": {"command": exe}}}
+    spec = {"name": "agent-a", "tools": ["*"], "mcpServers": {"svc": {"command": exe}}}
     new_spec, wrapped = _rewrite(spec, tmp_path, stub_servers=frozenset({"svc"}))
     entry = new_spec["mcpServers"]["svc"]
 
@@ -1359,6 +1400,7 @@ def test_wrapped_command_kept_and_warned_when_no_short_form_exists(
 
     spec = {
         "name": "agent-a",
+        "tools": ["*"],
         "mcpServers": {"svc": {"command": exe}, "svc2": {"command": exe}},
     }
     with caplog.at_level(logging.WARNING, logger="kiro_crew.mcp_gateway.rewriter"):

@@ -42,7 +42,11 @@ def home(tmp_path, monkeypatch):
     _write(agents / "kirocrew.json", {"name": "kirocrew", "mcpServers": {}})
     _write(
         mates / "pixel.json",
-        {"name": "pixel", "mcpServers": {SERVER: {"command": sys.executable, "args": ["-V"]}}},
+        {
+            "name": "pixel",
+            "tools": ["*"],
+            "mcpServers": {SERVER: {"command": sys.executable, "args": ["-V"]}},
+        },
     )
     _write(mates / f"{WORKER}.json", {"name": WORKER, "mcpServers": {}})
     on_record = {"pixel"}
@@ -101,6 +105,7 @@ class TestTheRewritePass:
             home.mates / "pixel.json",
             {
                 "name": "pixel",
+                "tools": ["*"],
                 "mcpServers": {SERVER: {"command": sys.executable, "env": {"API_TOKEN": "t"}}},
             },
         )
@@ -146,6 +151,7 @@ class TestTheRewritePass:
             home.agents / "odd.json",
             {
                 "name": "crewmate:nobody",
+                "tools": ["*"],
                 "mcpServers": {SERVER: {"command": sys.executable, "args": ["-V"]}},
             },
         )
@@ -246,6 +252,7 @@ class TestTheWorkerLookup:
             home.mates / "pixel.json",
             {
                 "name": "pixel",
+                "tools": ["*"],
                 "mcpServers": {
                     SERVER: {"command": sys.executable, "args": ["-V"], "autoApprove": ["*"]}
                 },
@@ -587,7 +594,11 @@ class TestFailClosedPaths:
         assert kwargs["mate_source_dir"] == paths.mate_agents_dir()
 
     def test_a_failed_overlay_write_leaves_no_crewmate_sidecar(self, home, monkeypatch):
-        spec = {"name": "pixel", "mcpServers": {SERVER: {"command": sys.executable}}}
+        spec = {
+            "name": "pixel",
+            "tools": ["*"],
+            "mcpServers": {SERVER: {"command": sys.executable}},
+        }
         spec["mcpServers"][SERVER]["env"] = {"API_TOKEN": "t"}
         _write(home.mates / "pixel.json", spec)
         _rewrite(home, pooling=False)
@@ -657,7 +668,11 @@ class TestAnEditedCrewmateFile:
         before = _mate_overlay(home)["mcpServers"][SERVER]["args"]
         _write(
             home.mates / "pixel.json",
-            {"name": "pixel", "mcpServers": {SERVER: {"command": sys.executable, "args": ["-c"]}}},
+            {
+                "name": "pixel",
+                "tools": ["*"],
+                "mcpServers": {SERVER: {"command": sys.executable, "args": ["-c"]}},
+            },
         )
         _worker_session(monkeypatch, home, merged_servers={SERVER: {"command": sys.executable}})
         spec = mate_overlays.worker_overlay_spec(home.overlay, "chat-1")
@@ -753,7 +768,7 @@ class TestAppCallbackGovernance:
 
 def _credentialed_pixel(home) -> Path:
     """Give ``pixel`` a credential env, so a sidecar shows what the pass wrote."""
-    spec = {"name": "pixel", "mcpServers": {SERVER: {"command": sys.executable}}}
+    spec = {"name": "pixel", "tools": ["*"], "mcpServers": {SERVER: {"command": sys.executable}}}
     spec["mcpServers"][SERVER]["env"] = {"API_TOKEN": "t"}
     _write(home.mates / "pixel.json", spec)
     return env_sidecar_dir(home.overlay) / env_sidecar_name("crewmate:pixel", SERVER)
@@ -850,7 +865,11 @@ class TestCaseFoldedCrewmateIds:
 
 class TestACrewmateFaultSparesTheAgentsHalf:
     def _agent_with_credentials(self, home) -> Path:
-        spec = {"name": "kirocrew", "mcpServers": {SERVER: {"command": sys.executable}}}
+        spec = {
+            "name": "kirocrew",
+            "tools": ["*"],
+            "mcpServers": {SERVER: {"command": sys.executable}},
+        }
         spec["mcpServers"][SERVER]["env"] = {"API_TOKEN": "a"}
         _write(home.agents / "kirocrew.json", spec)
         return env_sidecar_dir(home.overlay) / env_sidecar_name("kirocrew", SERVER)

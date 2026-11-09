@@ -110,7 +110,8 @@ _FINGERPRINT_NAME = ".rewrite-fingerprint"
 # 12: a reserved ``crewmate:`` agent gets no overlay; a keep that skips this
 # check is refused by name after the loop.
 # 13: a server a config scope mutes is not wrapped (``scope_muted``).
-_FINGERPRINT_SCHEMA = 13
+# 14: an agent's own server is wrapped only when its ``tools`` names it.
+_FINGERPRINT_SCHEMA = 14
 
 # The fingerprint inputs of the latest pass into each overlay directory, kept so
 # a caller can read the settings a pass was built from without a second scan.
@@ -1401,6 +1402,7 @@ __all__ = sorted(
 if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and IDEs
     # The names the unsplit module imported from the rest of kiro_crew and that only
     # an owner reads now, from their home modules.
+    from kiro_crew.agent_sdk.mcp_refs import parse_tools_refs  # noqa: F401
     from kiro_crew.config.paths import config_dir  # noqa: F401
     from kiro_crew.env import saved_command_casing, spec_path_key  # noqa: F401
     from kiro_crew.mcp_cleanup import (  # noqa: F401

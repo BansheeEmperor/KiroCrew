@@ -112,7 +112,12 @@ Two paths can emit stubs, and both apply the same explicit
 `mcp_gateway.stub_servers` roster to stdio servers:
 
 - **Agent-declared servers** in `~/.kiro/agents/*.json`, wrapped in that agent's
-  overlay only when the server name is in the roster.
+  overlay only when the server name is in the roster and the agent's `tools`
+  names it. kiro-cli mounts a declared server only when `tools` names it, but the
+  session mounts every stub it is sent, so an unnamed server keeps its raw entry
+  and stays unmounted. A server the rebuild withheld for its `secret://`
+  reference is still wrapped once it is routed: the rebuild stripped its refs
+  itself and restores them after that pass.
 - **Global `settings/mcp.json` servers**, injected into each agent's overlay only
   when rostered so the stub carries the right agent identity. The injected stub takes precedence
   over the raw same-named global entry at ACP `session/new`

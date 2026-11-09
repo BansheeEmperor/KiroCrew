@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Collection, Mapping
 
 from kiro_crew import platform_compat
+from kiro_crew.agent_sdk.mcp_refs import parse_tools_refs
 from kiro_crew.mcp_cleanup import mcp_entry_is_muted, mcp_entry_is_registry_governed
 from kiro_crew.mcp_gateway.hashing import STUB_FLAGS_FLAG, encode_target_args
 from kiro_crew.mcp_gateway.launch_approval import (
@@ -435,6 +436,25 @@ def _hashable_args(args_val: Any) -> tuple[str, ...]:
     )
 
 
+def _named_in_tools(servers: Mapping[str, Any], tools: Any) -> dict[str, Any]:
+    """The entries of *servers* an agent's ``tools`` names, by raw key or alias.
+
+    ``*``, as the whole value or as an entry, names every server. ``@server`` and
+    ``@server/tool`` name ``server``, read through
+    :func:`~kiro_crew.agent_sdk.mcp_refs.parse_tools_refs` like the mirrors'
+    ``ToolsAllowlist``. A missing or malformed ``tools`` names none.
+    """
+    grant_all, refs = parse_tools_refs(tools)
+    if grant_all or tools == "*":
+        return dict(servers)
+    named = frozenset(refs)
+    return {
+        name: entry
+        for name, entry in servers.items()
+        if name in named or mcp_server_alias(name) in named
+    }
+
+
 def _rewrite_single_spec(
     spec: dict[str, Any],
     *,
@@ -482,6 +502,11 @@ def _rewrite_single_spec(
     excluded, and a tool name one of them shares with the agent's own server
     leaves one of the two with no tools. Only a literal ``false`` opts out,
     because kiro-cli reads an absent flag as true.
+
+    A server the agent declares is wrapped only when its ``tools`` names it
+    (:func:`_named_in_tools`): the session mounts every stub it is sent, so a stub
+    would offer a server the author left out. A withheld secret-reference server
+    this pass routes is the exception; the stub-decoupling design note says why.
     """
     agent_name = spec.get("name") or ""
     servers = spec.get("mcpServers") or {}
@@ -500,6 +525,7 @@ def _rewrite_single_spec(
     # would otherwise spawn a duplicate backend (e.g. a slash-named server and
     # its slash-free alias both pointing at the same proxy command).
     seen_targets: set[tuple[str, tuple[str, ...]]] = set()
+    granted = _named_in_tools(servers, spec.get("tools"))
     wrapped = 0
     for name, entry in servers.items():
         if not isinstance(entry, dict):
@@ -530,6 +556,15 @@ def _rewrite_single_spec(
             # HTTP/SSE MCP entries — already shareable by nature, skip.
             new_servers[name] = entry
             continue
+        withheld_now_routed = (
+            is_withheld_mute(entry)
+            and mcp_entry_is_muted(entry)
+            and routed_for_secret_reference(name, stub_servers)
+        )
+        if name not in granted and not withheld_now_routed:
+            # Not in ``tools``: a stub would mount it anyway (see the docstring).
+            new_servers[name] = {k: v for k, v in entry.items() if k != "poolable"}
+            continue
         if mcp_entry_is_registry_governed(entry):
             # A registry-governed entry defers its launch to the administrator's
             # catalog, so there is nothing here to pool. Wrapping it produced a
@@ -542,11 +577,7 @@ def _rewrite_single_spec(
             # the client's own filter decides, like the mute below.
             new_servers[name] = {k: v for k, v in entry.items() if k != "poolable"}
             continue
-        if (
-            is_withheld_mute(entry)
-            and mcp_entry_is_muted(entry)
-            and routed_for_secret_reference(name, stub_servers)
-        ):
+        if withheld_now_routed:
             # The rebuild muted this entry only because it was not routed, and
             # this pass routes it (the launch probe asks before the routing is
             # saved). A wrapped server is started by the gateway, which resolves
