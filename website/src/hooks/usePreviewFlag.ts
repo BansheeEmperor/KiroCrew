@@ -71,7 +71,7 @@ export function useExplorePreview(): boolean {
 }
 
 /**
- * The crewmate-chat-page-colours preview, reactively (#20635): the thread
+ * The crewmate-chat-page-colours preview, reactively: the thread
  * column on the Crewmates page tints from the crewmate's dashboard page only
  * while this is on. The colour query and the tint derivation sit behind it, so
  * with the flag off nothing is fetched or applied.

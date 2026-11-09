@@ -327,7 +327,7 @@ export interface DashboardRead {
    *  crewmate's turn block is told too. Absent on every other read. */
   suggestions?: boolean
   /** The bounded set of the dashboard PAGE's colour tokens the chat may follow
-   *  (#20635): `--bg` and/or `--accent`, each a CSS colour. Present only for a
+   *  `--bg` and/or `--accent`, each a CSS colour. Present only for a
    *  package page that declares one of them; the chat derives readable text from
    *  these behind the crewmate-chat-page-colours preview. Absent elsewhere. */
   page_theme?: Record<string, string>

@@ -340,8 +340,8 @@ export function FeaturePreviewsSection() {
           onChange={v => setPreviewFlag(PREVIEW_CREW_OAUTH, v)}
         />
       </SettingsCard>
-      {/* Bot chat follows its dashboard page colours (#20635;
-          `dashboard.feature_previews.chat_page_colors`). A browser-cached flag
+      {/* Bot chat follows its dashboard page colours
+          (`dashboard.feature_previews.chat_page_colors`). A browser-cached flag
           like the others above: the Crewmates-page chat reads it through
           `useChatPageColors` and tints only while it is on. Default OFF leaves
           the chat byte-for-byte as it was. */}

@@ -270,9 +270,9 @@ async def test_the_route_arms_a_live_page_through_the_resolver(
 async def test_the_body_carries_the_page_colour_tokens_the_chat_may_follow(
     wired: Any, library: Any
 ) -> None:
-    """#20635: a package page that declares `--bg`/`--accent` surfaces them in the
-    read as `page_theme`, the bounded set the Crewmates-page chat follows. A free-form
-    page token is not included, and a page with no colours carries no `page_theme`."""
+    """A package page that declares `--bg`/`--accent` surfaces them in the read as
+    `page_theme`, the bounded set the Crewmates-page chat follows. A free-form page
+    token is not included, and a page with no colours carries no `page_theme`."""
     library[PACKAGE_SLUG] = _record(
         PACKAGE_SLUG,
         _package(theme_tokens={"--bg": "#101418", "--accent": "#7c3aed", "--heading": "#ffcc00"}),

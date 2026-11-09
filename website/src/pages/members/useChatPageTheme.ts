@@ -3,13 +3,14 @@ import { useQuery } from '@tanstack/react-query'
 import type { CSSProperties } from 'react'
 import { api } from '../../api/client'
 import { retryPolicy } from '../../api/queryClient'
-import { MEMBER_DASHBOARD_QUERY_PREFIX } from '../../hooks/useWebSocket'
+import { useLanguage } from '../../i18n/LanguageProvider'
 import { useChatPageColors } from '../../hooks/usePreviewFlag'
+import { dashboardQueryKey } from './dashboardQueryKey'
 import { chatThemeVars } from './pageChatTheme'
 
 /**
  * The CHAT column's colour overrides for the open crewmate, from that
- * crewmate's dashboard PAGE (#20635).
+ * crewmate's dashboard PAGE.
  *
  * Returns a style object of CSS-variable overrides to spread onto the thread
  * column, or `{}` when nothing applies. Empty is the default-OFF, byte-for-byte
@@ -22,22 +23,38 @@ import { chatThemeVars } from './pageChatTheme'
  *   - the page declares none of the colour tokens the chat follows;
  *   - a declared background whose derived text cannot be made readable.
  *
- * Shares the member-dashboard read's query key with the Dashboard tab, so when
- * both are mounted there is one fetch and one cache entry, and a page the
- * crewmate changes, replaces or rolls back moves the chat the moment the tab's
- * read refreshes.
+ * SHARES THE DASHBOARD TAB'S EXACT QUERY: the same key and the same
+ * locale-carrying `queryFn` the tab uses (`[…dashboardQueryKey, locale,
+ * 'live']`). This matters beyond saving a fetch — the gateway ARMS a live page
+ * per read (`member_dashboard._serve_package`), keyed by `(slug, package)`, and
+ * a second read under a different key (or with no locale) would disarm the tab's
+ * page and re-arm one with the default locale, so a non-English reader's pushes
+ * would arrive in English. Reading through the tab's own cache entry means one
+ * armed page, the reader's locale, and one refresh that moves both the tab and
+ * the chat.
  */
 export function useChatPageTheme(slug: string, member: string): CSSProperties {
   const on = useChatPageColors()
+  const { resolved: locale } = useLanguage()
   const enabled = on && Boolean(slug) && Boolean(member)
   const { data } = useQuery({
-    queryKey: [MEMBER_DASHBOARD_QUERY_PREFIX, slug, member, 'chat-page-colors'],
-    queryFn: () => api.memberDashboard(slug, member),
+    // The tab's live key, verbatim: `[prefix, slug, member, locale, 'live']`.
+    queryKey: [...dashboardQueryKey({ kind: 'member', slug, member }), locale, 'live'],
+    queryFn: () => api.memberDashboard(slug, member, locale),
     enabled,
     retry: retryPolicy,
-    // The page theme changes rarely; a stale read tinting the chat for a minute
-    // is harmless and saves a fetch on every thread switch.
+    // The tab owns refresh (its WS-driven refetch and its long fallback poll).
+    // Here a stale read tinting the chat briefly is harmless, and this must not
+    // start a refetch cadence of its own on a key the tab also holds.
     staleTime: 60_000,
   })
-  return useMemo(() => (enabled ? (chatThemeVars(data?.page_theme) as CSSProperties) : {}), [enabled, data?.page_theme])
+  return useMemo(() => {
+    const vars = enabled ? chatThemeVars(data?.page_theme) : {}
+    if (!Object.keys(vars).length) return {}
+    // Setting `--text` alone does not recolour text that INHERITS `color`: the
+    // inherited value was already computed from the app's `--text` higher up.
+    // So the column re-reads it here, and chrome with no text class of its own
+    // (the header's identity pill) follows the derived colour.
+    return { ...vars, color: 'var(--text)' } as CSSProperties
+  }, [enabled, data?.page_theme])
 }

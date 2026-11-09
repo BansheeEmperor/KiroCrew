@@ -632,7 +632,7 @@ export function MembersPageThreadColumn({
   const { closeTeamView, teamMembers } = teamView
   // Import from file on the empty roster's hero (the switcher is not shown yet).
   const [importing, setImporting] = useState(false)
-  // The chat's colours from the open crewmate's dashboard PAGE (#20635), behind
+  // The chat's colours from the open crewmate's dashboard PAGE, behind
   // a default-off preview. `{}` with the flag off, with no crewmate open, or for
   // a page that declares none — so the column paints exactly today's chat then.
   // Scoped to this `<section>`, which is the chat's own column: the side panel is
@@ -685,11 +685,15 @@ export function MembersPageThreadColumn({
             // opens no chat, and hiding the column would hide the one place the
             // failure and its retry are said.
             className={`${activeName || activeTeam || postCreateError ? 'flex' : 'hidden md:flex'} flex-1 min-w-0 flex-col min-h-0 relative`}
-            // The crewmate page's colours as local variable overrides (#20635),
+            // The crewmate page's colours as local variable overrides,
             // or `{}` (default-off / no page colours) which sets nothing. The
             // chat surfaces below resolve `--bg` / `--text` / `--accent` from
             // here, so one spread themes the whole column.
             style={chatPageTheme}
+            // Marks the column while page colours apply, so the theme rules that
+            // paint links and inline code a FIXED colour (Kiro's purples in
+            // `chat-transcript.css`) yield to the local palette here.
+            data-page-colors={Object.keys(chatPageTheme).length ? '' : undefined}
             ref={threadColumnRef}
             // The page's main column: the thread (or the team view, or an empty
             // state), and never the side panel, which is a sibling of this section.
