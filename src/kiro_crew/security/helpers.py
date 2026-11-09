@@ -73,19 +73,21 @@ def contains_injection(text: str | None) -> bool:
 _RLIMIT_DEFAULTS = {
     # RLIMIT_NOFILE: max open file descriptors (per-process). Caps FD leaks.
     "max_open_files": 1024,
-    # RLIMIT_NPROC: max processes for the child's real UID. 0 = disabled
-    # (default). CAVEAT: this is enforced per real-UID against the count of ALL
-    # the user's existing processes AND threads — NOT the spawn's own subtree.
-    # A busy login/desktop UID can already hold thousands of threads (a fork
-    # bomb is bounded only relative to that shared total), so any fixed cap that
-    # is tight enough to matter is below a real host's baseline and would make
-    # EVERY spawn fail to fork (EAGAIN). Safe to enable ONLY when the gateway
-    # runs as its own dedicated UID; operators opt in via config there.
+    # RLIMIT_NPROC: max processes for the child's real UID, read from
+    # ``max_user_processes``. 0 = disabled (default). CAVEAT: this is enforced
+    # per real-UID against the count of ALL the user's existing processes AND
+    # threads — NOT the spawn's own subtree. A busy login/desktop UID can
+    # already hold thousands of threads (a fork bomb is bounded only relative to
+    # that shared total), so any fixed cap that is tight enough to matter is
+    # below a real host's baseline and would make EVERY spawn fail to fork
+    # (EAGAIN). Safe to enable ONLY when the gateway runs as its own dedicated
+    # UID; operators opt in via config there.
     # NOTE: the fork-bomb defense that IS default-on is the cgroup v2 scope
     # (sandbox.cgroup_scope_argv → pids.max), which is per-cgroup not per-UID.
-    # This same ``max_processes`` key sets that cgroup pids.max ceiling (default
-    # 8192 there); the RLIMIT_NPROC path below stays opt-in for the reasons above.
-    "max_processes": 0,
+    # ``max_processes`` sets that pids.max ceiling (default 8192 there) and never
+    # reaches this path, because a per-scope task budget must not also cap the
+    # whole UID.
+    "max_user_processes": 0,
     # RLIMIT_CPU: CPU-seconds. 0 = disabled (default). CAVEAT: this counts
     # against the WHOLE lifetime of a long-lived process — the root agent runs
     # up to a 30-min wall-clock turn and a busy tool-heavy session can
@@ -148,8 +150,8 @@ def resource_limit_spec(config: dict | None = None) -> list[tuple[str, int]]:
     Names, not ``resource`` constants: the consumer resolves them with
     ``getattr`` and skips any its platform lacks. A value of ``0`` means "leave
     inherited" and is dropped here -- the OPPOSITE of what ``0`` means on the
-    cgroup path, which reads two of these same keys and treats ``0`` as "use the
-    module default" because systemd rejects a zero property. Both domains are
+    cgroup path, whose keys treat ``0`` as "use the module default" because
+    systemd rejects a zero property. Both domains are
     stated on ``ResourceLimitsConfig``, which is where the coercion lives.
     """
     limits = dict(_RLIMIT_DEFAULTS)
@@ -180,7 +182,7 @@ def resource_limit_spec(config: dict | None = None) -> list[tuple[str, int]]:
     # (rlimit name, requested soft/hard value in the rlimit's native unit).
     max_address_space_bytes = limits["max_address_space_mb"] * 1024 * 1024
     specs = [
-        ("RLIMIT_NPROC", limits["max_processes"]),
+        ("RLIMIT_NPROC", limits["max_user_processes"]),
         ("RLIMIT_NOFILE", limits["max_open_files"]),
         ("RLIMIT_CPU", limits["max_cpu_seconds"]),
         ("RLIMIT_AS", max_address_space_bytes),
@@ -192,7 +194,8 @@ def apply_resource_limits(config: dict | None = None) -> "Callable[[], None]":
     """Return a preexec_fn that applies POSIX resource limits to a child process.
 
     Reads limits from the ``resource_limits`` config section:
-      - ``max_processes``: RLIMIT_NPROC (process count for the child's UID).
+      - ``max_user_processes``: RLIMIT_NPROC (process count for the child's
+        UID). ``max_processes`` is the cgroup task cap and sets no rlimit.
       - ``max_open_files``: RLIMIT_NOFILE (open file descriptors).
       - ``max_cpu_seconds``: RLIMIT_CPU in seconds (``0`` disables — default).
       - ``max_address_space_mb``: RLIMIT_AS (virtual address space) in MB
