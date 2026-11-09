@@ -24,6 +24,7 @@ function windowsHolder({
   const dialogs = [];
   const stops = [];
   const ownership = [];
+  const probes = [];
   let dialogShown = false;
   const decision = createHolderDecision({
     app: { isPackaged: true, getVersion: () => "0.12.0" },
@@ -44,7 +45,7 @@ function windowsHolder({
     setGatewayOwnership: (value) => ownership.push(value),
     probeGatewayPortOwner: async () => "foreign",
     snapshotGatewayPortPids: async () => pids,
-    probeLockHolderPid: async () => lock,
+    probeLockHolderPid: async (options) => { probes.push(options); return lock; },
     fetchHealthInfo: async () => health,
     fetchGatewayReadiness: async () => "ready",
     waitForPortFree: async () => true,
@@ -55,7 +56,7 @@ function windowsHolder({
       stops.push({ pid, trustsProven: isTrustedCommand(command), trustsOther: isTrustedCommand("\"C:\\x.exe\"") });
     },
   });
-  return { decision, dialogs, stops, ownership };
+  return { decision, dialogs, stops, ownership, probes };
 }
 
 test("a proven older Windows gateway is named in a dialog and stopped on request", async () => {
@@ -108,4 +109,17 @@ test("a holder that changed while the dialog was open is not stopped", async () 
   const { decision, stops } = windowsHolder({ response: 0, commandAfterDialog: '"C:\\Tools\\other.exe" serve' });
   assert.strictEqual(await decision.resolveGatewayConflict(), "foreign-holder");
   assert.deepStrictEqual(stops, []);
+});
+
+test("the lock probe is asked about this port, so a Windows run record can name the holder", async () => {
+  const { decision, probes } = windowsHolder({ response: 2 });
+  await decision.resolveGatewayConflict();
+  assert.ok(probes.length > 0);
+  for (const options of probes) assert.deepStrictEqual(options, { port: 5476 });
+});
+
+test("a holder that changed while the dialog was open is not adopted by Use it", async () => {
+  const { decision, ownership } = windowsHolder({ response: 1, commandAfterDialog: '"C:\\Tools\\other.exe" serve' });
+  assert.strictEqual(await decision.resolveGatewayConflict(), "foreign-holder");
+  assert.deepStrictEqual(ownership, []);
 });

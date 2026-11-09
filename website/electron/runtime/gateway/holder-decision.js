@@ -214,7 +214,9 @@ function createHolderDecision({
     if (!IS_WIN || !windowsCommand) return null;
     const pids = await snapshotGatewayPortPids(PORT);
     if (pids?.length !== 1) return null;
-    const lock = await probeLockHolderPid();
+    // With the port, a Windows lock whose stamp the mandatory lock hides is
+    // named from the gateway's own fresh run record for that port.
+    const lock = await probeLockHolderPid({ port: PORT });
     if (lock?.verdict !== "captured" || lock.pid !== pids[0]) return null;
     const command = String((await windowsCommand(pids[0])) || "").trim();
     const executable = /^"([^"]+)"/.exec(command)?.[1] || "";
@@ -246,15 +248,15 @@ function createHolderDecision({
       cancelId: buttons.length - 1,
     });
     const choice = buttons[response];
-    if (choice === "Use it") return "adopt";
-    if (choice !== "Stop it and restart") return "abort";
-    // The dialog can stay open for minutes. Stop only the same process it
-    // named: same pid, still this home's lock holder, same command line.
+    if (choice !== "Use it" && choice !== "Stop it and restart") return "abort";
+    // The dialog can stay open for minutes. Use or stop only the same process
+    // it named: same pid, still this home's lock holder, same command line.
     const again = await provenWindowsHomeGateway();
     if (!again || again.pid !== proven.pid || again.command !== proven.command) {
-      glog(`windows gateway: :${PORT} changed holder while the dialog was open — stopping nothing`);
+      glog(`windows gateway: :${PORT} changed holder while the dialog was open — ${choice === "Use it" ? "adopting" : "stopping"} nothing`);
       return "foreign-holder";
     }
+    if (choice === "Use it") return "adopt";
     sendStatus("Stopping the previous gateway…");
     try {
       await windowsStopPid(proven.pid, (command) => String(command || "").trim() === proven.command);
