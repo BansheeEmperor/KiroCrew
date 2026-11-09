@@ -1151,6 +1151,7 @@ class TestSessionManagerPlugin:
         commands: list[list[str]] = []
 
         monkeypatch.setattr(ssm, "session_manager_plugin_installed", lambda: next(installed))
+        monkeypatch.setattr(ssm, "_sudo_cannot_prompt", lambda: False)
         monkeypatch.setattr(
             ssm,
             "_session_manager_plugin_install_plan",
