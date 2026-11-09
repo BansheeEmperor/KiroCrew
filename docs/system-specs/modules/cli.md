@@ -1052,7 +1052,11 @@ exits non-zero and tells the user to retry after fixing the local prerequisite.
 The instance-size picker supports arrow keys in an interactive terminal
 (`↑`/`↓`, `j`/`k`, digit shortcuts, Enter to select) and falls back to the
 numbered prompt for non-TTY input. Ctrl-C must interrupt prompts and long AWS
-subprocesses; unhandled cloud-command interrupts return exit code 130.
+subprocesses; unhandled cloud-command interrupts return exit code 130. A yes/no
+question reads end of input as no, whatever its default: no answer is never
+consent, so `cloud launch < /dev/null` creates no stack and installs no plugin.
+An account confirmation declined off a terminal names `--yes` as the way to
+accept non-interactively.
 
 Remote Kiro sign-in prefers the device-code flow over SSM. The launcher starts
 `kiro-cli login --use-device-flow` as a background process on the instance,
