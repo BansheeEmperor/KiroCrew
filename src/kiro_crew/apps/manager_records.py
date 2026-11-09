@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Sequence
 
-from kiro_crew.apps import credential_masks
+from kiro_crew.apps import agent_readonly_dirs, credential_masks
 from kiro_crew.apps.host_exec_grants import revoke_host_exec
 from kiro_crew.apps.manifest import AppManifest, Permissions
 from kiro_crew.apps.point_grants import point_grant_families
@@ -555,6 +555,10 @@ def _write_installed(
             credential_masks.remember_declaration(name)
         except OSError:
             logger.warning("could not record %s's credential masks", name, exc_info=True)
+        try:
+            agent_readonly_dirs.remember_declaration(name)
+        except OSError:
+            logger.warning("could not record %s's agent read-only dirs", name, exc_info=True)
         # REVOKE-ONLY: drop any host-exec grant whenever a write leaves the app
         # disabled, so no disable path (disable, widen-until-consent, update) can leave
         # a stale grant that still starts a pod. Deliberately never GRANTS here: this

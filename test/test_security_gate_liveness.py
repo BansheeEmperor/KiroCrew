@@ -739,7 +739,12 @@ def _url_payload_command(n: int) -> str:
 #: ``max_address_space_mb``. Re-measured.
 #: Raised by 3, from 35,143, for the ``crew-oauth-bridge`` leaf on the read-gate floor
 #: in ``paths_lists`` (Connection bridge snapshots, fenced from file tools). Re-measured.
-_PACKAGE_LINE_BUDGET = 35_146
+#: Raised by 68, from 35,146, for ``paths_targets._app_readonly_dir_rows`` and its facade
+#: manifest rows: the write gate's listing of the apps' ``agentReadOnlyDirs`` rows runs
+#: on the ``mc-pathres`` threads within the anchor rebuild's budget for every caller and
+#: is reused for a second on the event loop, so no gate scans ``apps/`` on its own
+#: thread. A miss refuses. Re-measured.
+_PACKAGE_LINE_BUDGET = 35_214
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
