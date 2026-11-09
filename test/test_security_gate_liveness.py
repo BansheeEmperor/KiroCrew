@@ -739,7 +739,11 @@ def _url_payload_command(n: int) -> str:
 #: ``max_address_space_mb``. Re-measured.
 #: Raised by 3, from 35,143, for the ``crew-oauth-bridge`` leaf on the read-gate floor
 #: in ``paths_lists`` (Connection bridge snapshots, fenced from file tools). Re-measured.
-_PACKAGE_LINE_BUDGET = 35_146
+#: Raised by 40, from 35,146, for the deny view's Windows program-suffix view (at the
+#: program word, past ``sudo``-style wrappers and ``cmd /c``), the in-word ``^``/backtick
+#: view and the ``aws.exe`` spelling in the s3 download reader. Views only add matches;
+#: nothing is relaxed. Re-measured.
+_PACKAGE_LINE_BUDGET = 35_186
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
