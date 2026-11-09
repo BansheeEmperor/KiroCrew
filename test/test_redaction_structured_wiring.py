@@ -77,6 +77,118 @@ def test_a_labelled_aws_secret_streams_as_the_batch_pass(table_on, size):
     assert out + stream.flush() == redact(text)
 
 
+#: Letters and ``+/`` only: the bare-secret pass needs a digit, so only pass 1 can
+#: remove a 40-character secret drawn from it.
+_NO_DIGITS = "".join(c for c in B64 if not c.isdigit())
+
+#: Labelled secrets the detectors' parser does not read (mid-line after a word, a
+#: newline before the value, a separator wider than eight blanks).
+_UNREAD_LABELS = [
+    "INFO SecretAccessKey: {v} done",
+    "INFO aws_secret_access_key = {v} done",
+    "aws_secret_access_key =\n{v}\n",
+    "SecretAccessKey:" + " " * 12 + "{v}\n",
+]
+
+
+@pytest.mark.parametrize("shape", _UNREAD_LABELS)
+def test_a_labelled_secret_the_detectors_do_not_read_is_still_removed(table_on, shape):
+    secret = synth(40, _NO_DIGITS, seed=41)
+    text = shape.format(v=secret)
+    assert secret not in redact_credentials(text)[0]
+    stream = StreamRedactor()
+    out = "".join(stream.feed(text[i : i + 7]) for i in range(0, len(text), 7))
+    assert secret not in out + stream.flush()
+
+
+def _png_with_text(words: bytes) -> str:
+    """A base64 PNG whose ``tEXt`` chunk holds ``words``."""
+    import base64
+
+    head = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + b"\x00" * 17
+    chunk = len(words).to_bytes(4, "big") + b"tEXt" + words + b"\x00" * 4
+    return base64.b64encode(head + chunk + b"\x00\x00\x00\x00IEND\xaeB`\x82").decode()
+
+
+@pytest.mark.parametrize("shape", ["![c](data:image/png;base64,{v})", "image {v} end"])
+def test_an_image_payload_holding_an_encoded_secret_is_removed(table_on, shape):
+    payload = _png_with_text(b"Comment\x00aws_secret_access_key=" + aws_secret(seed=42).encode())
+    text = shape.format(v=payload)
+    assert payload not in redact_credentials(text)[0]
+    stream = StreamRedactor()
+    out = "".join(stream.feed(text[i : i + 7]) for i in range(0, len(text), 7))
+    assert payload not in out + stream.flush()
+
+
+@pytest.mark.parametrize(
+    "shape", ["x-amz-id-2: {v}\n", '{{"HostId": "{v}"}}', "<HostId>{v}</HostId>"]
+)
+def test_a_request_id_holding_an_encoded_secret_is_removed(table_on, shape):
+    import base64
+
+    words = b"aws_secret_access_key=" + aws_secret(seed=43).encode() + b" ok"
+    value = base64.b64encode(words).decode()
+    text = shape.format(v=value)
+    assert value not in redact_credentials(text)[0]
+
+
+_HEX40 = synth(40, "0123456789abcdef", seed=44)
+_HEX64 = synth(64, "0123456789abcdef", seed=45)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "Authorization: Bearer {v}\n",
+        'curl -H "Authorization: Bearer {w}" https://api.example.test',
+        "see https://h.example.test/cb?token={v} ok",
+        "npm_{v} done",
+    ],
+)
+def test_a_hex_credential_shaped_like_a_git_object_name_is_removed(table_on, shape):
+    """A hex run inside a credential (a Bearer header, a ``token=`` value) is judged by
+    main's passes, as with the switch off, not kept as a git object name."""
+    text = shape.format(v=_HEX40, w=_HEX64)
+    compat.publish_use_rule_table(False)
+    off = redact_credentials(text)[0]
+    compat.publish_use_rule_table(True)
+    on = redact_credentials(text)[0]
+    for value in (_HEX40, _HEX64):
+        if value in text and value not in off:
+            assert value not in on, on
+
+
+def test_a_bare_git_object_name_stays_visible(table_on):
+    text = f"commit {_HEX40} and tree {_HEX64}"
+    assert redact_credentials(text)[0] == text
+
+
+@pytest.mark.parametrize(
+    "shape", ["![c](data:image/png;base64,{v})", "data:image/jpeg;base64,{v} ok"]
+)
+def test_a_bitmap_data_uri_holding_a_bare_secret_is_removed(table_on, shape):
+    """A payload that is not image bytes (here a bare AWS secret) is not an image."""
+    secret = aws_secret(seed=46)
+    text = shape.format(v=secret)
+    assert secret not in redact_credentials(text)[0]
+    stream = StreamRedactor()
+    out = "".join(stream.feed(text[i : i + 7]) for i in range(0, len(text), 7))
+    assert secret not in out + stream.flush()
+
+
+@pytest.mark.parametrize("shape", ["![c](data:image/png;base64,{v})", "image {v} end"])
+def test_an_image_payload_holding_an_unlabelled_secret_is_removed(table_on, shape):
+    payload = _png_with_text(b"Comment\x00" + aws_secret(seed=47).encode())
+    text = shape.format(v=payload)
+    assert payload not in redact_credentials(text)[0]
+
+
+def test_an_image_payload_holding_no_secret_stays_visible(table_on):
+    payload = _png_with_text(b"Comment\x00made with a camera")
+    text = f"![c](data:image/png;base64,{payload})"
+    assert redact_credentials(text)[0] == text
+
+
 def test_a_bare_aws_key_id_stays_visible(table_on):
     key_id = aws_key_id(seed=21)
     assert redact_credentials(f"id {key_id} end")[0] == f"id {key_id} end"

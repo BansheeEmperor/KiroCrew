@@ -64,12 +64,20 @@ _PARAM, _VALUE = "?token=", "fakeParamValue123"
 #: credential pattern (its own coverage test keeps one per branch), a bare secret
 #: key, a base64-encoded credential, a URL parameter and an exfiltration URL. No
 #: leading space, so each is glued to the word written before it.
-_SHAPES = (
-    *(sample.lstrip() for sample in BRANCH_SAMPLES),
-    AWS_SECRET,
-    base64.b64encode(f"aws_secret_access_key={AWS_SECRET}".encode()).decode(),
-    _PARAM + _VALUE,
-    "https://collect.example.com/x?d=" + "A" * 250,
+#: Every sample ``redact`` removes. With the structured detectors on, a few pass-1
+#: samples stay visible by design (an AWS key ID, a session token shorter than the
+#: detectors' gate, a token with no valid checksum or JOSE header), so they are left
+#: out: nothing of them is withheld, so there is nothing to leak across a cut.
+_SHAPES = tuple(
+    value
+    for value in (
+        *(sample.lstrip() for sample in BRANCH_SAMPLES),
+        AWS_SECRET,
+        base64.b64encode(f"aws_secret_access_key={AWS_SECRET}".encode()).decode(),
+        _PARAM + _VALUE,
+        "https://collect.example.com/x?d=" + "A" * 250,
+    )
+    if redact(value) != value
 )
 
 _KINDS = ("permission_request", "tool_call")

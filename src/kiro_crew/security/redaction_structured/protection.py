@@ -53,6 +53,9 @@ _IMAGE_TYPE = "image/"
 #: Bitmap subtypes only. ``svg+xml`` (and any other image type) is a text document a
 #: credential can sit in, so its payload is read by the later passes like any text.
 _BITMAP_SUBTYPES = frozenset({"png", "jpeg", "jpg", "gif", "webp", "avif", "bmp"})
+#: Base64 of the PNG, JPEG, GIF and RIFF (WebP) file signatures (``image.base64``'s
+#: labels), plus BMP's ``BM``.
+_BITMAP_SIGNATURES = ("iVBORw0KGgo", "/9j/", "R0lGOD", "UklGR", "Qk")
 _DATA = "data:"
 #: How far before a payload its ``data:`` header can start: a media type, up to eight
 #: parameters and ``;base64,`` (the data URI row's own bounds).
@@ -76,6 +79,11 @@ def _image_payload(text: str, h: Hit) -> tuple[int, int] | None:
     if window[sub:end] not in _BITMAP_SUBTYPES:
         return None
     return h.start, h.end
+
+
+def opens_with_bitmap_signature(text: str, start: int) -> bool:
+    """Whether the base64 at ``text[start:]`` opens with a bitmap file signature."""
+    return text.startswith(_BITMAP_SIGNATURES, start)
 
 
 def _merged(spans: list[tuple[int, int]]) -> tuple[list[int], list[int]]:

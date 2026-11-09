@@ -63,6 +63,7 @@ It is ON and there is no user setting for it.
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import logging
 import threading
@@ -153,6 +154,41 @@ def _jose_refusal_ruled(text: str, m: Any) -> bool:
     return not (isinstance(alg, str) and alg and alg.lower() != "none")
 
 
+#: Covered pass-1 rules that read a value after an AWS label. The detectors read
+#: that label only in the inputs they parse, so pass 1 keeps every match whose
+#: value the detectors have not ruled on (:func:`_labelled_value_ruled`).
+_LABELLED_RULES = frozenset({"aws_secret_access_key", "aws_session_token"})
+
+
+def _labelled_value_ruled(text: str, m: Any, rule: str, label: str) -> bool:
+    """Whether the detectors already ruled on a labelled AWS match's value.
+
+    They did when the value is their tag (a Secret hit), holds a
+    :data:`PLACEHOLDER` (a protected Identifier), is a placeholder they keep
+    visible by design, or lacks the shape their gate requires (a 40-character
+    secret run, or a base64 run of at least 100 for a session token), such as a
+    link after the label. A value with that shape in a place they never read
+    (mid-line after a word, past a newline, past a wide separator) is kept, and
+    pass 1 removes it as with the switch off.
+    """
+    from kiro_crew.security.redaction_structured.charsets import B64STD, run_end
+    from kiro_crew.security.redaction_structured.checks import is_placeholder
+    from kiro_crew.security.redaction_structured.known_key import SECRET_LEN, SESSION_MIN
+
+    if not label:
+        return False
+    vs = m.start() + len(label)
+    if any(text.startswith(tag, vs) for tag in redaction.CREDENTIAL_REDACTION_TAGS):
+        return True
+    value = m.group()[len(label) :].strip("\"'")
+    if PLACEHOLDER in value or is_placeholder(value):
+        return True
+    run = run_end(value, 0, B64STD)
+    if rule == "aws_session_token":
+        return run < SESSION_MIN
+    return run != SECRET_LEN
+
+
 def residual_matches(text: str) -> Iterator[Any]:
     """Pass 1's matches (``re.Match`` objects) over ``text`` without the covered branches.
 
@@ -160,11 +196,16 @@ def residual_matches(text: str) -> Iterator[Any]:
     (an Identifier the detectors keep visible), and a labelled ``AccessKeyId``
     whose value holds a :data:`PLACEHOLDER` (its key ID is protected).
     A ``jwt`` match is dropped only for a refusal the detectors make by design
-    (:func:`_jose_refusal_ruled`); pass 1 still removes every other one.
+    (:func:`_jose_refusal_ruled`), and a labelled AWS secret or session token only
+    when the detectors ruled on its value (:func:`_labelled_value_ruled`); pass 1
+    still removes every other one.
     """
     for m in redaction._credential_matches(text):
         rule, label = redaction._pass1_rule(m.group())
-        if rule in COVERED_RULES and (rule != _JWT_RULE or _jose_refusal_ruled(text, m)):
+        if rule in _LABELLED_RULES:
+            if _labelled_value_ruled(text, m, rule, label):
+                continue
+        elif rule in COVERED_RULES and (rule != _JWT_RULE or _jose_refusal_ruled(text, m)):
             continue
         if rule == _KEY_ID_RULE and (not label or PLACEHOLDER in m.group()[len(label) :]):
             continue
@@ -350,6 +391,93 @@ def _with_placeholders(text: str, masks: list[Mask]) -> str:
     return "".join(parts)
 
 
+def _decodes_to_bare_secret(chunk: str) -> bool:
+    """Whether ``chunk``'s decoded bytes hold an unlabelled 40-character AWS secret.
+
+    Image bytes almost never carry 40 base64-alphabet bytes in a row, so a run that
+    does (text metadata such as a PNG ``tEXt`` chunk) is judged like any text.
+    """
+    import base64
+    import binascii
+
+    try:
+        raw = base64.b64decode(chunk, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return redaction._text_contains_bare_secret(raw.decode("latin-1"))
+
+
+#: Base64 length below which a data URI payload cannot hold a whole bitmap: the
+#: smallest well-formed GIF, PNG or JPEG is more than 43 bytes (58 characters).
+_MIN_BITMAP_B64 = 64
+
+
+def _unmask_encoded_credentials(text: str, masks: list[Mask]) -> list[Mask]:
+    """``masks`` without each one that touches a base64 run decoding to a credential.
+
+    The encoded-credential pass reads the text after the masks are written, so a
+    mask over such a run (an image payload with a key in its metadata, a request id
+    that decodes to one) would hide it. Each run a mask touches is decoded here on
+    the original text; a mask over a credential is dropped, and the pass then reads
+    and removes that run as it does with the switch off. ``masks`` are sorted and
+    disjoint, so one walk serves every run.
+    """
+    if not masks:
+        return masks
+    from kiro_crew.security.redaction_structured.protection import opens_with_bitmap_signature
+
+    # A bitmap data URI's payload too short to be an image, with no file signature,
+    # that reads as a bare secret is a secret behind an image media type.
+    dropped: set[int] = {
+        k
+        for k, (s, e, rule) in enumerate(masks)
+        if rule == "data_uri"
+        and e - s < _MIN_BITMAP_B64
+        and not opens_with_bitmap_signature(text, s)
+        and redaction._text_contains_bare_secret(text[s:e])
+    }
+    i = 0
+    for m in redaction._B64_CHUNK_RE.finditer(text):
+        while i < len(masks) and masks[i][1] <= m.start():
+            i += 1
+        j = i
+        while j < len(masks) and masks[j][0] < m.end():
+            j += 1
+        if j > i and (redaction._decode_b64_chunk(m.group()) or _decodes_to_bare_secret(m.group())):
+            dropped.update(range(i, j))
+    return [mask for k, mask in enumerate(masks) if k not in dropped]
+
+
+def _unmask_credential_matches(text: str, masks: list[Mask]) -> list[Mask]:
+    """``masks`` without each one that overlaps a pass-1 match pass 1 still reports.
+
+    A value inside a credential (a hex ``Bearer`` token, a vendor token's hex body)
+    can also read as an Identifier such as a git object name. Hiding it would stop
+    pass 1 from matching the credential, so such a mask is dropped and pass 1
+    removes the credential as with the switch off. Matches for the branches the
+    detectors cover, and an AWS key ID match, keep their masks.
+    """
+    if not masks:
+        return masks
+    spans = [
+        m.span()
+        for m in redaction._credential_matches(text)
+        if redaction._pass1_rule(m.group())[0] not in COVERED_RULES | {_KEY_ID_RULE}
+    ]
+    if not spans:
+        return masks
+    starts = [s for s, _e in spans]
+    out: list[Mask] = []
+    for mask in masks:
+        i = bisect.bisect_right(starts, mask[1] - 1) - 1
+        # Pass-1 matches are disjoint and in order, so only the last one starting
+        # before the mask's end can overlap it.
+        if i >= 0 and spans[i][1] > mask[0]:
+            continue
+        out.append(mask)
+    return out
+
+
 def _token_param_gaps(
     plain: str, hits: list[Hit], spans: list[_Span]
 ) -> tuple[list[_Span], list[str]]:
@@ -391,6 +519,7 @@ def _combine(
 
     tag = redaction.REDACTED_CREDENTIAL_TAG
     hit_spans = [(h.start, h.end, tag) for h in hits]
+    masks = _unmask_credential_matches(text, _unmask_encoded_credentials(text, masks))
     plain = _with_placeholders(text, masks)
     # A ``token=`` value a hit touches is claimed here, gaps and all, before the
     # passes read it: they would see it as tags and clear text mixed and size its
