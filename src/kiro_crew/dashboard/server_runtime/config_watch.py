@@ -250,6 +250,11 @@ def _register_config_watch(
         # reaches the others without a reload.
         if change.touched("dashboard.feature_previews"):
             state.push_refresh("config")
+            # Connected computers has server behavior: switching it off ends its
+            # live sockets and local grants (scheduled off this cycle).
+            from kiro_crew.connected_computers import disable as connected_computers
+
+            connected_computers.apply(change)
 
     async def _sync_stale_wake(change: ConfigChange) -> None:
         # The `dashboard_stale_wake` preview's one cron job exists only while the
@@ -350,6 +355,11 @@ def _register_config_watch(
 
     async def _config_watch_shutdown(app_: web.Application) -> None:
         await live.watch().stop()
+        # Connected computers: stop local connectors (and their process trees)
+        # and close remote connector sockets. Grants and records are kept.
+        from kiro_crew.connected_computers.disable import shutdown as connected_shutdown
+
+        await connected_shutdown()
         lifecycle = getattr(state, "_dynamic_cards", None)
         if lifecycle is not None:
             # One call rather than reaching for a worker attribute: the producer owns two
@@ -395,6 +405,11 @@ def _kick_config_watch(app: web.Application, state: DashboardState) -> None:
             await live.watch().start(initial=initial)
         except Exception:  # noqa: BLE001 — a dead watcher must not take the gateway down
             logger.warning("Live config watcher failed to start", exc_info=True)
+        # Post-bind, in this background task: the local controller of connected
+        # computers, only when this machine opted in. It never blocks the boot.
+        from kiro_crew.connected_computers.disable import start_if_enabled
+
+        start_if_enabled()
 
     task = asyncio.create_task(_start())
     state._background_tasks.add(task)

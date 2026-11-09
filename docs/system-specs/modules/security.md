@@ -3418,6 +3418,37 @@ re-parsed into GUI sub-effects; and the **web terminal PTY**
 `is_sensitive_bash_command` / governance call at all, so it is an operator-only,
 ungoverned plane.
 
+### Connected computers: a second, local OS fence
+
+Feature preview `connected_computers` (owner: `connected_computers/`, spec:
+[providers.md](providers.md)). A chat on a remote gateway can run its workspace tools
+and the user's explicitly exposed local MCP servers on the user's own computer. That
+computer runs them under its OWN fence, separate from `sandbox.py`, which this
+feature does not widen or change:
+
+- **An allow-list, not a mask** (`confinement.py`): a child may write only the
+  granted root and a private scratch, and read only those plus its runtime. Linux
+  uses `bwrap` with new user, PID, IPC and UTS namespaces and a seccomp filter
+  (`seccomp.py`) that refuses AF_UNIX sockets (abstract X11 and session-bus
+  sockets), io_uring, and `keyctl`/`add_key`/`request_key` (the user's session
+  keyring). macOS uses a Seatbelt profile with a Mach-service allow-list. Windows
+  and any processor without a seccomp table refuse; nothing falls back to an
+  unconfined run.
+- **Proved before each connect** (`self_test`): one probe runs unconfined and then
+  confined against fresh witnesses outside the root; any witness the confined run
+  reaches fails the connect.
+- **Consent is native only**: a desktop dialog and folder picker; no CLI verb, page
+  or agent tool can share a folder. The connector credential is per device and
+  gateway, sealed under an OS keyring key (`protected_store.py`, tools resolved
+  with `trusted_system_bin_quiet`), and sent only after the gateway proved itself.
+- **Every narrowing is immediate**: a revoke or Off from any local process stops
+  new input at the next frame and the process tree within a bound.
+- **Auth surface**: `GET /api/connected-computers/connect` bypasses the dashboard
+  token and checks its own credential; three consent paths are STRICT internal
+  ([dashboard-token-auth](dashboard-token-auth.md)). `@computer-*` and
+  `@workspace` tools are never pre-authorized past Kiro Crew's own gate
+  (`platform.governance.may_skip_gate` answers False for both).
+
 ### Suspicious Bash Patterns (`security/`)
 
 Patterns in `SUSPICIOUS_BASH_PATTERNS` are checked by the advisory
