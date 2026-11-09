@@ -78,6 +78,7 @@ from kiro_crew.dashboard.chat_handlers import deny_non_dashboard_caller
 from kiro_crew.git_config_hooks import ConfigHookScanError, config_hook_disable_args_sandboxed
 from kiro_crew.git_worktree_scope import worktree_probe_failure_is_empty_scope
 from kiro_crew.loop_lock import LoopBoundLock
+from kiro_crew.platform import redact_via_context
 from kiro_crew.sandbox import LAUNCHER_EXEC_FAILURE_RE, run_limited, sandboxed_spawn_argv
 from kiro_crew.security import is_sensitive_path
 from kiro_crew.sel import sel
@@ -198,8 +199,13 @@ def _run_git(
     cwd: str,
     *,
     stdout_decoder: Callable[[bytes | str | None], str] = utf8_stdout,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run git with an argv list (never a shell) inside ``cwd``, OS-sandboxed.
+
+    ``env`` is the environment the credential scrub starts from (default
+    ``os.environ``). The hook-config scan runs under it too, because its git can be
+    the one whose error the caller reads.
 
     Routed through the ``sandboxed_spawn_argv`` chokepoint, matching
     ``git_coord.py``'s treatment of agent-influenced git: the repository is
@@ -231,19 +237,19 @@ def _run_git(
     # cannot be listed safely git does not run, and the call reads as a git failure.
     try:
         hook_off = config_hook_disable_args_sandboxed(
-            cwd, spawn_argv=sandboxed_spawn_argv, mode=_SANDBOX_MODE
+            cwd, spawn_argv=sandboxed_spawn_argv, mode=_SANDBOX_MODE, env=env
         )
     except ConfigHookScanError as exc:
         return subprocess.CompletedProcess(["git", *args], 128, "", f"fatal: {exc}")
     except RuntimeError as exc:  # no sandbox backend and no explicit opt-in (scan path)
         raise SandboxUnavailable(str(exc)) from exc
     try:
-        argv, env, cleanup = sandboxed_spawn_argv(
-            ["git", *_git_no_repo_code(), *hook_off, *args], mode=_SANDBOX_MODE
+        argv, spawn_env, cleanup = sandboxed_spawn_argv(
+            ["git", *_git_no_repo_code(), *hook_off, *args], mode=_SANDBOX_MODE, env=env
         )
     except RuntimeError as exc:  # no sandbox backend and no explicit opt-in
         raise SandboxUnavailable(str(exc)) from exc
-    env["GIT_TERMINAL_PROMPT"] = "0"
+    spawn_env["GIT_TERMINAL_PROMPT"] = "0"
     try:
         # Bytes mode, decoded by utf8_stdout: text mode's universal-newline
         # translation rewrites every ``\r`` in git's stdout, and a ``\r`` in a
@@ -254,7 +260,7 @@ def _run_git(
         proc = run_limited(
             argv,
             cwd=cwd,
-            env=env,
+            env=spawn_env,
             capture_output=True,
             timeout=_GIT_TIMEOUT,
             check=False,
@@ -343,13 +349,90 @@ def _resolve_base_ref(root: str) -> str:
     return "HEAD"
 
 
+def _toplevel_probe(repo: str) -> tuple[str | None, str]:
+    """``(work-tree root, "")`` for ``repo``, or ``(None, the failed probe's stderr)``.
+
+    git's line in that stderr is what tells a folder with no repository apart from
+    one git refuses for another reason (a ``.git`` file naming a missing directory,
+    another user's repository, an unreadable one), so the create endpoint can say
+    which (:func:`_not_a_repo_refusal`). The probe runs in the C locale, as the Git
+    panel's probes do, because that classifier reads git's English wording; the
+    credential scrub keeps ``LANG``, so a localized git would otherwise answer in
+    words it does not know.
+    """
+    env = {**os.environ, "LC_ALL": "C", "LANGUAGE": "C"}
+    probe = _run_git(["rev-parse", "--show-toplevel"], repo, env=env)
+    top = probe.stdout.strip() if probe.returncode == 0 else ""
+    if not top:
+        return None, probe.stderr or probe.stdout or ""
+    return os.path.realpath(top), ""
+
+
 def _git_toplevel(repo: str) -> str | None:
     """Return the work-tree root containing ``repo``, or None if not a repo."""
-    probe = _run_git(["rev-parse", "--show-toplevel"], repo)
-    if probe.returncode != 0:
-        return None
-    top = probe.stdout.strip()
-    return os.path.realpath(top) if top else None
+    return _toplevel_probe(repo)[0]
+
+
+# `_run_git` reports a hook-config listing that git refused with this prefix
+# before the tail of that git's stderr (see `git_config_hooks.config_hook_names`).
+_HOOK_SCAN_FAILURE_RE = re.compile(r"^fatal: could not list git hook config \(\d+\): ")
+
+# git opens each of its own diagnostics with one of these (its `die`, `error` and
+# `warning` reports). The tail the hook-config scan keeps can begin inside a
+# launcher advisory, and that fragment carries no prefix, so its words (an
+# unreadable file's "Permission denied", say) never decide the cause.
+_GIT_DIAGNOSTIC_PREFIXES = ("fatal:", "error:", "warning:")
+
+# Why git could not open a project as a work tree, read from git's own line, in
+# match order: (code, lowercase fragments any of which identify it, message).
+# "not a git repository: <path>" is git's answer for a `.git` file whose
+# `gitdir:` target is not a repository; with no `.git` at all git says
+# "not a git repository (or any ...".
+_NOT_A_REPO_REASONS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    (
+        "git_dubious_ownership",
+        ("detected dubious ownership",),
+        "git refuses this repository because another user owns it "
+        "(see git's safe.directory setting)",
+    ),
+    (
+        "git_permission_denied",
+        ("permission denied",),
+        "git cannot read this repository: permission denied",
+    ),
+    (
+        "broken_gitfile",
+        ("not a git repository: ", "gitfile"),
+        "Not a git repository: this folder's .git file points at a git "
+        "directory that is missing or invalid",
+    ),
+    ("not_a_git_repository", ("not a git repository",), "Not a git repository"),
+)
+
+
+def _not_a_repo_refusal(stderr: str) -> tuple[str, str, str]:
+    """``(code, message, git's line)`` for a toplevel probe that failed with ``stderr``.
+
+    Every line is read, because git's is not always first: the sandbox launcher
+    can print a ``sandbox: WARNING`` advisory before it execs git, and those lines
+    are skipped. The hook-scan prefix is removed from each line so git's own line
+    is the detail. The first of git's lines that names a reason decides; with none,
+    the cause is unknown and git's first line (else the first remaining one, such
+    as a launcher's exec failure) is shown.
+    """
+    lines = []
+    for raw in stderr.splitlines():
+        line = _HOOK_SCAN_FAILURE_RE.sub("", raw.strip(), count=1).strip()
+        if line and not line.startswith(_SANDBOX_LAUNCHER_WARNING_PREFIX):
+            lines.append(line[:300])
+    gits = [line for line in lines if line.lower().startswith(_GIT_DIAGNOSTIC_PREFIXES)]
+    for line in gits:
+        folded = line.lower()
+        for code, fragments, message in _NOT_A_REPO_REASONS:
+            if any(fragment in folded for fragment in fragments):
+                return code, message, line
+    detail = (gits or lines or ["git failed"])[0]
+    return "git_probe_failed", "git could not open this directory as a repository", detail
 
 
 def _git_error(proc: subprocess.CompletedProcess[str]) -> str:
@@ -930,7 +1013,7 @@ async def api_worktree_create(request: web.Request) -> web.Response:
         return web.json_response({"error": "Access denied"}, status=403)
 
     try:
-        root = await asyncio.to_thread(_git_toplevel, repo_root)
+        root, probe_stderr = await asyncio.to_thread(_toplevel_probe, repo_root)
     except SandboxUnavailable as exc:
         # Fail CLOSED: no OS isolation available, so the spawn does not happen.
         logger.warning("worktree_create: sandbox unavailable: %s", exc)
@@ -944,9 +1027,30 @@ async def api_worktree_create(request: web.Request) -> web.Response:
         return web.json_response({"error": _SANDBOX_REFUSAL}, status=503)
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("worktree_create: git toplevel probe failed: %s", exc)
+        sel().log_api_access(
+            caller=caller,
+            operation="worktree_create",
+            outcome="error",
+            resources=f"repo={repo_root}",
+            error=f"git is unavailable: {exc}",
+        )
         return web.json_response({"error": "git is unavailable"}, status=503)
     if not root:
-        return web.json_response({"error": "Not a git repository"}, status=400)
+        # git's own line says which of several causes this is, and the card shows
+        # the message, so a folder whose `.git` file points at a missing directory
+        # is not answered as if it had no repository at all.
+        code, message, detail = _not_a_repo_refusal(probe_stderr)
+        sel().log_api_access(
+            caller=caller,
+            operation="worktree_create",
+            outcome="denied",
+            resources=f"repo={repo_root}",
+            error=f"not a git repository: {code}: {detail}",
+        )
+        return web.json_response(
+            {"error": message, "code": code, "detail": redact_via_context(detail)},
+            status=400,
+        )
     # Re-check the toplevel: resolving upward from an allowed subdirectory can
     # land on a repo root ABOVE every allowed root, which the match above never
     # saw. Without this, granting a nested directory would let git operate on an

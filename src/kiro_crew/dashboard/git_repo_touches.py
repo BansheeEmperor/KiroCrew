@@ -100,6 +100,10 @@ _MAX_PENDING_CANDIDATES_PER_SLOT = 64
 #: the project branch probe's tests read it.
 _GIT_ROOT_WALK_LIMIT = 40
 
+#: Bytes of a ``.git`` file read for its ``gitdir:`` line. A real pointer is one
+#: path, so this is far more than one needs and bounds a hostile oversized file.
+_GITFILE_READ_LIMIT = 4096
+
 #: Paths per transcript seed. A long session can hold thousands of file-change
 #: rows; the newest are the ones worth listing.
 _MAX_SEED_PATHS = 256
@@ -253,6 +257,32 @@ def _ceiling_dirs() -> set[str]:
     return {os.path.normpath(p) for p in raw.split(os.pathsep) if p}
 
 
+def _gitfile_is_broken(dot_git: str, cur: str) -> bool:
+    """Whether the ``.git`` FILE at *dot_git* names no existing git directory.
+
+    A linked worktree's or a submodule's ``.git`` is a file holding ``gitdir:
+    <path>``, relative to *cur* when not absolute. When that line is malformed or
+    its target is not a directory, git cannot open *cur* ("not a git repository:
+    <path>") and stops its discovery there rather than climbing on. A ``.git``
+    directory, and a file the sensitive-path gate refuses or that cannot be read,
+    are not judged here: the read goes through ``hooks.safe_read_prefix`` because
+    ``.git`` can be a link to a file the gateway must not read.
+    """
+    if os.path.isdir(dot_git):
+        return False
+    from kiro_crew.hooks import safe_read_prefix
+
+    data = safe_read_prefix(dot_git, _GITFILE_READ_LIMIT)
+    if data is None:
+        return False
+    lines = data.decode("utf-8", errors="replace").strip().splitlines()
+    pointer = lines[0] if lines else ""
+    if not pointer.startswith("gitdir:"):
+        return True
+    target = pointer[len("gitdir:") :].strip()
+    return not target or not os.path.isdir(os.path.join(cur, target))
+
+
 def find_git_root(path: str) -> str | None:
     """The nearest ancestor of *path* (inclusive) holding a ``.git`` entry.
 
@@ -260,24 +290,29 @@ def find_git_root(path: str) -> str | None:
     tab's touched-repository list and the project chip's branch probe
     (``file_api.project_dirs._project_git_branch``) both go through it, so a
     project reads as a repository on both or on neither. ``.git`` is probed for
-    existence, not ``isdir``: a linked worktree's ``.git`` is a file. A path that
-    does not exist yet (a file the call is creating, in a directory it is
-    creating) still finds its repository through its parents. Like git, the walk
-    never enters a ``GIT_CEILING_DIRECTORIES`` entry above the starting
-    directory -- the same rule the status and log routes inherit from ``git
-    rev-parse --git-dir``, which owns discovery there. Exhausting the ancestor
-    budget raises ``RootWalkLimitReached`` rather than claiming absence; the
-    branch chip degrades to no label and repository tracking records the loss.
-    Pure path arithmetic plus ``exists`` probes: no realpath, no home or
-    sensitivity judgement; callers apply those where they mean something.
+    existence, not ``isdir``: a linked worktree's ``.git`` is a file, and it
+    counts only while its ``gitdir:`` line names an existing directory; a broken
+    one ends the walk with no repository, as git's own discovery ends there
+    (:func:`_gitfile_is_broken`). A path that does not exist yet (a file the call
+    is creating, in a directory it is creating) still finds its repository
+    through its parents. Like git, the walk never enters a
+    ``GIT_CEILING_DIRECTORIES`` entry above the starting directory -- the same
+    rule the status and log routes inherit from ``git rev-parse --git-dir``,
+    which owns discovery there. Exhausting the ancestor budget raises
+    ``RootWalkLimitReached`` rather than claiming absence; the branch chip
+    degrades to no label and repository tracking records the loss. Path
+    arithmetic plus ``exists`` probes and the one bounded ``.git`` file read: no
+    realpath, no home or sensitivity judgement on the walked path; callers apply
+    those where they mean something.
     """
     ceilings = _ceiling_dirs()
     cur = path
     for _ in range(_GIT_ROOT_WALK_LIMIT):
         if cur != path and cur in ceilings:
             return None
-        if os.path.exists(os.path.join(cur, ".git")):
-            return cur
+        dot_git = os.path.join(cur, ".git")
+        if os.path.exists(dot_git):
+            return None if _gitfile_is_broken(dot_git, cur) else cur
         parent = os.path.dirname(cur)
         if parent == cur:
             return None
