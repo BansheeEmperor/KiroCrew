@@ -17,6 +17,11 @@ from kiro_crew import member_goals as _goals
 from kiro_crew.constants import MAX_SHORT_STRING
 from kiro_crew.validation_parts.field_engine import FieldSpec, ToolSchema, ValidationError
 from kiro_crew.work_vocab import (
+    WORK_ASK_LABEL_CHARS,
+    WORK_ASK_MAX_OPTIONS,
+    WORK_ASK_OUTCOME_CHARS,
+    WORK_ASK_WHAT_CHARS,
+    WORK_ASK_WHY_CHARS,
     WORK_BLOCKED_REASONS,
     WORK_ITEM_STATES,
     WORK_REASON_STATUSES,
@@ -210,7 +215,10 @@ _WORK_VERDICTS = frozenset(WORK_VERDICTS)
 _WORK_ITEM_STATES = frozenset(WORK_ITEM_STATES)
 #: A superset of the store's six conductor actions: ``accept`` promotes a worker's
 #: claimed ``pr`` into ``acceptance`` and is served by its own store function.
-_WORK_RECORD_ACTIONS = frozenset({"create", "bind", "decide", "verdict", "close", "goal", "accept"})
+#: ``ask`` records what an item needs from the person, why, and the options.
+_WORK_RECORD_ACTIONS = frozenset(
+    {"create", "bind", "decide", "verdict", "close", "goal", "accept", "ask"}
+)
 
 WORK_BRIEF_SCHEMA = ToolSchema(tool_name="work_brief")
 
@@ -290,6 +298,25 @@ WORK_LEDGER_RECORD_SCHEMA: ToolSchema = ToolSchema(
         # The store re-checks the same range; refusing here names the field early.
         FieldSpec("concurrency_cap", int, min_val=1, max_val=32),
         FieldSpec("new_goal", bool),
+        # ``ask``: the store re-checks every cap and that ``pick`` is one of the labels.
+        FieldSpec("what", str, max_len=WORK_ASK_WHAT_CHARS),
+        FieldSpec("why", str, max_len=WORK_ASK_WHY_CHARS),
+        FieldSpec(
+            "options",
+            list,
+            item_type=dict,
+            max_items=WORK_ASK_MAX_OPTIONS,
+            # One option: a label and what choosing it leads to.
+            item_schema=ToolSchema(
+                tool_name="work_ledger_record.options",
+                fields=[
+                    FieldSpec("label", str, required=True, max_len=WORK_ASK_LABEL_CHARS),
+                    FieldSpec("outcome", str, max_len=WORK_ASK_OUTCOME_CHARS),
+                ],
+            ),
+        ),
+        FieldSpec("pick", str, max_len=WORK_ASK_LABEL_CHARS),
+        FieldSpec("pick_why", str, max_len=WORK_ASK_OUTCOME_CHARS),
     ],
 )
 

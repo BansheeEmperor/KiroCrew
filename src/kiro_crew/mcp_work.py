@@ -87,7 +87,14 @@ from kiro_crew.validation import (
     sanitize_string,
     validate_tool_args,
 )
-from kiro_crew.work_vocab import worker_statuses
+from kiro_crew.work_vocab import (
+    WORK_ASK_LABEL_CHARS,
+    WORK_ASK_MAX_OPTIONS,
+    WORK_ASK_OUTCOME_CHARS,
+    WORK_ASK_WHAT_CHARS,
+    WORK_ASK_WHY_CHARS,
+    worker_statuses,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +152,11 @@ _RECORD_FIELDS: tuple[str, ...] = (
     "fails",
     "concurrency_cap",
     "new_goal",
+    "what",
+    "why",
+    "options",
+    "pick",
+    "pick_why",
 )
 
 #: Fields ``work_ledger_read`` forwards as a query string. Same defence as
@@ -602,7 +614,11 @@ def _ledger_tool_definitions() -> list[dict[str, Any]]:
                 "'decide' records what you decided and why (the one field a worker reads "
                 "as an instruction); 'verdict' records accept_eval.py's verdict and the "
                 "fail count; 'accept' promotes a worker's claimed pr into the item's "
-                "acceptance once you have checked it; 'close' stamps a terminal state, "
+                "acceptance once you have checked it; 'ask' records, in the same turn you "
+                "relay an item's question to the person, what it needs from them, why, "
+                "each option with what it leads to, and your pick with its reason (the "
+                "person's welcome shows it; decide or close clears it); "
+                "'close' stamps a terminal state, "
                 "and when the item's worker session is still open the reply warns that "
                 "its report channel is now cut (bind a new item to it to restore it). "
                 "Caps refuse rather than truncate, naming the field. The whole write is "
@@ -626,6 +642,7 @@ def _ledger_tool_definitions() -> list[dict[str, Any]]:
                             "close",
                             "goal",
                             "accept",
+                            "ask",
                         ],
                         "description": "Which write to perform.",
                     },
@@ -691,6 +708,46 @@ def _ledger_tool_definitions() -> list[dict[str, Any]]:
                             "goal_concurrency_cap_reached: wait for an item to land, or "
                             "ask the user and raise it here."
                         ),
+                    },
+                    "what": {
+                        "type": "string",
+                        "description": (
+                            "ask: what the item needs from the person, "
+                            f"<= {WORK_ASK_WHAT_CHARS} chars."
+                        ),
+                    },
+                    "why": {
+                        "type": "string",
+                        "description": (
+                            "ask: why only the person can move it, "
+                            f"<= {WORK_ASK_WHY_CHARS} chars."
+                        ),
+                    },
+                    "options": {
+                        "type": "array",
+                        "maxItems": WORK_ASK_MAX_OPTIONS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "outcome": {"type": "string"},
+                            },
+                            "required": ["label"],
+                        },
+                        "description": (
+                            f"ask: each choice, {{label <= {WORK_ASK_LABEL_CHARS} chars, "
+                            f"outcome <= {WORK_ASK_OUTCOME_CHARS} chars: "
+                            "what choosing it leads to}; the same labels as the "
+                            "[OPTIONS:] row you show."
+                        ),
+                    },
+                    "pick": {
+                        "type": "string",
+                        "description": "ask: the label you recommend; one of the options.",
+                    },
+                    "pick_why": {
+                        "type": "string",
+                        "description": f"ask: why you recommend it, <= {WORK_ASK_OUTCOME_CHARS} chars.",
                     },
                     "new_goal": {
                         "type": "boolean",

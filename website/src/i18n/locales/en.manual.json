@@ -1644,6 +1644,9 @@
     }
   },
   "components": {
+    "crewPrFacts": {
+      "read": "read {{time}}"
+    },
     "mateWorkers": {
       "approvals_label": "Tool approvals from this bot's sessions: {{n}}",
       "trust": "Trust this session",

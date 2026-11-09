@@ -71,7 +71,9 @@ sequenceDiagram
 
 ## Legend
 
-`work_ledger_record` takes exactly one `action` per call, and the seven are `goal`, `create`, `bind`, `decide`, `accept`, `verdict`, and `close`.
+`work_ledger_record` takes exactly one `action` per call, and the eight are `goal`, `create`, `bind`, `decide`, `accept`, `verdict`, `close`, and `ask`.
+
+**`ask` records what an item needs from the person.** When the conductor relays an item's question to the person, it records in the same turn what it needs, why only they can do it, each option with what it leads to, and its pick with the reason. The store stamps `written_at`; `decide` and `close` clear the record. The event kind is `ask`, never `decision`, so recording why a question waits never reads as its answer. The warm welcome shows the record as written.
 
 `work_report` takes exactly one `status`, and the four are `progress`, `blocked`, `question`, and `done`. `blocked` and `question` differ by who must act: `blocked` names an external dependency, `question` needs the conductor's own decision.
 
