@@ -54,6 +54,7 @@ conductor: a session that can dispatch but cannot edit a file. Always pass
 | `folder` | no | Sidebar folder id or `/`-separated path to file it into, atomically with creation. Missing path segments are created (`mkdir -p`). The create is checked first, so a create that would be refused normally leaves no new empty folder behind (a race can still leave one). A folder with a project gives the new session that project; without one, the new session works in your own project |
 | `model` | no | Model the session starts on, pinned as if the person picked it in the model dropdown (same guard; refused with `model_rejected` when the picker would refuse it). Omitted, it is filled as below |
 | `reasoning_effort` | no | Reasoning effort the session starts at, one of the five standard levels: `low`, `medium`, `high`, `xhigh`, `max`. Any other value is refused with `effort_rejected` before anything is created. Omitted, it is filled as below |
+| `backend` | no | Harness (agent backend) the session runs on, spelled as `spawn_run`'s `backend` takes it: `kiro`, `claude`, `codex`, ... It is kept for the session's whole life (every turn, restart, reset and compaction), it outranks a Bot's own harness setting, and a `spawn_run` from that session with no `backend` (and no `crew`) starts its child on it too. One that is unknown, not allowed by policy or not installed is refused before anything is created (`unknown_backend`, `backend_not_installed`, `backend_restart_required`), listing the ones that can start. `model` must then be an id that harness serves (`model_rejected`). Not taken with `crew` (`backend_with_crew`). Omit to run on the default harness. Offered only while the feature preview `dashboard.feature_previews.session_harness` is on (Settings > Developer > Feature previews > Agent Harness for worker chats); off, it is not in the schema and one passed is refused with code session_harness_preview_off (HTTP 403) and nothing is created |
 | `autocompact_pct` | no | Context-usage percent (5 to 90) at which the NEW session auto-compacts, set as its own override as if the person set "Auto-compact at" in its context meter. Only the new session gets it; the global `session.autocompact_pct` and every other session are unchanged. The tool schema refuses an out-of-range value before any request reaches the dashboard. The reply is `Error: autocompact_pct: must be <= 90.0`, or `Error: autocompact_pct: must be >= 5.0` for a value below the range. Omit to follow the agent's own default, else the global value |
 | `message` | no | The new session's first message, delivered in the same call through `session_send`'s own path: same authorization, same size limit (`message_too_long`), same `[sent by session …]` line. A message `session_send` would refuse is refused before anything is created, and so is any message from an agent that auto-approves `session_create` but not `session_send` (`message_needs_send_approval`). If the session opens but delivery fails, the reply still names the key and the delivery error, and the session is kept |
 
@@ -86,6 +87,12 @@ waiting in the user's sidebar; watch it with session_read_message.
 
 Pass that key as `target` to every other session tool.
 
+A session you created stays yours across a gateway restart while the crew log
+records that you created it. With the crew log off (`KIROCREW_CREW_LOG=0`), or
+once it no longer holds that record, the session comes back with no creator
+until a later restart can confirm it: your tools get `not_creator` for it, and
+only the person can reach it.
+
 `session_create` never copies a transcript. When the new session should already know
 what you know — you are splitting a long investigation into several sessions —
 use `session_fork` instead.
@@ -95,7 +102,7 @@ use `session_fork` instead.
 | Argument | Required | Meaning |
 |---|---|---|
 | `source` | no | The session to copy from: a session key, slot key, or its exact unique title. Omit to fork **your own** session |
-| `title` | no | Short sidebar name, kept as given within `session_create`'s title rules. Omit to start from `Fork of <source title>`, which is then renamed automatically after the latest question the copy holds |
+| `title` | no | Short sidebar name, kept as given within `session_create`'s title rules. Omit to start from `Fork of <source title>`, which is renamed automatically after the first message a person sends the fork |
 | `folder` | no | Sidebar folder id or `/`-separated path, created if missing (`mkdir -p`), as for `session_create`. Omit to leave the child in the source's folder |
 | `at_message_index` | no | Fork point: the position of the LAST message to carry, counting the source's user and assistant messages from 0. Omit to carry the whole transcript |
 
@@ -184,7 +191,7 @@ whatever the step would be refused on its own. It is not auto-approved.
 | `title`, `acceptance` | yes | As `action=create` takes them |
 | `agent` | yes | The worker's agent, as `session_create` takes it |
 | `seed` | yes | The seed prompt, sent only after the bind succeeded |
-| `agent_kind`, `folder`, `model`, `reasoning_effort` | no | As `session_create` takes them |
+| `agent_kind`, `folder`, `model`, `reasoning_effort`, `backend` | no | As `session_create` takes them |
 | **session_title** | no | The session's sidebar title; defaults to `title` |
 
 The reply names the `item_id` and `worker_session_key`. A failure names the step
@@ -295,10 +302,14 @@ Takes no arguments. The roster of sessions you stood up, and what each is doing.
 |---|---|---|
 | `working` | A turn is in flight | Wait |
 | `queued` | Idle, messages waiting to run | Wait; a steer would land on nothing |
-| `idle` | Open and doing nothing | This is the one that needs a decision |
+| `idle` | Open and doing nothing | This is the one that needs a decision, unless the row's `looping` is true: its own loop (a `monitor_start` waiting on CI) will wake it, so wait |
 | `closed` | The crew log has it, the dashboard does not, and its last life ended by a deliberate tab close (carries `closed_at`) | It finished and closed its tab; nothing to re-dispatch |
 | `lost` | The crew log has it, the dashboard does not, and it did not close cleanly — a turn was open, a process recycle or destroy tore it down, or its lifecycle could not be read | Re-dispatch it |
 | `unknown` | History has its birth metadata, but no live slot or crew-log edge exists | Inspect or re-dispatch without assuming it finished or was lost |
+
+An `idle` or `queued` session with no process running (the idle sweep released
+it, or it never started) also says `released`. The next message starts a process
+for it and keeps its conversation.
 
 `closed`, `lost` and `unknown` are why this tool exists rather than reading
 sessions one at
@@ -312,7 +323,10 @@ metadata proves the creator but cannot prove why the live slot is absent.
 
 The ownership fence applies to all three sources. A history row is shown only
 when its persisted `created_by` exactly names you and its workspace matches
-yours, so another caller's archived session and title do not appear.
+yours, so another caller's archived session and title do not appear. A fenced
+session (see `not_creator` below) also needs the crew log to record that it
+created that session. With the crew log off, or once it no longer holds that
+record, the row is left out and `history` reads `incomplete`.
 
 A LIVE row passes the same target containment `session_broadcast` resolves names
 against — one shared predicate, not a second copy of its clauses. So a session you
@@ -622,8 +636,10 @@ memory store the session reads.
 
 Only an idle session takes a pick. If the target has a turn or sub-agents in
 flight, the call is refused with `target_busy` ("session busy, model not
-changed") and the target keeps its model. The tool never stops anything itself.
-To force the change, call `session_stop`, then retry once the target is idle.
+changed") and the target keeps its model. A sub-agent refusal names each
+running or queued sub-agent by id and state, and says when some could not be
+checked. The tool never stops anything itself. To force the change, call
+`session_stop`, then retry once the target is idle.
 
 Also refused: `auto` and `Auto (Jev)` (`model_owner_only`), because with the Jev
 preview on a slot on `auto` hands each turn's model to Jev routing, which only the
@@ -647,10 +663,11 @@ The agent, model and workspace do not change.
 Only sessions you created can be reloaded, whatever kind of session you are.
 Only an idle one: a turn running or starting, queued messages, or attached
 sub-agents refuse the call with `target_busy` ("session busy, not reloaded")
-and nothing is torn down. The tool never stops anything itself. You cannot
-reload yourself (`self_target`): the calling session is mid-turn, and a reload
-under a running turn would orphan it. A read-only relay archive is refused
-with `relay_archive_read_only`.
+and nothing is torn down. A sub-agent refusal names each running or queued
+sub-agent by id and state, and says when some could not be checked. The tool
+never stops anything itself. You cannot reload yourself (`self_target`): the
+calling session is mid-turn, and a reload under a running turn would orphan it.
+A read-only relay archive is refused with `relay_archive_read_only`.
 
 If the target gains a channel link or otherwise leaves your reach while its
 process is being reset, the call answers `target_changed_during_reload`: the
@@ -710,9 +727,12 @@ There is no prompt argument. To ask for something new, use `session_send`.
 
 The refusals are Continue's own: `slot_running`, `slot_stopping`,
 `slot_queue_pending`, `slot_approval_pending`, `slot_subagents_running` and
-`slot_empty`. After two failed session starts in a row the call is refused too,
-and the refusal says to restart the gateway. An old relay chat is refused with
-`relay_archive_read_only`. Target reach is the same as `session_retry`'s.
+`slot_empty`. A `slot_subagents_running` refusal, here and from
+`session_retry`, names each running or queued sub-agent by id and state, as
+`session_reload`'s does. After two failed session starts in a row the call is
+refused too, and the refusal says to restart the gateway. An old relay chat is
+refused with `relay_archive_read_only`. Target reach is the same as
+`session_retry`'s.
 
 The session-control audit line records your session key as the caller and the
 `body` that was sent; the target's own `dashboard_continue` line records
@@ -915,7 +935,12 @@ channel: a resumed `/sessions` pick, a channel mirror, a linked Slack thread, or
 channel-born tab. A resumed conversation keeps the dashboard session's key, so
 the folder endpoint checks those links rather than the key, using the same
 predicate that gates creating peer sessions, and while one
-exists the person renames folders from the sidebar instead.
+exists the person renames folders from the sidebar instead. The same check
+refuses every other tool that changes the person's sidebar from such a session,
+with `channel_reachable_caller`: `chat_folder_create` (and any folder a path
+argument would create), `chat_folder_move`, `chat_folder_move_session`,
+`chat_tag_create`, `chat_tag_update`, `chat_tag_assign`, `chat_session_pin`,
+`chat_tag_column_create`, `chat_tag_column_move` and `session_move_to_column`.
 
 Dispatchers (conductors and Bots) get no folder tool without an approval,
 and their guidance does not use them: the person's folders are the person's to
@@ -953,8 +978,8 @@ browser and every agent sees the same one.
 
 Pass exactly one of `before` / `after`, naming a pinned session in the same group.
 `chat_folder_tree` lists each group's pinned sessions first, in the order the
-sidebar draws them, so read it to pick the anchor. Pinned sessions the person
-never reordered follow in most-recent-activity order, and the first call
+sidebar draws them, so read it to pick the anchor. Pinned sessions with no
+stored position follow in most-recent-activity order, and the first call
 stores that order for every one of them: the person's own sidebar sort lives in
 their browser, where the gateway cannot read it. The call only reorders: it
 does not pin, unpin, or move a session between folders. The order is the

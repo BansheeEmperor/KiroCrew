@@ -46,7 +46,7 @@ this" contract failed at least once:
   worker.
 * **The inherited shell environment.** The entries ``name_grant`` refuses as
   inherited preloads are removed for each test's duration and restored
-  afterwards: the ``_ENV_PRELOAD_VARS`` names (``BASH_ENV``, ``ENV``, ...) and
+  afterwards: the ``_ENV_PRELOAD_VARS`` names (``BASH_ENV``, ``SHELLOPTS``, ...) and
   exported bash functions (``BASH_FUNC_*`` keys, or the legacy bare-name
   spelling whose value starts with ``() {``). RHEL-family hosts export ``which``
   as a function from ``/etc/profile.d/which2.sh``, and that refusal is checked
@@ -367,6 +367,7 @@ from conftest_floor_restores import (  # noqa: E402,F401 -- bound for pytest and
     _restore_log_queue_listener,
     _restore_log_record_factory,
     _restore_logger_levels,
+    _restore_relay_gateway_ingress,
     _resume_crew_log_eager_fold,
     _retire_crew_log_eager_fold,
 )
@@ -438,12 +439,11 @@ def _scrub_inherited_preload_env(_floor_monkeypatch):
     such a host 79 of the 163 tests in ``test/test_name_grant.py`` observed
     ``inherited_env_can_redefine_programs`` instead of the code they assert, while
     Ubuntu CI (no ``which2.sh``) stayed green (issue #8395). The detector's OTHER half
-    is host state just as easily: a login profile exporting ``BASH_ENV``, or a
-    container image setting ``ENV``, reproduces the same failure shape with no
-    ``which2.sh`` anywhere. The PRODUCT behaviour is correct -- an inherited preload
-    genuinely can redefine a program the agent runs -- the gap was that this floor
-    pins the data home, the credential env and the temp base, but not the environment
-    the run inherited.
+    is host state just as easily: a login profile exporting ``BASH_ENV`` reproduces
+    the same failure shape with no ``which2.sh`` anywhere. The PRODUCT behaviour is
+    correct -- an inherited preload genuinely can redefine a program the agent runs
+    -- the gap was that this floor pins the data home, the credential env and the
+    temp base, but not the environment the run inherited.
 
     The predicate is IMPORTED from ``name_grant`` rather than restated, so the scrub
     and the detector cannot drift apart, and it mirrors BOTH halves the detector
@@ -715,6 +715,22 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int | None:
     except ImportError:  # pragma: no cover - partial checkout
         return None
     return xdist_budget.resolve_workers()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_cmdline_main(config: pytest.Config) -> None:
+    """Make an explicit ``-n N`` claim host slots, like ``-n auto`` does.
+
+    Must run before xdist's own ``tryfirst`` impl, which turns ``numprocesses`` into
+    ``config.option.tx``; pluggy calls later-registered impls first within a tier, and
+    this conftest registers after the xdist plugin. The policy lives in
+    :func:`xdist_budget.budget_explicit_workers`; this is only the registration.
+    """
+    try:
+        import xdist_budget
+    except ImportError:  # pragma: no cover - partial checkout
+        return
+    xdist_budget.budget_explicit_workers(config)
 
 
 def _join_telemetry_consent_worker() -> "BaseException | None":

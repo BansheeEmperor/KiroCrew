@@ -31,7 +31,7 @@ _MODE_IDENTITY_RE = re.compile(r"## 🔒 Mode Identity.*?(?=\n## |\Z)", re.DOTAL
 
 
 _STOP_EVENT_CAP = 3  # max recent stop events to inject into LLM context
-_STOP_EVENT_RESOLVED_STATES = frozenset({"stopped", "stop_failed_reset"})
+_STOP_EVENT_RESOLVED_STATES = frozenset({"stopped", "stop_failed_reset", "force_stopped"})
 
 
 # Regex patterns for noise compression in assistant messages
@@ -407,7 +407,10 @@ def _quota_tail(messages: list[dict], *, conv_max: int, inject_max: int) -> list
     kept: list[dict] = []
     conv = inj = 0
     for m in reversed(messages):
-        role = m["role"]
+        # `.get`, not `[...]`: the transcript is a file anyone can hand-edit, and
+        # one row with no `role` or `content` would otherwise raise out of every
+        # context build for the chat. A row with no role is not a turn either way.
+        role = m.get("role")
         if _is_steer_row(m) and m["meta"].get("steerState") == _STEER_STATE_RETRACTED:
             # Taken back before the turn read it: it was never part of the
             # conversation, and its text was cleared when it was taken back.
@@ -424,7 +427,7 @@ def _quota_tail(messages: list[dict], *, conv_max: int, inject_max: int) -> list
             conv += 1
         else:
             continue
-        kept.append({"role": role, "content": strip_image_refs(m["content"])})
+        kept.append({"role": role, "content": strip_image_refs(m.get("content", ""))})
     kept.reverse()
     return kept
 

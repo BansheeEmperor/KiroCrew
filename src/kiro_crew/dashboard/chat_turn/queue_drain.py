@@ -24,8 +24,8 @@ from kiro_crew.dashboard.chat_delivery import (
 from kiro_crew.dashboard.chat_title import RESTORED_TURN_META_KEY
 from kiro_crew.dashboard.chat_utils import (
     AUTOMATION_NOTICE_KIND,
+    COMPOSER_SEND_META,
     MCP_APP_MESSAGE_KIND,
-    STEER_INTENT_META,
     STEER_POSSIBLY_DELIVERED_META,
     SUBAGENT_DELIVERY_KINDS,
     TURN_END_WIRE_CLS,
@@ -34,8 +34,14 @@ from kiro_crew.dashboard.chat_utils import (
     is_synthetic_payload_item,
     is_synthetic_recovery_item,
     is_system_injection_item,
+    releases_past_subagent_hold,
 )
-from kiro_crew.dashboard.chat_utils_injected_rows import AUTOMATION_STEER_META
+from kiro_crew.dashboard.chat_utils_injected_rows import (
+    AUTOMATION_STEER_META,
+    WORKFLOW_FOLLOWUP_KIND,
+)
+from kiro_crew.dashboard.chat_utils_slots import dashboard_slot_key
+from kiro_crew.dashboard.queue_edit_hold import edit_hold_blocks_user_turn
 from kiro_crew.dashboard.recovery_replays import replays_of
 from kiro_crew.dashboard.session_directive_apply import (
     REFUSAL_SELF_WAKE_META_KEY,
@@ -50,6 +56,8 @@ from kiro_crew.dashboard.state import CRON_NOTIFY_RE, SUBAGENT_COMPLETION_PREFIX
 from kiro_crew.history import HUMAN_TURN_META_KEY
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from kiro_crew.dashboard.chat_runner import (
         _PARKED_FOR_MEMORY,
         COMMANDS_OFF_META_KEY,
@@ -200,10 +208,11 @@ def settle_drained_subagent_notices(state: Any, slot: Any, notices: list[str]) -
 
     A notice whose run owes a ``delivered`` tombstone is recorded on the slot's
     ledger under its own text when it is queued, and that run's folder stays
-    untombstoned until this drain, so a restart before it leaves the run to the
-    next start's orphan reconciliation. The parent's next turn calls this where
-    it takes the list. The manager writes the tombstones on a tracked task,
-    behind the same teardown gate as a queued announce.
+    untombstoned until this settles, so a restart before it leaves the run to
+    the next start's orphan reconciliation. The parent's turn that took the list
+    calls this once the model has consumed its prompt (``_turn_settle_debts``
+    in ``chat_turn/prompt_assembly.py``). The manager writes the tombstones on a
+    tracked task, behind the same teardown gate as a queued announce.
     """
     try:
         owed = slot.take_pending_subagent_deliveries(notices)
@@ -234,6 +243,34 @@ def settle_drained_subagent_notices(state: Any, slot: Any, notices: list[str]) -
     if isinstance(bg, set):
         bg.add(writer)
         writer.add_done_callback(bg.discard)
+
+
+def read_tab_notices(
+    state: Any, session_key: str
+) -> tuple[list[str], Callable[[bool], None]] | None:
+    """The sub-agent notices queued on the tab that shows *session_key*, for its turn.
+
+    The builder's ``tab_notices_for_session``: a turn started in a channel
+    conversation's own thread builds its prompt in ``build_message``, never in
+    ``_turn_build_prompt``, so this is how it reads the queue a turn in the
+    conversation's tab drains. Returns a copy of the notices and the call the turn's
+    settle makes. They stay queued until that call says the turn landed, which takes
+    them off the front and writes their delivery debts, so a turn that never landed,
+    or never settled, leaves them for the next one. ``None`` when nothing is queued.
+    """
+    slot = state.get_slot(dashboard_slot_key(session_key))
+    pending = getattr(slot, "_pending_subagent_failures", None)
+    if not pending:
+        return None
+    notices = pending[:]
+
+    def _settle(landed: bool) -> None:
+        # Still at the front unless a turn in the tab drained them, which settles them.
+        if landed and pending[: len(notices)] == notices:
+            del pending[: len(notices)]
+            settle_drained_subagent_notices(state, slot, notices)
+
+    return notices, _settle
 
 
 #: Where a requeue stamps the actor of the turn it is retrying. Re-exported from
@@ -424,6 +461,12 @@ def _is_own_recovery(items: "list[dict]", predecessor_actor: str, predecessor_tu
 #: durable (``slot_queue_repository._is_durable_queue_entry``).
 _REPLAYS_COMPLETION_KEY = "_replays_completion"
 
+#: Process-local key on a synthetic-recovery queue entry that a loop's own cycle
+#: queued for itself: that loop's ``(id, config generation)``, so the recovery's
+#: fault is charged to the loop like the cycle it retries. Never persisted: a kinded
+#: entry is not durable.
+_RECOVERED_WAKE_KEY = "_recovered_wake"
+
 
 def idle_slot_admits_drain(state: DashboardState, slot: _ChatSlot) -> bool:
     """Whether an injector may start the queued head of an idle *slot* now.
@@ -475,7 +518,7 @@ def _record_queued_crew_steers(state: DashboardState, consumed: list[dict]) -> N
     """Record the person's queued steers into a Crew Mode worker as they are delivered.
 
     A send the person typed into a busy worker is queued with ``(root, worker)``
-    on its entry (``chat_send.mark_crew_steer``). The ``steer`` event is written
+    on its entry (``crew_steer.mark_crew_steer``). The ``steer`` event is written
     HERE, when the drain hands the entry to the worker, from the entry's text as it
     is now (an edit while queued is what the worker gets), so a cancelled entry
     records nothing. Off the drain's path: a tracked task, and a fault never
@@ -540,6 +583,14 @@ async def _start_next_queued_turn(
     if _gateway_shutdown_requested(state):
         return False
 
+    # An Ultra Mode "Pause all" holds the root and every member it stopped: the
+    # queue stays as it is until Resume all (or the member's own Continue) lets it go.
+    # Imported here: this module's functions run on the composing module's globals.
+    from kiro_crew import crew_pause
+
+    if slot._queue and crew_pause.holds_slot(slot):
+        return False
+
     # A drain that follows a turn's end marks that end before it writes anything:
     # the drop notices, the held-note flush and the cancellation notices below
     # belong to what comes next, not to the turn that ended. Held back only while
@@ -561,7 +612,22 @@ async def _start_next_queued_turn(
         _arm_parked_queue_drain(state, slot, notice=True)
         return False
 
-    # FIRST, before anything reads the queue: re-assert each entry's
+    # A card whose parked Shared Crew work a person stopped never runs. This
+    # is the only await in the drain that suspends, so it comes before the
+    # sweep below: every decision from there to the dequeue reads the slot as
+    # it is at the pop.
+    from kiro_crew.shared_crew.admission_entry import queued_work_ids
+    from kiro_crew.shared_crew.admission_gate import installed_service
+
+    service = installed_service()
+    if service is not None:
+        for item in list(slot._queue):
+            work_ids = queued_work_ids([item])
+            if work_ids and await service._cancelled_parked(work_ids) is not None:
+                slot.queue_remove_by_id(item["id"])
+                state.broadcast_ws("queue_pop", {"slot": slot.key, "queue_id": item["id"]})
+
+    # Then, before anything else reads the queue: re-assert each entry's
     # admission-time containment and drop every entry that has stopped
     # qualifying.
     # Everything below — the note flush peeking at queue[0], the user-intervention
@@ -583,7 +649,7 @@ async def _start_next_queued_turn(
     _forget_swept_replays(slot)
 
     # Above the dequeue, so a held note's visible line lands before this turn's
-    # user row: its context half drains inside _turn_build_prompt via drain_pending_context.
+    # user row: its context half drains inside _turn_build_prompt via take_turn_context.
     # Withheld when the next queued item carries a structural origin tag -- a cron
     # notification or a runner-injected recovery prompt -- for the same reason
     # _finish_queue_cycle withholds from synthesis: a note is owed to the next
@@ -649,16 +715,10 @@ async def _start_next_queued_turn(
     if await _drop_revoked_replays(state, slot):
         return False
 
-    from kiro_crew.shared_crew.admission_entry import queued_work_ids
-    from kiro_crew.shared_crew.admission_gate import installed_service
-
-    service = installed_service()
-    if service is not None:
-        for item in list(slot._queue):
-            work_ids = queued_work_ids([item])
-            if work_ids and await service._cancelled_parked(work_ids) is not None:
-                slot.queue_remove_by_id(item["id"])
-                state.broadcast_ws("queue_pop", {"slot": slot.key, "queue_id": item["id"]})
+    # Asked again after the parked-work probes above: a Pause all published
+    # during them holds this drain too, with the queue left as it is.
+    if slot._queue and crew_pause.holds_slot(slot):
+        return False
 
     try:
         merge = KiroCrewConfig.load().dashboard.merge_queued_messages
@@ -678,12 +738,20 @@ async def _start_next_queued_turn(
     # are one conversation, so a leading run of them drains as one turn.
     explicit_request = bool(required_queue_id)
     teardown_held = teardown_hold_active(state, slot)
-    # Automatic promotion is skipped while a teardown holds the user entries:
-    # promoting one would set ``required_queue_id``, and that plus the hold
-    # returns below before the system-only dequeue, parking a cron or sub-agent
-    # injection that is allowed to pass a held queue. A card's explicit Run now
-    # still selects its entry.
-    auto_priority = bool(priority_id and not required_queue_id and not teardown_held)
+    # A card whose editor is open holds the user entries, so the drain never
+    # sends the words the person is still changing (``queue_edit_hold``); its
+    # save or close starts the drain. Read before the promotion below sets
+    # ``allow_user_during_subagents``: only the caller's Run now passes it, never
+    # an id a drain picked itself (a queued arrival, a restored card).
+    edit_held = edit_hold_blocks_user_turn(slot, run_now=allow_user_during_subagents)
+    # Automatic promotion is skipped while a teardown or an open editor holds
+    # the user entries: promoting one would set ``required_queue_id``, and that
+    # plus the hold returns below before the system-only dequeue, parking a cron
+    # or sub-agent injection that is allowed to pass a held queue. A card's
+    # explicit Run now still selects its entry.
+    auto_priority = bool(
+        priority_id and not required_queue_id and not teardown_held and not edit_held
+    )
     if auto_priority:
         required_queue_id = priority_id
         allow_user_during_subagents = True
@@ -694,6 +762,7 @@ async def _start_next_queued_turn(
     # drains system entries, so that completion is what runs next.
     hold_users = bool(
         (teardown_held and not explicit_request)
+        or edit_held
         or (
             not allow_user_during_subagents
             and (
@@ -726,9 +795,21 @@ async def _start_next_queued_turn(
                 break
 
     if required_queue_id and hold_users:
-        # The hold dequeues only system entries, so it could start a different
-        # entry than the one card asked for. That card stays queued instead.
-        return False
+        # The hold dequeues only entries it releases, so a held card could start
+        # a different entry than the one asked for: that card stays queued. A
+        # card the hold releases (the session's own composer send) runs, and
+        # promotion below puts it first so the hold's dequeue takes exactly it.
+        # An open editor's or a deferred discard's hold releases no composer
+        # send: only Run now passes the editor, and ``edit_held`` is already False
+        # for that; the discard's dequeue is system-only.
+        _required = next((q for q in slot._queue if q.get("id") == required_queue_id), None)
+        if (
+            _required is None
+            or edit_held
+            or teardown_held
+            or not releases_past_subagent_hold(_required)
+        ):
+            return False
     if required_queue_id and not slot.queue_promote_by_id(required_queue_id):
         return False
     if hold_users:
@@ -736,8 +817,11 @@ async def _start_next_queued_turn(
         # Under the teardown hold the selection narrows to structurally tagged
         # injections: the sub-agent hold also releases a queued steer, which is
         # a person's words and would be answered by the conversation they asked
-        # to drop.
-        next_msg, consumed = _dequeue_next_system_message(slot, system_only=teardown_held)
+        # to drop. An open editor's hold narrows it the same way: a composer send
+        # waits behind the card being edited, whatever its mark.
+        next_msg, consumed = _dequeue_next_system_message(
+            slot, system_only=teardown_held or edit_held
+        )
     elif auto_priority and (run := responsive_chat.dequeue_waiting_run(slot)) is not None:
         next_msg, consumed = run
     elif not required_queue_id and any(item.get(RESTORED_QUEUE_KEY) for item in slot._queue):
@@ -747,11 +831,9 @@ async def _start_next_queued_turn(
         # user sent runs one: named here (``required_queue_id``), or marked
         # chosen by a "run this next" that stopped a running turn. Entries
         # queued in this process still drain, in order, past the waiting cards.
-        # The opening sweep ran before this function's awaits, and a card can be
-        # marked chosen during them (a "run this next" click). Judge the entry
-        # picked here against the slot's current constraints, with no await
-        # between that check and the pop; an entry the check drops is gone and
-        # the next one is picked.
+        # Judge the entry picked here against the slot's current constraints,
+        # with no await between that check and the pop; an entry the check
+        # drops is gone and the next one is picked.
         while True:
             live = next(
                 (
@@ -894,6 +976,10 @@ async def _start_next_queued_turn(
     # own bubble. Never merges (a system-injection kind), so ``consumed`` holds
     # it alone.
     is_automation_notice = any(item.get("kind") == AUTOMATION_NOTICE_KIND for item in consumed)
+    # The gateway's follow-up prompt after a workflow result: structural kind
+    # again, so it drains as the same `inject` row its idle twin writes
+    # (`_ChatSlot.enqueue_or_run_prompt`). Never merges (a system-injection kind).
+    is_workflow_followup = any(item.get("kind") == WORKFLOW_FOLLOWUP_KIND for item in consumed)
     # A requeued automation steer (a work-ledger wake the turn never took): its
     # entry names the `meta.nudge` its row carries, so it drains as the same
     # nudge row it was steered as, never as the person's `user` row. Never
@@ -914,6 +1000,7 @@ async def _start_next_queued_turn(
         or is_app_message
         or is_automation_notice
         or is_automation_steer
+        or is_workflow_followup
     ):
         # A user message after the last completion takes over from the armed
         # synthesis and ends its batch, so its count starts over. Only the
@@ -926,6 +1013,7 @@ async def _start_next_queued_turn(
         # synthesis; clearing a live batch's count loses its one.
         if end_batch:
             slot._synthesis_completion_turns = 0
+            slot._synthesis_final_turn_ran = False
         slot._pending_synthesis = False
         slot._synthesis_rechecks = 0
 
@@ -961,6 +1049,7 @@ async def _start_next_queued_turn(
             or is_app_message
             or is_automation_notice
             or is_automation_steer
+            or is_workflow_followup
             or responsive_chat.reusable_row(slot, consumed, next_msg) is not None,
         }
         # The client rebuilds the drained entry as a user row from this frame
@@ -1018,7 +1107,7 @@ async def _start_next_queued_turn(
         row_role = "nudge"
     elif is_subagent:
         row_role = "subagent"
-    elif is_cron or is_recovery or is_app_message or is_automation_notice:
+    elif is_cron or is_recovery or is_app_message or is_automation_notice or is_workflow_followup:
         row_role = "inject"
     else:
         row_role = "user"
@@ -1034,7 +1123,7 @@ async def _start_next_queued_turn(
         # `_prepare_messages` replace the stored meta on HTTP rebuild,
         # dropping `injectKind` and the row's collapse/fold exemptions.
         row_cls = app_inject_row(app_label or "app")[1]
-    elif is_recovery or is_automation_notice:
+    elif is_recovery or is_automation_notice or is_workflow_followup:
         row_cls = "msg msg-inject"
     else:
         row_cls = "msg msg-u"
@@ -1059,6 +1148,13 @@ async def _start_next_queued_turn(
     # one) keeps the plain-send shape -- `sendId` alone -- so a client reading
     # only that key sees exactly what a dispatched send's row carries.
     _drained_send_ids: list[str] = []
+    # Spec decision delivery ids accumulate for the same reason: a merged row
+    # stands for every queued decision answer folded into it, and the spec
+    # builder's outbox proves an answer relayed by finding a row carrying its id.
+    # A plain union would keep only the last, so every earlier answer's outbox
+    # record would see no row and redispatch it. The single-entry case keeps the
+    # plain scalar so a reader of only that key is unchanged.
+    _drained_decision_ids: list[str] = []
     # circular import: session_control imports this package's modules at module level.
     from kiro_crew.dashboard.session_control import (
         CHANNEL_RECIPIENT_META_KEY,
@@ -1092,6 +1188,14 @@ async def _start_next_queued_turn(
             _sid = _item_meta.get("sendId")
             if isinstance(_sid, str) and _sid and _sid not in _drained_send_ids:
                 _drained_send_ids.append(_sid)
+            _did = _item_meta.get("spec_decision_delivery_id")
+            if isinstance(_did, str) and _did and _did not in _drained_decision_ids:
+                _drained_decision_ids.append(_did)
+            _dids = _item_meta.get("spec_decision_delivery_ids")
+            if isinstance(_dids, list):
+                _drained_decision_ids.extend(
+                    x for x in _dids if isinstance(x, str) and x and x not in _drained_decision_ids
+                )
             # The admission-time containment snapshot is queue plumbing,
             # consumed by _drop_stale_admissions above; it says nothing about the
             # ROW, so it must not ride into the persisted transcript meta.
@@ -1147,7 +1251,7 @@ async def _start_next_queued_turn(
     # Model input only: the row keeps the user's text as typed.
     _possibly_delivered_steer = bool(_drained_meta.pop(STEER_POSSIBLY_DELIVERED_META, False))
     # Queue plumbing for the sub-agent hold only; says nothing about the row.
-    _drained_meta.pop(STEER_INTENT_META, None)
+    _drained_meta.pop(COMPOSER_SEND_META, None)
     # Queue plumbing too: the row says it as `meta.nudge`, the key the chip reads.
     _drained_meta.pop(AUTOMATION_STEER_META, None)
     if automation_nudge is not None:
@@ -1182,6 +1286,12 @@ async def _start_next_queued_turn(
         # send the row stands for. Membership in `sendIds` is the proof a client
         # should read on a merged row; on a plain row `sendId` is the whole story.
         _drained_meta["sendIds"] = _drained_send_ids
+    if len(_drained_decision_ids) > 1:
+        # A merged row: `spec_decision_delivery_id` stays as the union left it
+        # (last writer) and `spec_decision_delivery_ids` names every decision
+        # answer the row stands for, so the outbox can find a row for each id.
+        # A single answer keeps the plain scalar (no list), unchanged.
+        _drained_meta["spec_decision_delivery_ids"] = _drained_decision_ids
     # Durable provenance for every `inject` row. `cls` is NOT persisted for this
     # role (chat_persistence only keeps it for `role == "system"`), and the
     # frontend's `meta.cronLabel` exists on the wire only because parse_cls_meta
@@ -1209,6 +1319,8 @@ async def _start_next_queued_turn(
             _inject_kind = "mcp_app"
         elif is_automation_notice:
             _inject_kind = "automation_notice"
+        elif is_workflow_followup:
+            _inject_kind = "workflow"
         elif synthetic_payload:
             _inject_kind = "recovery"
         else:
@@ -1365,6 +1477,8 @@ async def _start_next_queued_turn(
         _run_kwargs["_synthetic_recovery_turn"] = True
         if len(consumed) == 1 and consumed[0].get(_REPLAYS_COMPLETION_KEY) is True:
             _run_kwargs["_replays_completion"] = True
+        if len(consumed) == 1 and consumed[0].get(_RECOVERED_WAKE_KEY):
+            _run_kwargs["_recovered_wake"] = consumed[0][_RECOVERED_WAKE_KEY]
     if _possibly_delivered_steer:
         _run_kwargs["_steer_possibly_delivered"] = True
     # A re-routed automation refusal carries the originating wake's provenance

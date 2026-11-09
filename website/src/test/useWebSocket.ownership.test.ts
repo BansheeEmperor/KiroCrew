@@ -49,6 +49,7 @@ const OWNER_MODULES = [
   'browserEvents.ts',
   'bundleReload.ts',
   'chatStream.ts',
+  'chunkWatch.ts',
   'composerCards.ts',
   'connection.ts',
   'contextTraceRefresh.ts',
@@ -217,7 +218,7 @@ describe('effect order', () => {
     // Exactly two of its own: the silence watchdog, then the mount effect.
     expect(effects).toHaveLength(2)
     expect(effects[0]).toBeGreaterThan(drain)
-    expect(src.slice(effects[0], effects[1])).toContain('silenceWindowMs')
+    expect(src.slice(effects[0], effects[1])).toContain('silenceHostRef.current = {')
     expect(src.slice(effects[1])).toContain('attachFocusRelay(')
   })
 })

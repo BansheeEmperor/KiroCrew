@@ -56,12 +56,14 @@ only its registry entry (`_FOLDS`, in `crew_log/projection_registry.py`) beside 
 | `crew_log/projection_workers.py` | the `workers` slot fold (the worker sessions a Bot created) and its internal per-worker part `worker` (what one worker is doing), merged at read |
 | `crew_log/projection_work.py` | the `work` slot fold and the rebuild's `work_slots_naming_board` |
 | `crew_log/work_relay.py` | copies a bound worker's charges, and a sub-board's records, into the parent board's own log |
+| `crew_log/work_relay_feed.py` | the relay's consumer thread: decides each copy off the writer, on the board fixed when the entry committed |
 | `crew_log/projection_workstreams.py` | the `workstreams` slot fold and the own-units selection both board folds read (`_own_board_units`) |
 | `crew_log/projection_worktree.py` | the `worktree` tree fold |
 | `crew_log/projection_registry.py` | `_FOLDS`: what each fold touches, copies and retains, its eager or lazy posture, and the import-time checks over the registry |
 | `crew_log/projection_kernel.py` | `Checkpoint` and the pure fold API (`require_name`, `fold_state_version`, `initial`, `advance`, `projection_of`, `fold`) |
 | `crew_log/projection_budget.py` | the warm memo's byte budget: each fold's measured row cost and the operator ceiling |
 | `crew_log/projection_session.py` | folding one session's log on the projection kernel (`SessionProjections`, `fold_session`) and its savepoint |
+| `crew_log/projection_unit_mark_cache.py` | an older unit's `_UnitMark`, reused while one `lstat` of its directory and of each segment still match |
 | `crew_log/projection_slot_memo.py` | a slot's folds kept warm: the memo, its locks, the revision counter, resume and persist |
 | `crew_log/projection_readers.py` | reading a slot's and a tree's folds (`fold_slot_checkpoint`, `read_slot_projection`, `units_in_succession`, `read_tree_projection`) |
 | `crew_log/projection_session_memo.py` | a session's folds kept warm, and `read_projection` |
@@ -463,7 +465,12 @@ its remembered position -- after checking each unit's `_UnitMark` fingerprint an
 proving the newest unit's already-folded prefix intact, which it needs because the store
 can rewrite a committed prefix on its recovery paths. The proof is the unit's CUT COUNT
 (`CrewLog.cuts`, section 7.2), read in a few bytes; hashing that prefix is the fallback
-for a log that states no count. A unit list that only GAINED units at its end -- a
+for a log that states no count. An OLDER unit's mark is reused while
+an `lstat` of its directory and of each segment match the ones taken before that mark was
+read, so an idle older unit costs two calls rather than an open, a realpath, two header
+reads and a listing; a unit touched within the last 2 s is never reused, and any
+difference, a missing file or a link reads the full mark again
+(`projection_unit_mark_cache.py`). A unit list that only GAINED units at its end -- a
 session rollover -- is continued too: the held newest unit is read from above what the
 cell folded and each new unit from its first record, in the order a cold fold reads
 them, with the same ordinal bases, so a long-lived slot does not refold its whole
@@ -504,6 +511,30 @@ gateway, the one writer of every log:
   `work/recorded` and `work/charged` up into its parent board's unit when that board's
   conductor is itself bound (`relay` names the origin). Copies are deduplicated per
   (origin, board) in memory and per `closer` in the fold.
+- The relay DECIDES off the writer (`work_relay_feed`). The append job reads only what
+  fixes the board when the entry committed: the unit's slot (noted by the writer when it
+  opened the unit; one header read, cached, for a unit it did not open) and the binding
+  (one `stat`, a read only when the file changed). It queues that and returns. The
+  relay's consumer thread finds the board's newest unit (a whole-store listing on a cold
+  start), builds the copy and hands it back to the writer: one follow-on per board unit
+  and run of up to 64 copies, written with one `append_many` and one `work-unit-order`
+  publish. A run the store refuses whole is written one copy at a time, so only the
+  refused copy is lost. Past 4096 queued wakes the writer decides inline, after every
+  wake queued before it (one decider at a time), so a copy is never dropped or written
+  ahead of an earlier one. `emit.flush()` returns True only after one round finds the
+  writer quiet, the relay idle and no wake noted since the round began (`timeout=None`
+  waits with no deadline). Both look the relay module up only once a job has loaded it,
+  and through `importlib.import_module` (`emit_runtime._relay_feed`), so a lookup that
+  lands while another thread is still importing it waits for that import rather than
+  reading a module whose functions are not defined yet. The eager barrier
+  (`eager.drain`) reads `slot_prime`, which its worker imports lazily, the same way.
+  `drain_for_shutdown` alternates the relay's decisions and the
+  writer's shutdown drain, so a copy a nested board's drained copy relays up is written
+  too; it stops when a round queues nothing new, and answers False with a WARNING naming
+  what is left when its budget or its 16 rounds run out. With no consumer thread to start
+  (interpreter exit), a wake is decided on the caller. The queue is
+  in memory, like the follow-on a relay was before: a crash between an entry's commit
+  and its copy landing loses the copy.
 
 There is no migration: a bound open item whose report has not reached the conductor's
 log renders `summary: "waiting for next report"` (`WORK_AWAITING_REPORT`) until the
@@ -527,7 +558,13 @@ supplemental slot's proved units is appended after the owned units, with the sam
 unit-id de-duplication. The work-ledger rebuild supplies cached worker bindings and
 slots whose own logs already carry entries naming the board; these sources recover
 a worker bound before the board's recorded `bind` entry existed. Supplemental
-slots never replace or reorder the fold-owned units.
+slots never replace or reorder the fold-owned units. A supplement that adds units folds
+them in a throwaway cell (`read_slot_state`): a plain fold of the longer list, with no
+warm memo and no savepoint. The warm cell is keyed by slot and fold, not by list, so
+sharing it would leave every other reader a memo it cannot continue, and would write the
+savepoint beside the list's newest unit, which belongs to another slot. That would
+overwrite that slot's own file. On the request path (`cold=False`) such a read answers
+`SlotFoldNotReady`.
 
 ## 4. Reads
 
@@ -805,6 +842,39 @@ claim, because the storage layer has no caller identity to derive one from, and
 says the first caller with a permission model owns the question; these routes are
 that caller. A crew log holds the session's message bodies, redacted but whole,
 so the audience is the person the conversation belongs to.
+
+### 4.1 Read budget
+
+Every fold is meant to resume from its delta. `crew_log/read_budget.py` counts what a
+read on the gateway really decodes, so a read that walks a unit from its first record
+shows up. Only the gateway process counts: `cli.py`'s gateway dispatch calls
+`mark_gateway_process()`, and a child process (a fresh interpreter) or another
+subcommand never does.
+
+One call is one slot fold pass (`fold_slot_warm_revised`) or, outside a pass, one
+`iter_from` walk (fold `iter_from`, the unit named in the log line). Its budget is `delta + K`. `delta` is the records decoded at or above
+the seq asked for; a cold slot fold has no position, so its delta is 0. `K` is 256, the
+same number as `checkpoint.MIN_ADVANCE_ENTRIES`, from the busy host's numbers: session
+savepoints there never lagged their unit by more than 255 entries (16,372 files), a
+healthy resume re-reads 1 record per unit, units per slot is 3 at p99, and records per
+unit is 194 at p50. So a cold fold of a small slot stays under K and the reported
+calls are the costly ones (records per slot is 1,168 at p90).
+
+A call over budget bumps the counters in the diag recorder's `gateway` row
+(`crew_log_reads`: `over_budget`, `cold_over_budget`, `max_records`, `mode`, `k`) and
+logs one WARNING per call site:
+
+```
+crew log read over budget: slot=<slot> fold=<fold> unit=<unit> records=<n> delta=<d> k=256 cold=<bool> caller=<file:line func> < ...
+```
+
+`KIROCREW_CREW_LOG_READ_BUDGET` picks the mode, read per call: `report` (the default,
+and any unknown value) counts and warns and changes no read; `off` counts nothing. A
+mode that answers "not ready" instead of folding cold comes with the first change that
+opts a real caller into it. `test_crew_log_read_budget.py` pins today's gateway callers
+of the cold-fold API per file; the count may only go down.
+
+Not counted: the decode-free prefix digest (`raw_prefix_digest`), `get` and `page`.
 
 ## 5. The push
 
@@ -1585,6 +1655,20 @@ nothing else that says it. The table re-checks the edge it is handed --
 a key naming no row in the payload, or a chain returning to its own start --
 because a table must never fail to paint on a payload it did not produce.
 
+Credits nest on a narrower rule. A row's Credits figure (`creditsTotal`) is its own
+measured spend plus that of every subagent task nested under it, at any depth: a
+task row carries `credits` from its live run, so a subagent's spend is charged to
+the session that spawned it while it runs (an ended task leaves the table, and its
+spend leaves the figure with it). A nested created SESSION is never folded into its
+creator, because it is a different conversation with its own row. Under that
+figure the cell draws a bar whose length is that figure's share of every row's
+own credits in the payload. A task row under another row draws no bar, because
+its spend is already in that row's figure and bar. The Credits header sorts on
+the figure, most first on the first click. A group header under Group by adds the
+figure of every session row it still shows, a created session nested at any depth
+included, so each task counts once and a row the filter hides counts not at all.
+It draws its bar only while folded, because an open group's rows draw their own.
+
 ### 6.1 The succession walk -- one slot's own chain of logs
 
 The same first entry carries a second edge, and the two are on different axes.
@@ -2163,6 +2247,20 @@ own audit before that sort could be called safe to drop. A payload from before t
 framing decodes to a state with none of the fold's keys, which `Checkpoint.from_dict`
 refuses, so it is retired to one cold fold rather than misread. The escaping costs about
 1 KB on a 207 KB `ledger` savepoint, against the 2 MiB cap.
+
+**A large state is stored compressed, and the cap does not move.** The kernel refuses a
+file over `MAX_PAYLOAD_BYTES` (2 MiB) on write and on read, and the two must stay one
+number: a file written under a larger cap is ignored by a build with the smaller one, and
+the slot then resumes from an older, staler savepoint. A bounded state can still encode
+past it (a busy board's `work` state is about 2.4 MB of JSON), and such a cell then had
+no loadable savepoint at all, so every restart re-read its unit's tail since the last file
+that fit. So once the encoded state passes half the cap, `save_slot` stores it
+zlib-compressed and base64-encoded under `state_zlib` instead of `state_json`
+(`crew_log/slot_state_codec.py`). The same JSON string is compressed, so its key order is
+kept. A read inflates at most `MAX_DECODED_BYTES` and refuses a stream that goes past it.
+A build that predates `state_zlib` refuses the file and falls back, which is slower and
+never wrong. A cell over the warm-memory ceiling is still never serialized
+(`_persist_slot_fold`), so no giant string is built to measure it.
 
 The remaining linear cost of a resumed read is not the fold. On a log settled by the
 digest it is the prefix digests (about 4.9 s each of the 21.2 s above -- one read before

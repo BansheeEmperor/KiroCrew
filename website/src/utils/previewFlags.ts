@@ -14,9 +14,9 @@
  * lost to every fresh origin: another browser or device, the desktop app beside
  * a browser tab, a changed dashboard port, or cleared site data. Every reader
  * below still reads the cache, so the nav rail and the registry stay
- * synchronous; `usePreviewFlagServerSync` fills the cache from the server copy,
- * carries a cache-only ON up to the server once, and sends each toggle to the
- * server through the writer it registers with {@link setPreviewFlagPersister}.
+ * synchronous; `usePreviewFlagServerSync` fills the cache from the server copy
+ * and sends each toggle to the server through the writer it registers with
+ * {@link setPreviewFlagPersister}.
  * A flag has no server behavior of its own unless its own note says so
  * ({@link PREVIEW_MATE_SESSIONS} is the one that does).
  *
@@ -105,9 +105,9 @@ export const PREVIEW_REMOTE_CREW_CHAT = `${PREVIEW_FLAG_PREFIX}remote-crew-chat`
 
 /**
  * RETIRED: the old "Remote crew sessions" switch, folded into
- * {@link PREVIEW_REMOTE_CREW_CHAT}. Kept only so a device that turned it on
- * still has the feature on: `useRemoteCrewChat` reads either key as ON,
- * and {@link setRemoteCrewChat} clears it when the feature is turned off. Never
+ * {@link PREVIEW_REMOTE_CREW_CHAT}. `useRemoteCrewChat` reads either key as
+ * ON, {@link setRemoteCrewChat} clears it when the feature is turned off, and
+ * `usePreviewFlagServerSync` clears it when it mounts. Never
  * gate anything on it directly.
  */
 export const PREVIEW_INSTANCE_SESSIONS = `${PREVIEW_FLAG_PREFIX}instance-sessions`
@@ -151,18 +151,6 @@ export const PREVIEW_LAYOUT_HARNESS = `${PREVIEW_FLAG_PREFIX}layout-harness`
  * This key holds the layout and nothing else.
  */
 export const PREVIEW_FOLDER_CONDUCTOR = `${PREVIEW_FLAG_PREFIX}folder-conductor`
-
-/**
- * A crewmate's own agent harness: the Harness row on a crewmate's profile
- * Settings page, which pins the harness its chat and its workers run on
- * (`agents.<name>.acp_backend`) and scopes the Model list to that harness.
- *
- * A developer control: most people never need a crewmate off the install's
- * harness, and a pin moves that crewmate's work to another provider. Gating the
- * INGRESS only, like every flag here: a pin already saved keeps applying with
- * the flag off, and the server never reads this key.
- */
-export const PREVIEW_CREWMATE_HARNESS = `${PREVIEW_FLAG_PREFIX}crewmate-harness`
 
 /**
  * Crew Mode: the composer switch that runs a chat on a conductor, and every
@@ -213,13 +201,50 @@ export const PREVIEW_MATE_SESSIONS = `${PREVIEW_FLAG_PREFIX}mate-sessions`
 export const PREVIEW_EXPLORE = `${PREVIEW_FLAG_PREFIX}explore`
 
 /**
+ * Crew-owned GitHub sign-in: the gateway signs in to GitHub itself and serves it
+ * to KAS chats (`connections/crew_oauth.py`). Server-only: the gateway reads
+ * `dashboard.feature_previews.crew_oauth` per call, so nothing in the dashboard
+ * reads this key. Default OFF.
+ */
+export const PREVIEW_CREW_OAUTH = `${PREVIEW_FLAG_PREFIX}crew-oauth`
+
+/**
+ * Out-of-date Bot-written Dashboard fields: the page marks each bound field a
+ * Bot wrote and has not rewritten within its limit (24 hours unless the field
+ * says otherwise) "may be out of date", and the Bot's turn names those fields
+ * so it rewrites them (`dashboard_agentic.stale_line`). Server-only: the
+ * gateway reads `dashboard.feature_previews.dashboard_stale_fields` per read,
+ * so nothing in the dashboard reads this key. Default OFF, and OFF is every
+ * page and every turn as before.
+ */
+export const PREVIEW_DASHBOARD_STALE_FIELDS = `${PREVIEW_FLAG_PREFIX}dashboard-stale-fields`
+
+/**
+ * Agent Harness for worker chats: lets a conductor start a session on a harness it names
+ * (`session_create(backend=...)`, `work_dispatch(backend=...)`). Server-only:
+ * the gateway reads `dashboard.feature_previews.session_harness` per call
+ * (`session_harness_preview.py`), so nothing in the dashboard reads this key.
+ * Default OFF: the tools do not offer `backend` and refuse one. A Bot's own
+ * harness setting and `spawn_run(backend=...)` work either way.
+ */
+export const PREVIEW_SESSION_HARNESS = `${PREVIEW_FLAG_PREFIX}session-harness`
+
+/**
+ * Wake a Bot for its out-of-date fields: when a field the Bot writes passes its
+ * limit, the gateway starts one short turn in the Bot's own chat asking it to
+ * write those fields again (`dashboard/stale_wake.py`), even with no check-in
+ * on. Needs {@link PREVIEW_DASHBOARD_STALE_FIELDS}; its switch is shown only
+ * while that one is on. Server-only, default OFF.
+ */
+export const PREVIEW_DASHBOARD_STALE_WAKE = `${PREVIEW_FLAG_PREFIX}dashboard-stale-wake`
+
+/**
  * Every live preview-flag key, the ones the gateway keeps. Each one's name (see
  * {@link previewFlagName}) is a writable `dashboard.feature_previews.<name>` path
  * in the gateway config; `test_feature_previews_config.py` pins this list equal
  * to the gateway's `FEATURE_PREVIEW_FLAGS`, and `previewFlagServerSync.test.tsx`
  * pins it to every flag constant declared here. The retired
- * {@link PREVIEW_INSTANCE_SESSIONS} is left out: the gateway never keeps it, and
- * its ON is carried up as {@link PREVIEW_REMOTE_CREW_CHAT}.
+ * {@link PREVIEW_INSTANCE_SESSIONS} is left out: the gateway never keeps it.
  */
 export const PREVIEW_FLAGS: readonly string[] = [
   PREVIEW_WEBHOOKS,
@@ -228,10 +253,13 @@ export const PREVIEW_FLAGS: readonly string[] = [
   PREVIEW_LAYOUT_HARNESS,
   PREVIEW_FOLDER_CONDUCTOR,
   PREVIEW_SESSION_ENVIRONMENTS,
-  PREVIEW_CREWMATE_HARNESS,
   PREVIEW_CREW_MODE,
   PREVIEW_MATE_SESSIONS,
   PREVIEW_EXPLORE,
+  PREVIEW_CREW_OAUTH,
+  PREVIEW_DASHBOARD_STALE_FIELDS,
+  PREVIEW_SESSION_HARNESS,
+  PREVIEW_DASHBOARD_STALE_WAKE,
 ]
 
 /**

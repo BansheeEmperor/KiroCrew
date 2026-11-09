@@ -260,12 +260,15 @@ async def _shutdown(self: GatewayOrchestrator) -> None:
             drain_task.result()
     if not autonudge_shutdown_interrupted:
         autonudge_svc = self.autonudge_svc
-        await self._stop_services_and_sessions(eager_spawns=eager_spawns)
-        if autonudge_svc:
-            # A cut made above frees the teardown; it does not make the drained
-            # work durable. Whatever it left in flight gets the rest of the
-            # graceful budget before the hard exit that follows this method.
-            await autonudge_svc.settle_admitted_writes(graceful_deadline)
+        try:
+            await self._stop_services_and_sessions(eager_spawns=eager_spawns)
+        finally:
+            if autonudge_svc:
+                # A cut made above frees the teardown; it does not make the drained
+                # work durable. Whatever it left in flight gets the rest of the
+                # graceful budget before the hard exit that follows this method,
+                # and is still named when the graceful bound cuts the teardown.
+                await autonudge_svc.settle_admitted_writes(graceful_deadline)
         return
     # The absorbed cancellation was the graceful bound itself, or arrived
     # before it. Run the rest of teardown in its own task and wait only for
@@ -775,6 +778,13 @@ async def _shutdown_and_exit(
     await flush_audit_queue_before_hard_exit()
     await self._park_if_force_exit_claimed()
     await drain_log_queue_before_hard_exit()
+    # Marked once every teardown step above has returned: a teardown that wedges
+    # and is then killed never gets here, so its header-only dump is kept as the
+    # trace of that death. Bounded, so a stalled data home cannot hold the exit,
+    # and before the last park, so a force exit claimed meanwhile still owns it.
+    from kiro_crew.dashboard import crash_dump_store
+
+    await crash_dump_store.mark_clean_exit()
     await self._park_if_force_exit_claimed()
     os._exit(exit_code)
 

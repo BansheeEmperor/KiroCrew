@@ -183,13 +183,15 @@ class TestLivenessDrainLoop:
         The ABC defaults ``is_process_alive`` to ``is_alive``, so the only unanswerable
         probe is one that raises; it is treated as dead (WARNING, discard).
         """
-        mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=1)
+        # A TTL far longer than any runner stall keeps ``healthy`` fresh; only
+        # ``broken`` is aged past it, explicitly.
+        mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=3600)
 
         broken = _make_provider()
         broken.is_process_alive = MagicMock(side_effect=RuntimeError("probe failed"))
         healthy = _make_provider()
 
-        mgr._warm_pool.put_nowait((broken, time.monotonic() - 10))
+        mgr._warm_pool.put_nowait((broken, time.monotonic() - 7200))
         mgr._warm_pool.put_nowait((healthy, time.monotonic()))
 
         pooled = await mgr._drain_and_claim("kirocrew")
@@ -560,6 +562,21 @@ class TestGetOrCreatePoolIntegration:
         # Factory called for cold start, cwd forwarded
         factory.assert_called_once()
         assert factory.call_args.kwargs.get("cwd") == "/Users/alice/workspace/proj"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bridged", [True, False])
+    async def test_skips_pool_while_chat_sessions_get_a_crew_oauth_bridge(self, bridged):
+        """A pooled child projected its MCP array with no session key, so it holds no
+        Crew-owned Connection bridge; a chat that needs one cold-starts."""
+        from kiro_crew.connections import crew_oauth
+
+        mgr, factory = _make_manager(pool_agent="kirocrew")
+        pooled = _make_provider()
+        mgr._warm_pool.put_nowait((pooled, time.monotonic()))
+        mgr._drain_and_claim = AsyncMock(return_value=pooled)
+        with patch.object(crew_oauth, "bridges_chat_sessions", return_value=bridged):
+            await mgr.get_or_create("test-key", agent="kirocrew")
+        assert (mgr._drain_and_claim.await_count == 0) is bridged
 
     @pytest.mark.asyncio
     async def test_skips_pool_for_a_side_read_only_session(self):

@@ -28,7 +28,7 @@ const CJK = /[\u3000-\u9fff\uff00-\uffef]/
  * template that says it another way puts two words for one thing on one screen.
  */
 const OFF_CATALOG: Record<string, string> = {
-  '\u6210\u5458': 'crewmate', '\u540c\u4e8b': 'crewmate', '\u7ec4\u5458': 'crewmate',
+  '\u6210\u5458': 'crewmate', '\u540c\u4e8b': 'crewmate', '\u7ec4\u5458': 'crewmate', Jam: 'crewmate',
   '\u70b9\u6570': 'credits', '\u79ef\u5206': 'credits', '\u4fe1\u7528': 'credits',
 }
 
@@ -50,21 +50,21 @@ const PROBES: Record<string, { en: string; zh: string }> = {
     zh: '\u6682\u65e0\u5de5\u4f5c\u6d41\u3002\u6ca1\u6709\u5f85\u4f60\u5904\u7406\u7684\u4e8b\uff0c\u4e5f\u6ca1\u6709\u4efb\u4f55\u82b1\u8d39\u3002',
   },
   office: {
-    en: 'The record carries no board for this Bot yet, so there is nothing to review.',
+    en: 'The record carries no board for this bot yet, so there is nothing to review.',
     zh: '\u8fd9\u4e2a Bot \u7684\u8bb0\u5f55\u4e2d\u8fd8\u6ca1\u6709\u770b\u677f\uff0c\u56e0\u6b64\u6ca1\u6709\u53ef\u5ba1\u6838\u7684\u5185\u5bb9\u3002',
   },
   'org-chart': {
-    en: 'No board has reached this Bot\u2019s record yet, so there is nobody to chart.',
+    en: 'No board has reached this bot\u2019s record yet, so there is nobody to chart.',
     zh: '\u5c1a\u65e0\u770b\u677f\u8fdb\u5165\u8fd9\u4e2a Bot \u7684\u8bb0\u5f55\uff0c\u56e0\u6b64\u6ca1\u6709\u53ef\u7ed8\u5236\u7684\u5bf9\u8c61\u3002',
   },
   'work-kanban': { en: 'This board carries no item yet.', zh: '\u6b64\u770b\u677f\u8fd8\u6ca1\u6709\u4efb\u4f55\u4e8b\u9879\u3002' },
   timeline: {
-    en: 'No board has reached this Bot\u2019s record yet.',
+    en: 'No board has reached this bot\u2019s record yet.',
     zh: '\u8fd8\u6ca1\u6709\u770b\u677f\u8fdb\u5165\u8fd9\u4e2a Bot \u7684\u8bb0\u5f55\u3002',
   },
   'pr-watch': {
-    en: 'No lane reading yet. The Bot has not written one.',
-    zh: '\u8fd8\u6ca1\u6709\u68c0\u67e5\u8bfb\u6570\u3002Jam \u5c1a\u672a\u5199\u5165\u3002',
+    en: 'No lane reading yet. The bot has not written one.',
+    zh: '\u8fd8\u6ca1\u6709\u68c0\u67e5\u8bfb\u6570\u3002Bot \u5c1a\u672a\u5199\u5165\u3002',
   },
   flow: { en: 'No item on this board yet.', zh: '\u770b\u677f\u4e0a\u8fd8\u6ca1\u6709\u4efb\u4f55\u4e8b\u9879\u3002' },
   standup: { en: 'no headline written', zh: '\u672a\u5199\u5165\u8981\u70b9' },

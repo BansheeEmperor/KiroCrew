@@ -27,6 +27,7 @@ import { useIsMobile } from '../../../hooks/useIsMobile'
 import { usePointerDrag } from '../../../hooks/usePointerDrag'
 import ResizeHandle from '../../../components/ResizeHandle'
 import ChatColumn from './ChatColumn'
+import type { ChatEmbedSendMeta } from '../../../app-sdk/ChatEmbed'
 import DocView, { type Selection as DocSelection } from './DocView'
 import { DOC_CSS } from '../inlineStyles'
 import {
@@ -275,7 +276,8 @@ export default function SpecDetail({ name, setErr, onDeleted, onDuplicated }: Sp
   // detail, so updated_at changed without the specs list knowing and the rail's
   // ordering went stale until its own 15s poll.
   const messageMutation = useMutation({
-    mutationFn: (msg: string) => specApi.message(name, msg, specId()),
+    mutationFn: ({ msg, meta }: { msg: string; meta?: ChatEmbedSendMeta }) =>
+      specApi.message(name, msg, specId(), meta),
     onMutate: () => { lastSendAt.current = Date.now() },
     onError: (e) => setErr((e as Error).message),
     onSettled: invalidate,
@@ -394,7 +396,7 @@ export default function SpecDetail({ name, setErr, onDeleted, onDuplicated }: Sp
       // the record fails the agent must not move on, otherwise the spec advances
       // with no evidence anyone approved it.
       await approveMutation.mutateAsync({ phase, hash })
-      await messageMutation.mutateAsync(a.msg)
+      await messageMutation.mutateAsync({ msg: a.msg })
       setApproved(phase)
       // Switch to the document being written: DocView holds its shape with a
       // drafting skeleton, so there is something to watch instead of the file
@@ -430,7 +432,7 @@ export default function SpecDetail({ name, setErr, onDeleted, onDuplicated }: Sp
       })
     }
     try {
-      await messageMutation.mutateAsync(msg)
+      await messageMutation.mutateAsync({ msg })
       setComments([])
     } catch { /* surfaced by the mutation's onError */ } finally { setSendingAll(false) }
   }
@@ -491,19 +493,20 @@ export default function SpecDetail({ name, setErr, onDeleted, onDuplicated }: Sp
           <Btn
             label={<><Pause className="lucide-inline" /> {stopMutation.isPending ? i18nT('apps.specBuilder.components.specDetail.pausing') : i18nT('apps.specBuilder.components.specDetail.pause')}</>}
             danger
-            disabled={stopMutation.isPending}
+            busy={stopMutation.isPending}
             onClick={stop}
           />
         )
         : hasTasks && (
-          // Disabled while the handoff is in flight. Two clicks queued TWO
+          // Inert while the handoff is in flight. Two clicks queued TWO
           // handoffs, and Pause halts the running turn while leaving the queued
           // one intact -- so execution resumed by itself and kept editing files
-          // after the user had stopped it.
+          // after the user had stopped it. `busy`, not `disabled`, so the
+          // pressed button keeps keyboard focus.
           <Btn
             label={<><Play className="lucide-inline" /> {executeMutation.isPending ? i18nT('apps.specBuilder.components.specDetail.starting') : i18nT('apps.specBuilder.components.specDetail.start_building')}</>}
             primary
-            disabled={executeMutation.isPending}
+            busy={executeMutation.isPending}
             title={i18nT('apps.specBuilder.components.specDetail.an_agent_will_work_through_the_task_list')}
             onClick={execute}
           />
@@ -787,7 +790,7 @@ export default function SpecDetail({ name, setErr, onDeleted, onDuplicated }: Sp
               <ChatColumn
                 name={name}
                 slotKey={detail.slot_key}
-                onSend={messageMutation.mutateAsync}
+                onSend={(msg, meta) => messageMutation.mutateAsync({ msg, meta })}
               />
             )
             : <ChatColumnSkeleton />}

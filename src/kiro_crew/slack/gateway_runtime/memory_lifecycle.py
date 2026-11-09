@@ -39,7 +39,10 @@ def _initialize_memory_worker(self: GatewayOrchestrator) -> bool:
     """Restore and open the already-wired memory objects after readiness."""
     from kiro_crew.config.loader import data_home
     from kiro_crew.context import reset_memory_caches
-    from kiro_crew.cron_service.identity import migrate_legacy_member_schedules
+    from kiro_crew.cron_service.identity import (
+        migrate_legacy_member_schedules,
+        migrate_member_named_template_schedules,
+    )
     from kiro_crew.memory_backup import apply_pending_member_restores
     from kiro_crew.memory_stores import repair_legacy_member_stores
 
@@ -82,6 +85,15 @@ def _initialize_memory_worker(self: GatewayOrchestrator) -> bool:
                         "Captured the member execution of %d pre-identity schedule(s)",
                         len(captured),
                     )
+                # Then an owner's schedule whose capture runs a crew member's name
+                # as a bare template, onto that member, under the same barrier.
+                # Never raises.
+                moved = migrate_member_named_template_schedules(data_home())
+                if moved:
+                    logger.info(
+                        "Moved %d schedule(s) naming a crew member onto that member",
+                        len(moved),
+                    )
                 if startup.stopped:
                     return False
                 restored = apply_pending_member_restores(
@@ -122,16 +134,21 @@ def _initialize_memory_worker(self: GatewayOrchestrator) -> bool:
                         indexed = memory.rebuild_index()
                         logger.info("Global memory ready: FTS indexed %d files", indexed)
                     except Exception as exc:
-                        from kiro_crew.memory_startup import damaged_database_remedy
-
-                        # The remedy names memory.db, so only its own open earns it.
-                        remedy = (
-                            damaged_database_remedy(
-                                getattr(self.vector_memory, "_db_path", None), exc
-                            )
-                            if opening_vectors
-                            else ""
+                        from kiro_crew.memory_startup import (
+                            damaged_database_remedy,
+                            global_memory_remedy,
                         )
+
+                        # Name what the failing step opened, so only the vector open
+                        # names memory.db. The restore pass already ran, so no
+                        # pending restore is the cause here.
+                        db_path = getattr(self.vector_memory, "_db_path", None)
+                        if opening_vectors:
+                            remedy = damaged_database_remedy(db_path, exc) or global_memory_remedy(
+                                db_path
+                            )
+                        else:
+                            remedy = global_memory_remedy(getattr(memory, "_memory_dir", None))
                         startup.fail_store("default", exc, remedy=remedy)
                         self.vector_memory.close()
                 if restored:

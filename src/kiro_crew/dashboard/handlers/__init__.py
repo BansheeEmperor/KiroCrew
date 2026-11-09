@@ -121,6 +121,7 @@ from kiro_crew.dashboard.handlers.connections import (  # noqa: E402, F401
     api_connections_disconnect,
     api_connections_mint,
     api_connections_mint_state,
+    api_connections_oauth_callback,
     api_connections_oauth_client_delete,
     api_connections_oauth_client_put,
     api_connections_oauth_clients,
@@ -165,6 +166,7 @@ from kiro_crew.dashboard.handlers.cron import (  # noqa: E402, F401
     api_lessons,
     api_lessons_create,
     api_lessons_delete,
+    api_lessons_update,
 )
 
 # ── Diagnostics / Report a Problem (handlers/diagnostics.py) ──
@@ -177,6 +179,7 @@ from kiro_crew.dashboard.handlers.diagnostics import (  # noqa: E402, F401
 from kiro_crew.dashboard.handlers.files import (  # noqa: E402, F401
     _validate_dashboard_path,
     _write_file_restricted,
+    api_browse_create_dir,
     api_browse_dirs,
     api_browse_files,
     api_channel_upload_file,
@@ -199,6 +202,7 @@ from kiro_crew.dashboard.handlers.files import (  # noqa: E402, F401
     api_outbox_notify,
     api_path_complete,
     api_project_git,
+    api_project_git_branch_diff,
     api_project_git_log,
     api_project_git_repos,
     api_project_git_status,
@@ -226,8 +230,10 @@ from kiro_crew.dashboard.handlers.hooks import (  # noqa: E402, F401
     api_hook_toggle,
     api_hooks,
     api_hooks_agent,
+    api_hooks_agent_status,
     api_hooks_create,
     api_kiro_hooks,
+    api_kiro_hooks_rescan,
     api_webhook_context_delete,
     api_webhook_test,
     api_webhook_token_create,
@@ -347,6 +353,7 @@ from kiro_crew.dashboard.handlers.messaging import (  # noqa: E402, F401
     api_imessage_config_get,
     api_imessage_config_save,
     api_notification_ack,
+    api_notification_agent_dismiss,
     api_notification_agent_push,
     api_notification_channel_settings,
     api_notification_channels,
@@ -359,6 +366,7 @@ from kiro_crew.dashboard.handlers.messaging import (  # noqa: E402, F401
     api_slack_code_channel_agents,
     api_slack_config_get,
     api_slack_config_save,
+    api_slack_history,
     api_slack_manifest,
     api_slack_manifest_status,
     api_slack_pins,
@@ -1034,6 +1042,13 @@ from kiro_crew.dashboard.handlers.computer_use import (  # noqa: E402, F401
     api_computer_use_invoke,
 )
 
+# Owner review of a hand-edited sealed keystone file (Settings > Security).
+from kiro_crew.dashboard.handlers.config_pending import (  # noqa: E402, F401
+    api_config_pending_apply,
+    api_config_pending_discard,
+    api_config_pending_list,
+)
+
 # ── Core (extracted to handlers/core.py) ──
 from kiro_crew.dashboard.handlers.core import (  # noqa: E402, F401
     _DIST_DIR,
@@ -1091,7 +1106,12 @@ from kiro_crew.dashboard.handlers.decisions import (  # noqa: E402, F401
     api_decisions_provider_get,
     api_decisions_provider_put,
 )
+from kiro_crew.dashboard.handlers.decisions_sagemaker import (  # noqa: E402, F401
+    api_decisions_provider_sagemaker_test,
+)
 from kiro_crew.dashboard.handlers.notifications_push import (  # noqa: E402, F401
+    api_own_notification_ack,
+    api_own_notifications,
     api_push_notification,
     api_push_subscribe,
     api_push_unsubscribe,

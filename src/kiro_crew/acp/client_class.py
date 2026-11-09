@@ -30,6 +30,7 @@ from kiro_crew.acp import client_lifecycle as _client_lifecycle
 from kiro_crew.acp import client_mcp_array as _client_mcp_array
 from kiro_crew.acp import client_model_selection as _client_model_selection
 from kiro_crew.acp import client_native_children as _client_native_children
+from kiro_crew.acp import client_new_conversation as _client_new_conversation
 from kiro_crew.acp import client_permissions as _client_permissions
 from kiro_crew.acp import client_seed_ownership as _client_seed_ownership
 from kiro_crew.acp import client_spawn_env as _client_spawn_env
@@ -43,6 +44,7 @@ from kiro_crew.acp._dispatch import (
     ACP_BACKENDS_META_IDENTITY,
     BackgroundLaunchRecord,
     InFlightIdSet,
+    NativeCompactionStates,
 )
 from kiro_crew.acp.client_permissions import _scrub_observed
 from kiro_crew.acp.client_start import CLIENT_NAME
@@ -80,7 +82,7 @@ from kiro_crew.acp.types import (
 )
 from kiro_crew.agent import DerivedSpecSnapshot
 from kiro_crew.agent_sdk.capabilities import capabilities_for
-from kiro_crew.config.paths import config_dir
+from kiro_crew.config.paths import KEYLESS_WORK_DIR_NAME, config_dir
 from kiro_crew.mcp_gateway.claim import mint_stub_session_token
 
 if TYPE_CHECKING:
@@ -155,11 +157,12 @@ class AcpClient:
         permission_mode: str | None = None,
         shared_scratch: Path | None = None,
         side_read_only: bool = False,
+        include_memory: bool = True,
     ):
         if work_dir:
             self._work_dir = Path(work_dir)
         else:
-            self._work_dir = config_dir() / "workspace"
+            self._work_dir = config_dir() / KEYLESS_WORK_DIR_NAME
         # Once-per-instance guard for the ensure_ready work-dir check: True
         # after the first (off-loop) mkdir, so the per-prompt warm path pays
         # no filesystem syscall at all.
@@ -178,10 +181,12 @@ class AcpClient:
         self.memory_mode = "persistent"
         self._acp_backend = acp_backend
         # Claude backend permission mode (Auto-mode / permission-UI parity).
-        # Inert on the kiro-cli path. None = the backend's own default
-        # ("default", i.e. every tool decision is forwarded to the host), which is
-        # what _write_claude_local_settings leaves in place when nothing asked
-        # for a mode.
+        # Inert on the kiro-cli path. None = nothing asked for a mode:
+        # _write_claude_local_settings seeds no defaultMode, so the session starts
+        # in the mode the user's own settings name. With
+        # KIROCREW_CC_PIN_INHERITED_MODE on, _pin_claude_starting_mode then moves a
+        # session carrying Crew's tools that starts in "auto" or
+        # "bypassPermissions" to "default".
         self._permission_mode = permission_mode
         # A Side Chat session that may run read-only tools. On claude it starts
         # with only the read built-ins and no MCP server, and its mode is pinned
@@ -189,6 +194,10 @@ class AcpClient:
         # on the kiro-cli path, where the derived ``<agent>--readonly`` spec
         # confines the session instead.
         self._side_read_only = side_read_only
+        # False for a sub-agent spawned with ``include_memory=false``. On claude
+        # its envelope turns Claude Code's auto-memory off, as a restricted
+        # session's does (_claude_session_meta). Inert on every other backend.
+        self._include_memory = include_memory
         # That session's sensitive-path deny rules, built off the loop before its
         # launch (_prepare_claude_side_read_denies). Empty until then, and a side
         # session whose envelope would carry none is not started.
@@ -214,6 +223,9 @@ class AcpClient:
         # ``_claude_inline_settings`` instead -- see _exclude_foreign_local_settings.
         self._claude_local_settings_excluded = False
         self._claude_inline_settings: dict[str, Any] | None = None
+        # The chat notice when the exclusion runs a requested ``auto`` in
+        # ``default`` (_exclude_foreign_local_settings); "" otherwise.
+        self.claude_mode_pinned_notice = ""
         # The exact bytes this session last wrote to that path, held as the str
         # whose utf-8 encoding IS those bytes -- the writer emits binary so no
         # newline translation can come between the two on any platform. Creating
@@ -255,6 +267,9 @@ class AcpClient:
         # (harness-parity H13). None = not resolved yet; cleared on reset so the
         # next spawn re-reads the spec. See _session_mcp_servers.
         self._session_mcp_cache: list[dict[str, Any]] | None = None
+        # Launch snapshots of the Crew-owned Connection bridges this process's
+        # arrays projected, removed with the process (``_reset_state``).
+        self._crew_bridge_snapshots: list[str] = []
         # The ``DerivedSpecSnapshot`` that array was built from, or None when this
         # session's agent mirrors nothing. For an array-backed host the array IS the
         # spec the host consumes -- it reads no spec of its own -- so the bracket the
@@ -279,14 +294,14 @@ class AcpClient:
         # that re-enters on a live session does not judge it again. Cleared with the
         # session, never by the re-seed, which happens DURING the start that confirms.
         self._confirmed_capability_session = ""
-        # This session's agent spec, snapshotted once per spawn for the
-        # unresolved-ref guard alone (see _guard_unresolved_mcp_refs). Held for
-        # the same reason as the array above and read at the same kind of site:
-        # the guard runs where the wire array is composed, which is shared with
-        # kiro-cli, so the read cannot happen there. None = not snapshotted (or
-        # unreadable), which makes the guard a no-op rather than a disk read on
-        # the loop. Cleared on reset so the next spawn re-reads the spec.
+        # This session's agent spec, snapshotted once per spawn for the unresolved-ref
+        # guard (see _guard_unresolved_mcp_refs), and the mcp.json servers its opt-in
+        # mounts, read in the same hop. Held for the reason the array above is: the
+        # guard runs where the wire array is composed, shared with kiro-cli, so the
+        # read cannot happen there. None = not snapshotted (or unreadable), which makes
+        # the guard a no-op. Cleared on reset so the next spawn re-reads both.
         self._mcp_ref_spec: dict[str, Any] | None = None
+        self._mcp_json_names: tuple[str, ...] = ()
         # What the pre-spawn freshness gate verified for THIS child, captured in
         # _spawn and re-verified in _initialize_session once the child has read its
         # spec. _spawn is the only writer and it runs before any handshake, so the
@@ -662,6 +677,8 @@ class AcpClient:
         # The mask set this spawn asked for, so a trusted corroboration run can
         # exercise the same mounts rather than a weaker profile.
         self._sandbox_hidden_dirs: tuple[str, ...] = ()
+        self._ssh_auth_sock_forwarded = False  # set by the launch tail
+        self._child_env_names: frozenset[str] = frozenset()  # set by the launch tail
         self._jsonl_pos: int = 0  # track read position in session JSONL for tool results
         self._stderr_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._last_activity: float = time.monotonic()
@@ -730,7 +747,7 @@ class AcpClient:
         self._active_tool_calls = InFlightIdSet()
         # The current parallel tool batch, for the opt-in batch write guard
         # that ``approve_tool`` consults (``acp.batch_guard``).
-        self._batch_window = batch_guard.BatchWindow()
+        self._batch_window = batch_guard.BatchWindow(gated=True)
         # Armed by _handle_compaction_status on a `failed` status and cleared at
         # turn start: gates the _COMPACTION_FAILED_TURN_BUDGET check in
         # _prompt_loop. _compaction_failed_turn records that the check fired, so
@@ -755,6 +772,7 @@ class AcpClient:
         # settles it with a synthetic `completed` at turn end. Without that, a
         # consumer showing a compacting state would never leave it.
         self._claude_compaction_pending: bool = False
+        self._claude_native_compaction_id: str | None = None
         # The codex twin of the flag above. It guards TWO directions, and the
         # second is why it is read on the way in as well as at turn end. A loaded
         # session replays a past compaction as a ``tool_call`` that is already
@@ -764,6 +782,9 @@ class AcpClient:
         # ``session/prompt`` request goes unanswered -- which leaves this armed
         # for ``_settle_codex_compaction`` to close out at the turn's terminal.
         self._codex_compaction_pending: bool | str = False
+        # Native ``compaction_update`` lifecycle per id: duplicate terminals and
+        # late starts are dropped against it. Lives as long as the client.
+        self._native_compaction_states = NativeCompactionStates()
         # When this session's harness last launched work that outlives the
         # prompt (a backgrounded command, a Workflow). Never reset per turn: a
         # turn ending says nothing about whether that work has finished, and
@@ -835,6 +856,7 @@ class AcpClient:
     _pooled_mcp_servers = _client_mcp_array._pooled_mcp_servers
     _resolve_session_mcp_servers = _client_mcp_array._resolve_session_mcp_servers
     _mirrorless_member_mounts = _client_mcp_array._mirrorless_member_mounts
+    _broker_only_spec_mounts = _client_mcp_array._broker_only_spec_mounts
     _pooled_broker_stubs = _client_mcp_array._pooled_broker_stubs
     _append_member_dispatch_server = _client_mcp_array._append_member_dispatch_server
     _member_mount_withheld = _client_mcp_array._member_mount_withheld
@@ -1401,6 +1423,7 @@ class AcpClient:
     _next_req_id = _client_transport._next_req_id
     _send_request = _client_transport._send_request
     _write_request_bounded = _client_transport._write_request_bounded
+    _record_sent = _client_transport._record_sent
     _stdin_write_lock = _client_transport._stdin_write_lock
     _write_response_bounded = _client_transport._write_response_bounded
     _send_response = _client_transport._send_response
@@ -1432,6 +1455,8 @@ class AcpClient:
     _fork_session = _client_start._fork_session
     _initialize_session = _client_start._initialize_session
     ensure_ready = _client_start.ensure_ready
+    # A fresh conversation on the live process: ``kiro_crew.acp.client_new_conversation``.
+    new_conversation = _client_new_conversation.new_conversation
     # Run an ``AcpClient`` prompt turn and dispatch the frames it reads: ``kiro_crew.acp.client_turn``.
     _process_message = _client_turn._process_message
     _defer_opencode_shell_permission = _client_turn._defer_opencode_shell_permission
@@ -1472,6 +1497,11 @@ class AcpClient:
     _unanswered_steering_ids = _client_turn_control._unanswered_steering_ids
     _settle_steering_answer = _client_turn_control._settle_steering_answer
     _steer_via_steering_request = _client_turn_control._steer_via_steering_request
+    _held_steers = _client_turn_control._held_steers
+    _release_held_steers = _client_turn_control._release_held_steers
+    _held_steer_writes = _client_turn_control._held_steer_writes
+    _send_held_steers = _client_turn_control._send_held_steers
+    _send_steering_request = _client_turn_control._send_steering_request
     _await_steering_answer = _client_turn_control._await_steering_answer
     _release_accepted_steers = _client_turn_control._release_accepted_steers
     _steer_via_request = _client_turn_control._steer_via_request
@@ -1509,6 +1539,27 @@ class AcpClient:
     # (turn request id, ``<user_message>``-wrapped text) for each steer accepted
     # into the running turn and not yet released by its terminal.
     _steers_accepted: list[tuple[int, str]]
+    # (turn request id, text) for each steer that arrived while a tool call of
+    # the running turn was open, oldest first, until it is sent.
+    _steers_held: list[tuple[int, str]]
+    # The task sending the held steers, or None: the read loop starts it when
+    # the turn's last open tool call ends.
+    _held_steer_task: asyncio.Task[None] | None = None
+    # The text of each held steer of the running or last turn whose write may
+    # have reached the adapter with no answer read, until the next turn starts.
+    _held_steers_unanswered: set[str]
+
+    @property
+    def held_steers_possibly_delivered(self) -> frozenset[str]:
+        """Held steer texts whose delivery remains unresolved.
+
+        A write in flight, a stalled write (``ambiguous_delivery``), an
+        unanswered request, or ``injected`` after the turn ended may run
+        without being reported consumed. The dashboard's teardown reads this
+        so it requeues such a steer as possibly delivered. Reset when the next
+        turn starts.
+        """
+        return frozenset(getattr(self, "_held_steers_unanswered", ()))
 
     # Monotonic stamp of the last steer handed to the backend, 0.0 when never
     # steered. Mirrors AcpSessionHandle.last_steer_monotonic — the dashboard's

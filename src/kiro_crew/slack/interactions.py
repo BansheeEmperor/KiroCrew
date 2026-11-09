@@ -41,10 +41,12 @@ from kiro_crew.dashboard.chat_utils import (
     slack_options_owner_keys_snapshot,
     slack_options_slot,
 )
+from kiro_crew.http_proxy import resolve_proxy
 from kiro_crew.loop_lock import LoopBoundLock
 from kiro_crew.messaging.identity import channel_inbound_permitted
 from kiro_crew.messaging.queue_drain import entries_queued_by
 from kiro_crew.messaging.renderer import count_redaction_tags, redaction_notice
+from kiro_crew.messaging.session_trust import is_session_trusted, trust_permitted
 from kiro_crew.security import (
     redact_and_truncate,
     redact_credentials,
@@ -193,6 +195,21 @@ async def dispatch(payload: dict) -> None:
     if action_id == SESSION_LINK_ACTION:
         return
 
+    # ── Slack Code channel: the wrap-up's Archive button ──
+    # Answered there while slack.code_channels is on (origin-inherited
+    # authorization, SEL-audited); otherwise it falls through as before.
+    from kiro_crew.slack.code_channels.wrapup import ARCHIVE_ACTION_ID, handle_archive_click
+
+    if action_id == ARCHIVE_ACTION_ID:
+        if not (
+            await channel_inbound_permitted("slack")
+            and not channel_refusal(channel, operation="slack.interactive", caller=user_id)
+        ):
+            logger.info("slack code channel archive dropped: denied by channels governance policy")
+            return
+        if await handle_archive_click(_orch, payload):
+            return
+
     # ── OPTIONS choice buttons / "Choose several..." menu ──
     # A choice button RESOLVES an [OPTIONS:] choice: it edits the card to show
     # the answer AND re-dispatches it as a fresh turn. So a ``channels`` policy
@@ -301,6 +318,7 @@ async def dispatch(payload: dict) -> None:
             async with aiohttp.ClientSession() as sess:
                 await sess.post(
                     response_url,
+                    proxy=resolve_proxy(response_url),
                     json={
                         "replace_original": False,
                         "response_type": "ephemeral",
@@ -374,7 +392,8 @@ async def dispatch(payload: dict) -> None:
             return
         try:
             slot = await _import_thread_to_slot(_orch.slack, ds, channel, thread_ts)
-        except ChannelAgentMismatchError:
+        except (ChannelAgentMismatchError, AnchorHandoffRefused) as exc:
+            notice, reason = import_refusal(exc)
             sel().log_tool_invocation(
                 session_key="",
                 agent="kirocrew",
@@ -382,9 +401,9 @@ async def dispatch(payload: dict) -> None:
                 tool_name="mc_link_dashboard",
                 tool_kind="interaction",
                 outcome="denied",
-                metadata={"user_id": user_id, "reason": "channel_agent_mismatch"},
+                metadata={"user_id": user_id, "reason": reason},
             )
-            await _orch.slack.post_message(channel, IMPORT_AGENT_MISMATCH_NOTICE, thread_ts)
+            await _orch.slack.post_message(channel, notice, thread_ts)
             return
         if not slot:
             sel().log_tool_invocation(
@@ -401,6 +420,7 @@ async def dispatch(payload: dict) -> None:
                 async with aiohttp.ClientSession() as sess:
                     await sess.post(
                         response_url,
+                        proxy=resolve_proxy(response_url),
                         json={
                             "replace_original": False,
                             "response_type": "ephemeral",
@@ -423,6 +443,7 @@ async def dispatch(payload: dict) -> None:
             async with aiohttp.ClientSession() as sess:
                 await sess.post(
                     response_url,
+                    proxy=resolve_proxy(response_url),
                     json={
                         "replace_original": False,
                         "response_type": "ephemeral",
@@ -546,8 +567,8 @@ async def dispatch(payload: dict) -> None:
                 error="unauthorized user",
             )
             return
-        is_trust = action_id.startswith(TOOL_TRUST_ACTION_PREFIX)
-        approved = is_trust or action_id.startswith(TOOL_APPROVE_ACTION_PREFIX)
+        pressed_trust = action_id.startswith(TOOL_TRUST_ACTION_PREFIX)
+        approved = pressed_trust or action_id.startswith(TOOL_APPROVE_ACTION_PREFIX)
         # value / action_id suffix carry the session-namespaced approval token
         # (session_key:request_id) so a click resolves ONLY its own session's
         # pending tool — kiro-cli request ids restart at 1 per session — plus the
@@ -583,12 +604,17 @@ async def dispatch(payload: dict) -> None:
             return
         # Trust grants per-session auto-approve BEFORE resolving, so subsequent
         # tools in this session are auto-approved (mirrors native trust_tool).
-        if is_trust:
+        # The policy is read here, after the channels await, and the label and audit
+        # say "trusted" only when the grant really took: under a ``permission_mode``
+        # deny of ``trust`` the press approves this one tool.
+        is_trust = False
+        if pressed_trust and trust_permitted():
             sess_key = SlackApprovalDecider.session_for(approval_key, nonce=press_nonce)
             # No live prompt answers to this press, so there is no session to widen.
             # Granting on the empty key would escalate whatever later reads it.
             if sess_key:
                 add_trusted_session(sess_key, _orch.sessions if _orch else None)
+                is_trust = is_session_trusted(sess_key)
         resolved = SlackApprovalDecider.resolve_global(approval_key, approved, nonce=press_nonce)
         if not resolved:
             label = "⏱ This approval already expired."
@@ -686,7 +712,9 @@ async def _handle_resume_choice(
                 try:
                     async with aiohttp.ClientSession() as sess:
                         await sess.post(
-                            response_url, json={"replace_original": True, "text": label}
+                            response_url,
+                            proxy=resolve_proxy(response_url),
+                            json={"replace_original": True, "text": label},
                         )
                 except Exception:
                     pass
@@ -896,6 +924,7 @@ async def _handle_resume_choice(
                 async with aiohttp.ClientSession() as sess:
                     await sess.post(
                         response_url,
+                        proxy=resolve_proxy(response_url),
                         json={"replace_original": True, "text": label},
                     )
             except Exception:
@@ -937,7 +966,10 @@ from kiro_crew.slack.interactions_options import _open_options_several  # noqa: 
 from kiro_crew.slack.interactions_options import _tell_user  # noqa: E402
 from kiro_crew.slack.interactions_options import _import_thread_to_slot  # noqa: E402
 from kiro_crew.slack.interactions_options import IMPORT_AGENT_MISMATCH_NOTICE  # noqa: E402
+from kiro_crew.slack.interactions_options import IMPORT_CODE_CHANNEL_NOTICE  # noqa: E402
 from kiro_crew.slack.interactions_options import ChannelAgentMismatchError  # noqa: E402
+from kiro_crew.slack.interactions_options import import_refusal  # noqa: E402
+from kiro_crew.slack.code_channels.binding import AnchorHandoffRefused  # noqa: E402
 from kiro_crew.slack.interactions_sessions import _handle_inline_stop  # noqa: E402
 from kiro_crew.slack.interactions_sessions import _handle_session_end  # noqa: E402
 from kiro_crew.slack.interactions_sessions import _handle_session_new  # noqa: E402

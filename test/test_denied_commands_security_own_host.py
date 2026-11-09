@@ -218,6 +218,34 @@ class TestSandboxEscapeSshSelfOwnHost:
         monkeypatch.setattr(_argv_floor, "_NETLINK_ADDRS_PUBLISHED", True)
         assert _denied_by("ssh 198.51.100.9 id") is None
 
+    def test_address_gained_after_publish_is_self_before_the_refresh(self, monkeypatch):
+        # The cache is published and fresh, but the host has just gained
+        # 203.0.113.80, 2001:db8::80 and fe80::80 on scope 1 (a VPN came up).
+        # The kernel picks a destination as its own source only when it is an
+        # own address, so those are refused now and a far address stays admitted.
+        # Scope 1 is the interface ``VPN1``: the gate lowercases its name.
+        gained = {("203.0.113.80", None), ("2001:db8::80", 0), ("fe80::80", 1)}
+
+        class _GainedAddressSocket(_argv_floor.socket.socket):
+            def connect(self, address):  # type: ignore[override]
+                self._peer = address
+
+            def getsockname(self):  # type: ignore[override]
+                scope = self._peer[3] if len(self._peer) == 4 else None
+                own = (self._peer[0], scope) in gained
+                return (self._peer[0] if own else "192.0.2.1",) + self._peer[1:]
+
+        monkeypatch.setattr(_argv_floor.socket, "socket", _GainedAddressSocket)
+        monkeypatch.setattr(_argv_floor.socket, "if_nameindex", lambda: [(1, "VPN1"), (2, "eth2")])
+        assert _denied_by("ssh 203.0.113.80 id") == self._RULE
+        assert _denied_by("ssh 3405803856 id") == self._RULE  # 203.0.113.80, numeric
+        assert _denied_by("ssh 2001:db8::80 id") == self._RULE
+        assert _denied_by("ssh fe80::80%1 id") == self._RULE
+        assert _denied_by("ssh fe80::80%2 id") is None
+        assert _denied_by("ssh fe80::80%VPN1 id") == self._RULE
+        assert _denied_by("ssh fe80::80%eth2 id") is None
+        assert _denied_by("ssh 198.51.100.9 id") is None
+
     def test_enrichment_worker_merges_netlink_addresses(self, monkeypatch):
         # the worker pass carries the netlink layer -- its output
         # lands in the resolved set and a non-empty pass publishes the flag
@@ -517,10 +545,12 @@ class TestSandboxEscapeSshSelfOwnHost:
         assert _denied_by("ssh self.attacker.example id") == self._RULE
         assert len(started) == 1, "resolution scheduling must be single-flight"
 
-    def test_negative_dns_verdict_is_revalidated_after_ttl(self, monkeypatch, manual_clock):
-        # a cached ALLOW verdict is not reused unbounded -- a name
-        # that later rebinds to loopback is caught at the next revalidation.
-        # Deny verdicts stay permanent (over-blocking is the safe direction).
+    def test_dns_verdicts_are_revalidated_after_ttl(self, monkeypatch, manual_clock):
+        # A cached verdict is not reused unbounded: a name that later rebinds
+        # to loopback is caught at the next revalidation, and a name refused
+        # on one passing loopback answer is not refused for the rest of the
+        # process.  A refused name stays refused until a successful lookup
+        # says it is remote.
         assert _REAL_RESOLVED_HOST_VERDICT is not None
         monkeypatch.setattr(_argv_floor, "_resolved_host_verdict", _REAL_RESOLVED_HOST_VERDICT)
         manual_clock.install(monkeypatch, _argv_floor_hosts)
@@ -552,11 +582,31 @@ class TestSandboxEscapeSshSelfOwnHost:
         started.clear()
         assert _argv_floor._resolved_host_verdict("a.example") is False
         assert started == []
-        # Deny verdicts are permanent -- no revalidation however old.
+        # Fresh deny: refused, no revalidation.
         _argv_floor._HOST_VERDICT_CACHE["b.example"] = True
-        _argv_floor._HOST_VERDICT_STAMP["b.example"] = stale
+        _argv_floor._HOST_VERDICT_STAMP["b.example"] = now
         assert _argv_floor._resolved_host_verdict("b.example") is True
         assert started == []
+        answer: "list[str | None]" = []
+
+        def _gai(host, *args, **kwargs):
+            if answer[-1] is None:
+                raise OSError("resolution failure")
+            return [(2, 1, 6, "", (answer[-1], 0))]
+
+        monkeypatch.setattr(security.socket, "getaddrinfo", _gai)
+        # Stale deny: still refused (a cache hit, so a dotless name's open
+        # first-contact answer never applies) while ONE worker re-resolves.
+        # A failed lookup and a self answer both keep it refused.
+        for addr in (None, "127.0.0.1", "198.51.100.7"):
+            manual_clock.advance(_argv_floor._HOST_VERDICT_ALLOW_TTL + 1)
+            started.clear()
+            assert _argv_floor._resolved_host_verdict("b.example", fail_closed=False) is True
+            assert _argv_floor._resolved_host_verdict("b.example", fail_closed=False) is True
+            assert started == ["b.example"]
+            answer.append(addr)
+            _argv_floor._resolve_host_verdict_into_cache("b.example")
+        assert _argv_floor._resolved_host_verdict("b.example") is False
 
     def test_dns_alias_worker_classifies_addresses(self, monkeypatch):
         # The worker resolves off-loop and records whether any address is

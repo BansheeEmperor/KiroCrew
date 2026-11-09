@@ -157,6 +157,7 @@ from kiro_crew.config.sections_agent_fields import (  # noqa: F401
     JAIL_MODE_OFF,
     JAIL_MODE_ON,
     KAS_BUNDLE_DEFAULT_URL,
+    KAS_REFUSE_PLAIN_HTTP_MCP_HEADERS_HELP,
     MEMBER_APPROVAL_MODE_UNSET_EFFECTIVE,
     MEMBER_APPROVAL_MODES,
     MODEL_CONTEXT_TOKENS_MAX,
@@ -257,6 +258,9 @@ from kiro_crew.config.sections_dashboard import (  # noqa: F401
     LOOP_STALL_EXIT_AFTER_MANAGED_DEFAULT,
     LOOP_STALL_EXIT_AFTER_MAX,
     LOOP_STALL_EXIT_AFTER_MIN,
+    PREFERRED_LANGUAGES,
+    REMOTE_EDITOR_HOST_PATTERN,
+    REMOTE_EDITOR_IDS,
     VERBOSITY_LEVELS,
     DashboardConfig,
     JiraAuthEntry,
@@ -298,6 +302,7 @@ from kiro_crew.config.sections_decisions import (  # noqa: F401
 )
 from kiro_crew.config.sections_defaults import (  # noqa: F401
     _ABSENT,
+    _REPORTED_CLAMPS,
     _T,
     CONTEXT_WARN_MARGIN_PCT,
     DEFAULT_AUTOCOMPACT_PCT,
@@ -347,6 +352,7 @@ from kiro_crew.config.sections_limits import (  # noqa: F401
     POOL_SIZE_MAX,
     POOL_TTL_SECS_MAX,
     POOL_TTL_SECS_MIN,
+    PRIVACY_ACK_VERSION_MAX,
     RECENT_TINT_COUNT_MAX,
     RECENT_TINT_COUNT_MIN,
     RECONCILE_MAX_KILLS_MAX,

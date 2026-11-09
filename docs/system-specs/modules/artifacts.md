@@ -288,7 +288,7 @@ in-app-browser hand-off below applies. Uploading the same file to Kiro Space is
 | `slug` | string | URL-safe handle. Derived from `name` when not given, resolving a collision by suffixing (`-2`, `-3`, …); an explicitly-passed slug is refused — never renamed — when it is already taken or malformed |
 | `name` | string | Human-readable display name |
 | `kind` | enum | `widget`, `html`, `markdown`, `svg`, `json`, `text`, `webapp`, `image`, `dashboard` — inferred on save when the caller omits it (see [Kind inference](#kind-inference)), except `dashboard`, which inference never returns and a caller passes explicitly (see [Dashboard packages](#dashboard-packages-kinddashboard)) |
-| `source` | enum | `chat` (default), `cron`, `subagent`, `manual`, `import`, `dashboard`, `slack`, `cli`, `task-runner`, `unknown` |
+| `source` | enum | `chat` (default), `cron`, `subagent`, `manual`, `import`, `dashboard`, `slack`, `cli`, `task-runner`, `unknown`; a non-string the store is asked to record is a validation error (400 on the create route). The create route still falls back to the request's own source for a falsy value (`{}`, `[]`), and a `source_path` dedup update never reads the field, both as before |
 | `pinned` | bool | "Starred" — user-curated keep flag (default `false`). Drives the Artifacts page **Starred** view. Metadata-only; toggling does NOT bump `version`. |
 | `auto_registered` | bool | `true` when the store created this record automatically from a chat-emitted `<mcwidget>` (see [Widget auto-registration](#widget-auto-registration)) rather than from an explicit save. Sweepable by the retention pass while unpinned; tolerant-loaded (pre-existing artifacts default `false`, so they are never swept). |
 | `description` | string | Optional, ≤ 2,000 chars |
@@ -539,7 +539,7 @@ with a message before any request, and a given N always reads that version.
 |---|---|---|
 | `GET` | `/api/artifacts` | `?tag&kind&q` filters + `?folder=` scoping (absent = all; empty = unfiled/root; id = that folder) + `?session=` scoping (same absent/empty distinction; validated like `origin_session_key`) + `?pinned=` (tri-state — unrecognized values don't scope); returns `{artifacts: […]}` |
 | `POST` | `/api/artifacts` | JSON body — creates, returns full artifact + content; optional `folder` key (id or human path, mkdir -p) |
-| `GET` | `/api/artifacts/{slug}` | Returns full artifact + content |
+| `GET` | `/api/artifacts/{slug}` | Returns full artifact + content. A store read that is refused or fails (`ArtifactError`, `OSError`) answers 500 with a JSON `{error}`, as do `/versions/{n}` and `/events` |
 | `PATCH` | `/api/artifacts/{slug}` | Partial update; MCP-authenticated content updates snapshot by default, dashboard saves snapshot only with `snapshot: true`; optional `folder` key is metadata-only. A random `content_token` is stored with the artifact and replaced on every content write. An optional `expected_token` from a prior read makes a store-backed content write conditional: `409 {error, code: "artifact_conflict", current_token}` and nothing written when another content write landed since that read, `400` when malformed. A live file-backed artifact serves no token |
 | `DELETE` | `/api/artifacts/{slug}` | Permanent delete |
 | `PATCH` | `/api/artifacts/{slug}/pin` | Star/unstar — body `{pinned: bool}` (strictly boolean; non-booleans rejected). Metadata-only, no version bump |
@@ -713,7 +713,7 @@ code for a responsibility goes to its module:
 | Owner | Responsibility |
 |---|---|
 | `record_serialization.py` | What a route sends back: `_serialize`, the session title it shows, and the redactors (`_redact_text`, webapp and SEL audit metadata, `_redact_remote_response`) |
-| `route_plumbing.py` | The request plumbing every route shares: JSON and error responses, the owner gate (`_non_owner_refusal`), the capped JSON body read, the saving session's key and source, `_audit`, the live-refresh broadcast, the off-loop store runner, folder-reference resolution and `_publish_governance_denied` |
+| `route_plumbing.py` | The request plumbing every route shares: JSON and error responses (`_json_response` sends a stored `Infinity` / `NaN` as `null`, so a hand-edited `meta.json` never makes a reply invalid JSON), the owner gate (`_non_owner_refusal`), the capped JSON body read, the saving session's key and source, `_audit`, the live-refresh broadcast, the off-loop store runner, folder-reference resolution and `_publish_governance_denied` |
 | `library_reads.py` | The read routes: `GET /api/artifacts` with its filters, search snippets and content and snippet caches, and an artifact's detail, asset, versions and event log |
 | `session_documents.py` | `GET /api/artifacts/session-docs` and `POST /api/artifacts/materialize` |
 | `dashboard_package_gate.py` | The `kind="dashboard"` write gate create and update consult: the binding refusals, the promote verdict and the stored-snapshot classification |
@@ -837,6 +837,20 @@ reads it from where it lives:
 The detail page does not call `/api/deploy/list`: that listing reads every
 registered profile's account, which is a cost paid when the Publish panel
 opens rather than on every detail view.
+
+The library page does read it, because a static artifact keeps its public-web
+link nowhere else and its entry is where people look for it again.
+`LiveSiteLink` renders the matched site's URL (through `safeHttpUrl`) as a link
+under the name, on the gallery card and the table row. The cost stays bounded:
+every entry shares the Publish panel's `['deploy-web', 'sites']` query, so the
+whole page makes one listing. It is re-read at most every 30 seconds, when an
+entry mounts (opening or scrolling the page), and whenever a deploy or destroy
+refreshes it, but never on window focus. It runs only with the Artifact Deploy
+preview on, and is not gated on cloud deployment being offered: a site an
+earlier deploy left public stays visible, as on the Artifact Deploy page.
+Nothing is stored: a destroyed or reaped site leaves the listing and takes the
+link with it. A recalled site keeps its infrastructure and stays listed, so it
+keeps its link, as on the Publish panel.
 
 ### Withdrawal is NOT best-effort
 
@@ -1699,7 +1713,11 @@ to this kind would store content no reader can parse.
   and supplies defaults for missing keys, so future schema additions don't break
   existing files. A hand-edited `tags` is read as strings: a bare string is one
   tag, a number its text, and a `null`, bool, object or list entry is dropped,
-  so a list search or a page reading `tags` never meets a non-string.
+  so a list search or a page reading `tags` never meets a non-string. An
+  `Infinity` number (which `json.loads` accepts) falls back like any other
+  unreadable number: a publication or fork counter reads 0, an infinite
+  publication `version_map` entry is dropped, and a `version`
+  is a `ValueError`, so the listing skips just that record.
 - **Frontend rendering** — artifact bodies are rendered in the same sandboxed
   iframe that powers `<mcwidget>`, and that frame loads a **real document** from
   `GET /sandbox-doc/{doc_id}/{tok}` rather than a browser-built `blob:` URL. A
@@ -1824,6 +1842,10 @@ to this kind would store content no reader can parse.
   re-mints; re-pointing at the spent URL recovers nothing). Deliberately not an
   automatic re-mint: a second `load` also happens when a link inside an artifact
   navigates the frame, and silently pulling the reader back would fight them.
+  The crewmate Dashboard tab differs and re-mints by itself
+  (`useFrameAliveRecovery`): its links go through the host's link bridge, so its
+  frame has no navigation of its own to fight, and a document that does not
+  answer the host's ping after a `load` is re-minted, at most three times in a row.
   `/sandbox-doc/` is on the service worker's skip list for the same single-use
   reason, and because an iframe navigation has `mode === 'navigate'`, so the
   worker's offline fallback would otherwise serve the SPA shell INTO the widget
@@ -2163,6 +2185,49 @@ broadcasts.
 maintained by the frontend flow. The backend accepts any valid slug and does
 not enforce uniqueness.
 
+**Untouched-session discard** — opening the chat panel with no bound session
+creates one before the user types. When the panel stops showing that session
+(closed, switched to comments, moved to another artifact, or the page left), the
+page discards it if it is still untouched: no transcript row, nothing a sidebar
+close would ask about (`closeBusyReasons`: a turn, a queue, an approval, sub-agents,
+a workflow, a goal loop or monitor), an empty composer draft, no staged file or
+session reference (those are stored apart from the text), and no upload in flight.
+Leaving through "Open in chat page" keeps the session, and so does leaving for any
+chat route while it is the active session (the command palette, a session shortcut,
+the rail), because the chat page shows the active session.
+
+The page's reading comes from its own window and can be stale, so the decision is
+the server's. The page sends `deleteSlot({ key, discard: true })`, which runs the
+sidebar close's client bookkeeping but calls `POST /api/chat/slots/{slot}/discard`.
+That route refuses with 409 `turn_in_flight` when the slot holds a reservation,
+`slot_not_empty` when it has a transcript row or a queued prompt,
+`automation_active` when a goal loop or monitor is bound to it, paused included as
+the idle sweep counts it (another window can arm one the page has not seen yet, and
+the close would retire it), `automation_unknown` when the auto-nudge service is
+not running and a bound loop cannot be ruled out, as the idle sweep also refuses,
+`slot_replaced` when the key no longer holds the slot
+it read (another close popped it and a send recreated the key while the close
+awaited; the replacement is kept), and
+`not_discardable` when the slot is app-owned or its transcript is not its own
+`dashboard:<slot>` one (a channel-, cron- or workflow-linked slot).
+It checks before the close and again in
+`close_slot`'s `pre_pop_check`, so a message that lands while the close awaits is
+refused, not closed; an arm after the close begins is refused by the close's own
+fence. After the close it deletes the History row (the pinned title
+keeps an empty archived row listed) through the history delete's claim, and only
+when no slot holds the key: a send can recreate the key while the close saves
+history, and that replacement owns the transcript. Saved message rows refuse that
+delete with `slot_not_empty` after the close: a slot recreated on an archived key
+opens with an empty window over them. A send that would recreate the
+key once that delete has started is refused instead (`delete_in_flight`, see
+[history.md](history.md)). The delete's own answer is the route's answer, and like
+`DELETE /api/sessions/{key}` it is the owner's call: a non-owner dashboard
+caller's discard closes the session and keeps its row. A refused discard is quiet:
+the row comes back with the refetch, no close-refused notice shows, and another
+session's notice stays. Any untouched
+session the panel showed is discarded, not only one this page created, so a
+session left behind by a full page unload goes the next time its panel closes.
+
 **Live refresh** — the artifact mutation funnel broadcasts a typed
 `artifact_update {slug, version, deleted}` WS event
 (`DashboardState.push_artifact_update`, called via the handlers'
@@ -2231,6 +2296,17 @@ the artifact. The
 comment-count auto-reveal never switches away from an open chat panel, since the
 chat panel opens only on explicit action.
 
+**Bound session (frontend)** — the panel's embedded `ChatPage` renders the
+dashboard's active slot, so `ArtifactChatPanel` keeps it on the bound session with
+`useOwnSlotChat` (`website/src/hooks/useOwnSlotChat.ts`): it switches to the bound
+session and shows the chat only while that session is the active slot. Another
+session made active while the panel is open (a transcript link) is switched back.
+A 404 from the switch, or a confirmed close of the session, takes the row out of
+the slot list (`armConfirmedCloseHold` then `removeSlotOptimistic`, as archiving a
+gone session does), so the page resolves the next bound session or offers **Start
+chat**. Any other failure shows an `ErrorNotice` with **Try again**, never the
+chat that was open before.
+
 **Send to a session (frontend)** — the **More** menu's submenu
 (`ArtifactSendToSessionSubmenu`, driven by the page-owned
 `useArtifactSendToSession` so a New-session create outlives the menu closing) lists "New session" plus the ten most recent live
@@ -2281,6 +2357,19 @@ menu entries (Settings…, About) and the Companion's "Open session" run the
 same check before they navigate; `applyNavIntentInMain` takes the check as a
 required argument, so no caller can skip it by leaving it out.
 
+**One applier for artifact and app pop-outs (frontend)** — the main window
+registers the same `applyNavIntentInMain` handler on the artifact and the app
+pop-out channels (`shell/appShell.tsx`). An app pop-out's intent can also carry
+the query to replay (`search`), the store's `pendingInput`, staged error prompts
+(`errorHandoffs`) and an App SDK launch (`chatLaunch`); the main window re-stages
+each before it navigates, and publishes a forwarded `pendingInput` only on that
+navigation's own commit (`takeDeferredPendingInput`). When no main window claims
+an intent within `NAV_CLAIM_MS`, the engine's fallback (`navFallbackUrl` in
+`utils/popoutController.ts`) opens the destination in a new tab under the build
+base, with the session as `?sid=` and the first prompt as `?prefill=`, or as
+`?new=1&prefill=` when no session is named or the prompt is an error hand-off. An
+artifact pop-out's fallback is built the same way.
+
 **Session resolution (frontend)** — the active bound session is resolved from
 the Redux slots snapshot (`slot.artifact === slug`), so no extra endpoint exists:
 the WS `slots` event already carries the binding. The flow keeps it to at most
@@ -2293,7 +2382,10 @@ binding, so it is dispatched straight into the slots list (`addSlotOptimistic`)
 and the panel becomes interactive immediately. The silent context entry POST and
 the `fetchSlots` reconciliation run in the background: the context entry is
 consumed on the *next* user message, so it always lands before a human can type
-and send.
+and send. The panel withholds the new session until that response is handled,
+even if the WS `slots` frame listing it lands first (an artifact-bound create
+broadcasts before it answers), because ChatPage takes a staged prompt only when
+it mounts or switches slot.
 
 **Chat parity** — the panel embeds the same `ChatPage` component as `/chat`
 (`embedded` + `embedMode="chat"` for the single-session chrome), so follow-up
@@ -2384,7 +2476,7 @@ only, mirrored by the server CSP `frame-src https://*.cloudfront.net`);
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/api/artifacts/{slug}/app-preview` | standard dashboard auth | Validate the artifact + `app_dir` and mint a short-lived (15 min) HMAC path token. Returns `{available, base}`; `{available: false}` for every miss (no oracle). |
+| `GET` | `/api/artifacts/{slug}/app-preview` | standard dashboard auth | Validate the artifact + `app_dir` and mint a short-lived (15 min) HMAC path token. Returns `{available: true, base, expires_in}`. A caller that is not direct-local gets `{available: false}`; every other miss (no oracle) gets `{available: false, remote_framable}`, which tells the card whether it may frame the live deployment. Only Linux and macOS serve the local copy (`_PLATFORM_SUPPORTED`); elsewhere every mint is a miss. |
 | `GET` | `/artifact-app/{slug}/{token}/{path}` | HMAC path token (auth-middleware bypass) | Serve one static file from the app's web root — **`app_dir/public` is mandatory** (deploy-contract layout); an app_dir without a contained `public/` directory reports the preview unavailable, it is never served directly. Sandboxed preview iframes carry no cookies, so the token IS the auth. |
 
 Serve-time security (fail-closed 404 for every rejection): allow-listed local
@@ -2418,7 +2510,7 @@ event loop via `asyncio.to_thread`.
 | `POST` | `/api/deploy/destroy` | Full teardown of infrastructure (confirm-gated) |
 | `GET` | `/api/deploy/list` | List deployed sites |
 | `POST` | `/api/deploy/teardown/{slug}` | Human-triggered artifact teardown |
-| `GET` | `/api/deploy/pending` | List pending (unconfirmed) deploy previews |
+| `GET` | `/api/deploy/pending` | List pending (unconfirmed) deploy previews; each entry carries `expires_at_epoch` (`created_at_epoch` + 1 hour, derived, not stored) |
 | `POST` | `/api/deploy/pending/{id}/confirm` | Execute a pending deploy (cookie/token only; internal-secret denied) |
 | `POST` | `/api/deploy/pending/{id}/dismiss` | Dismiss/cancel a pending deploy (cookie/token only; internal-secret denied) |
 
@@ -2430,7 +2522,10 @@ Mutating routes fall into two categories:
   explicitly denied): `GET /api/deploy/pending`, `POST .../confirm`,
   `POST .../dismiss`. These routes support the two-step preview→confirm
   deploy flow — the gateway generates a pending entry at preview time and
-  the dashboard UI confirms or dismisses it.
+  the dashboard UI confirms or dismisses it. Each row shows the time left
+  until its `expires_at_epoch`, and the card stays on screen while a failed
+  confirm or dismiss error, or the publish acknowledgment, is still showing,
+  even after an expiry has emptied the list.
 
 All mutating routes require an unrestricted (non-restricted) session.
 
@@ -2500,6 +2595,13 @@ sandboxed iframe.
 SVG is deliberately **not** an image artifact: it is markup, stored as
 `kind="svg"` text and rendered through the sanitizing `SvgViewer`. Serving
 agent-authored SVG as an image would reintroduce a same-origin script vector.
+`SvgViewer` and the library card draw it in a shadow root of its own
+(`SvgShadow`) and keep its `<style>` elements there: drawn straight into the
+page, an SVG's stylesheet would apply to the whole dashboard, print included,
+while inside its own root it styles that SVG and nothing else. Its rules can
+still size and place the SVG's own outer box (`:host`), as the SVG's `style`
+attribute always could, and can match on the page around it
+(`:host-context()`), but they restyle nothing outside the SVG.
 
 ### Storage layout
 

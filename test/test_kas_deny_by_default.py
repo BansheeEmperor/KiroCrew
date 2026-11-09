@@ -154,11 +154,11 @@ def test_a_spec_without_allowed_commands_refuses_every_shell_call() -> None:
 
 @pytest.mark.parametrize(
     "pattern",
-    ["touch [[:alpha:]]+", r"touch /tmp/probe-allowed-\w+\.txt", "touch .{1,64}"],
+    ["touch [[:alpha:]]+", r"touch /tmp/probe-allowed-\W+\.txt", "touch .{,64}"],
 )
 def test_an_unusable_pattern_allows_nothing(pattern: str) -> None:
-    """Outside the syntax Crew reads like kiro-cli (a POSIX class, an alphanumeric
-    escape, a counted repeat), so a command only it would match is refused, never
+    """Outside the syntax Crew reads like kiro-cli (a POSIX class, an uppercase
+    class escape, a ``{,m}`` repeat), so a command only it would match is refused, never
     let through; the session-start notice names the entry so the author can
     rewrite it."""
     settings = {"shell": {"denyByDefault": True, "allowedCommands": [pattern]}}
@@ -181,6 +181,8 @@ _SCRIPTS = r"^python3 /[A-Za-z0-9_./-]*/scripts/(compute_signature|staleness)\.p
         ("^git (commit|status)( .*)?$", "git commit -m x"),
         ("^git commit -m .*$", 'git commit -m "docs(skills): weekly notes"'),
         ("^git commit -m .*$", "git commit -m 'fix(gate): {quoted}'"),
+        (r"touch /tmp/probe-allowed-\w+\.txt", "touch /tmp/probe-allowed-a.txt"),
+        ("touch .{1,64}", "touch /tmp/probe-allowed-a.txt"),
     ],
 )
 def test_a_command_a_class_or_group_pattern_matches_is_not_refused(
@@ -337,13 +339,15 @@ _AWS_SETTINGS: dict[str, Any] = {
     [
         ["execute_bash"],
         ["shell"],
-        ["*"],
         ["@builtin"],
         ["@builtin/"],
         ["@builtin/*"],
         ["@builtin/execute_bash"],
-        ["execute_*"],
+        ["@builtin/shell"],
         ["fs_read", " execute_bash "],
+        ["executeCmd"],
+        ["execute_cmd"],
+        ["@builtin/execute_cmd"],
     ],
 )
 def test_an_agent_whose_allowed_tools_names_the_shell_is_not_refused(
@@ -367,9 +371,20 @@ def test_an_agent_whose_allowed_tools_names_the_shell_is_not_refused(
         ["@builder-mcp"],
         ["@builder-mcp/*"],
         ["@*"],
+        ["*"],
+        ["e*"],
+        ["*bash"],
+        ["sh*"],
+        ["?hell"],
+        ["execute_*"],
+        ["@builtin/e*"],
+        ["@builtin/execute_*"],
+        ["Execute_Bash"],
         ["execute_bas[h]"],
         ["{execute_bash}"],
         ["!execute_bash"],
+        ["@builtin/executeCmd"],
+        ["@builtin/@builtin/execute_cmd"],
         [7],
         "execute_bash",
     ],
@@ -377,8 +392,8 @@ def test_an_agent_whose_allowed_tools_names_the_shell_is_not_refused(
 def test_an_agent_whose_allowed_tools_does_not_name_the_shell_is_still_refused(
     allowed_tools: Any,
 ) -> None:
-    """No shell entry (an MCP server, a read tool, an entry with glob syntax only
-    one matcher reads, a list that is not one): ``denyByDefault`` still holds."""
+    """No exact shell entry (an MCP server, a read tool, a pattern rather than the
+    tool's own name, a list that is not one): ``denyByDefault`` still holds."""
     extra = {} if allowed_tools is None else {"allowedTools": allowed_tools}
     assert not allowed_tools_grant_shell(allowed_tools)
     event = _own_request("aws sts get-caller-identity", _AWS_SETTINGS, **extra)

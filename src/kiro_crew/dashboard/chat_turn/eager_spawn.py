@@ -43,7 +43,10 @@ if TYPE_CHECKING:
         app_agent_binding_applies,
     )
     from kiro_crew.dashboard.chat_turn.crew_log_attribution import _slot_predecessor_store
-    from kiro_crew.dashboard.chat_turn.model_fallback import _app_allocation_kwargs
+    from kiro_crew.dashboard.chat_turn.model_fallback import (
+        _app_allocation_kwargs,
+        _slot_backend_allocation_kwargs,
+    )
     from kiro_crew.dashboard.chat_turn.session_reset import _consume_pending_reset
     from kiro_crew.dashboard.chat_turn.turn_context import _require_session_memory_assignment
 
@@ -132,12 +135,20 @@ def _note_eager_spawn_failure(slot: "_ChatSlot", exc: BaseException) -> None:
     # near-frame-limit payload, and this row is retained and broadcast.
     detail = redact_and_truncate(str(exc), _EAGER_SPAWN_ERROR_DETAIL_MAX_CHARS)
     try:
+        from kiro_crew.dashboard import gateway_notice as gn
+
+        _last_error = detail or type(exc).__name__
         slot.append(
             "error",
             f"This chat's agent failed to start {failures} times in a row, so it "
             "will not be started again in the background. Send a message to try "
-            f"again. Last error: {detail or type(exc).__name__}",
+            f"again. Last error: {_last_error}",
             "msg msg-err",
+            meta=gn.gateway_notice_meta(
+                gn.GATEWAY_NOTICE_EAGER_SPAWN_STOPPED,
+                failures=failures,
+                detail=_last_error,
+            ),
         )
     except Exception:
         logger.debug("Eager spawn: could not post the stop notice for %s", slot.key, exc_info=True)
@@ -780,14 +791,17 @@ async def _eager_spawn(
             # factory's own selection for this key, and the prefetch allocates
             # with no channel identity.
             from kiro_crew.crewmate_harness import crewmate_backend_pin
+            from kiro_crew.members import session_backend_pick
 
+            pick = session_backend_pick(session_key)
             if allow_resume and resume_takes_tool_search_replay(
                 tool_search=cfg.agent.tool_search,
                 backend=select_provider_backend(
                     session_key,
                     cfg.agent.member_acp_backend,
                     cfg.agent.acp_backend,
-                    crew_backend=crewmate_backend_pin(cfg, session_key),
+                    backend_override=pick,
+                    crew_backend=crewmate_backend_pin(cfg, session_key) if pick is None else None,
                 ),
                 channel_id=None,
                 session_key=session_key,
@@ -949,11 +963,14 @@ async def _spawn_admitted_prefetch(
                 crew_agent=crew_alias,
                 model=_requested_model or None,
                 cwd=slot.project or None,
+                # Same opt-in as the turn's claim: the chat shows the notice.
+                fallback_hidden_cwd=True,
                 speculative=True,
                 speculative_resume=allow_resume,
                 reasoning_effort_override=slot.reasoning_effort or None,
                 start_priority=start_priority,
                 **_app_allocation_kwargs(slot),
+                **_slot_backend_allocation_kwargs(slot),
             )
         except (SpeculativeResumeRefused, SessionClosingError, SessionEndingError):
             # A refusal, a gateway shutdown, or a key being ended: no agent

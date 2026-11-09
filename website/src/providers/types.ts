@@ -45,12 +45,19 @@ export interface NormalizedUsage {
     thisMonth: UsagePeriod
     avgMsgsPerSession: number
     /**
-     * Transcripts the path validator refused while scanning the sessions dir
-     * (#6733). On a Windows roaming-profile (UNC) home every transcript is
-     * refused, so a `total` of 0 with a positive count here is the silent
-     * failure the usage page must not render as a confident zero.
+     * Transcript files that did not load while scanning the sessions dirs: the
+     * path validator refused them, or they could not be stat'd or read. A
+     * positive count means the totals are incomplete by that many chats.
      */
     refusedTranscripts: number
+    /**
+     * Session directories that did not load: refused by the path validator or
+     * not listable. On a Windows roaming-profile (UNC) home both session
+     * directories are refused, so a `total` of 0 with a positive count here is
+     * the silent failure the usage page must not render as a confident zero.
+     * The transcripts inside were never counted, so the page states no number.
+     */
+    unreadableSessionDirs: number
     dailyHistory: {
       date: string
       sessions: number
@@ -197,6 +204,10 @@ export interface ProviderAdapter {
    *  provider's own hook config, each with the reason. Optional: a provider
    *  that drops nothing has none to report. */
   fetchUnsentProviderHooks?(): Promise<NormalizedUnsentHook[]>
+  /** Re-read the user's hook sources into the provider's hook config without a
+   *  restart. Resolves `false` when the config was not rewritten. Optional: a
+   *  provider that reads its hooks live has nothing to rescan. */
+  rescanProviderHooks?(): Promise<boolean>
 
   listPlugins(): Promise<NormalizedPlugin[]>
   installPlugin(pkg: string, type: 'agent' | 'skill' | 'mcp'): Promise<{ ok: boolean; error?: string }>

@@ -20,6 +20,7 @@ from kiro_crew import members
 from kiro_crew.dashboard.chat_delivery import (
     CHAT_BANNER_META_KEY,
     attachment_meta,
+    knowledge_meta,
     normalize_send_id,
     queue_for_next_turn,
     quote_meta,
@@ -524,8 +525,9 @@ async def accept(
         author=author_meta(actor_of(request)),
         # Validated by the send handler; the user row reads it off the entry.
         banner=str((meta or {}).get(CHAT_BANNER_META_KEY) or ""),
+        queued_work=queued_admission,
+        knowledge=knowledge_meta(meta),
     )
-    _sc_entry.stamp_queued_work(slot, qid, queued_admission)
     entry = next(item for item in slot._queue if item["id"] == qid)
     entry[RESPONSIVE_KEY] = True
     entry["_responsive_protected"] = slot.turn_running or slot._turn_admission_reserved

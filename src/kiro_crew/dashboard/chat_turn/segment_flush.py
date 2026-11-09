@@ -64,6 +64,7 @@ if TYPE_CHECKING:
         crew_log_emit,
         effective_session_key,
         logger,
+        mcp_apps_render,
         redact_credentials,
         redact_exfiltration_urls,
         redact_exfiltration_urls_with_records,
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
         register_widgets_off_loop,
         sel,
         sel_is_warm,
+        session_directive,
         telemetry_channel_of,
     )
     from kiro_crew.dashboard.chat_turn.agent_started import (
@@ -132,12 +134,14 @@ def _reflow_label_and_audit(slot: Any, text: str) -> str:
     when anything was moved the SEL row is requested in the same step, so no
     seam labels without also asking for the audit. The audit itself is
     best-effort: :func:`_log_glued_footer_text` skips the row while SEL is cold
-    (the label is the fix; the row only counts occurrences).
+    (the label is the fix; the row only counts occurrences). A directive marker
+    line the model quoted is dropped in the same step: the directive was applied
+    from its tool row, and in the reply it is internal bytes on show.
     """
     repaired, glued = reflow_and_label_glued_option_marker(text)
     if glued:
         _log_glued_footer_text(slot, glued)
-    return repaired
+    return session_directive.strip_quoted_markers(repaired)
 
 
 def _log_glued_footer_text(slot: Any, glued: list[str]) -> None:
@@ -388,7 +392,7 @@ def _give_back_run(
     if row.get("variant_idx") != variant_idx:
         return
     before = row.get("content") or ""
-    content = _reflow_label_and_audit(slot, before + text)
+    content = _reflow_label_and_audit(slot, mcp_apps_render.strip_quoted_markers(before + text))
     row["content"] = content
     variants = row.get("variants")
     if (
@@ -441,9 +445,9 @@ def _redact_segment_unkept(
     A delta boundary can cut a value, so per-delta redaction can leave pieces
     of it (a link's query after the placeholder its first piece became). So
     what is saved is the slot's raw copy of the same deltas, with the same
-    glued-footer reflow, redacted once as a whole: every value is intact there,
-    and the records come out of that one pass, so each describes a placeholder
-    the saved text holds.
+    glued-footer reflow and quoted-marker cut, redacted once as a whole: every
+    value is intact there, and the records come out of that one pass, so each
+    describes a placeholder the saved text holds.
 
     Fail closed: when that cannot be done with certainty, the saved text is
     :data:`_SEGMENT_UNCHECKED_TEXT` with no records, never the raw text. That
@@ -478,10 +482,12 @@ def _redact_segment_unkept(
     if _ordered_out is not None:
         _ordered_out[:] = [False]
     raw = slot.segment_raw_text
+    if raw:
+        raw = mcp_apps_render.strip_quoted_markers(raw)
     shown_sha = slot.segment_shown_sha
     removed = slot.segment_removed
     _reset_segment_copy(slot)
-    shown = _reflow_label_and_audit(slot, text)
+    shown = _reflow_label_and_audit(slot, mcp_apps_render.strip_quoted_markers(text))
     if raw == "":
         return _redact_segment_text(
             slot, shown, _ordered_out=_ordered_out, _reveal_pending=_reveal_pending
@@ -496,7 +502,9 @@ def _redact_segment_unkept(
         reason = "raw copy does not match the streamed text"
     else:
         try:
-            whole = reflow_and_label_glued_option_marker(raw)[0]
+            whole = session_directive.strip_quoted_markers(
+                reflow_and_label_glued_option_marker(raw)[0]
+            )
             order: list[bool] = []
             saved = _redact_segment_text(
                 slot, whole, _ordered_out=order, _reveal_pending=_reveal_pending
@@ -1114,7 +1122,6 @@ async def _turn_settle_answer(turn: _ChatTurn) -> None:
     first_word = turn.first_word
     full_message = turn.full_message
     is_new = turn.is_new
-    message = turn.message
     resumed = turn.resumed
     slot = turn.slot
     state = turn.state
@@ -1229,6 +1236,8 @@ async def _turn_settle_answer(turn: _ChatTurn) -> None:
                     )
                 slot.append(
                     "error",
+                    # Stays English: ``_refusal_card`` is the refusal formatter's
+                    # own output (the model's refusal), carried verbatim.
                     _refusal_card,
                     "msg msg-err",
                 )
@@ -1251,10 +1260,7 @@ async def _turn_settle_answer(turn: _ChatTurn) -> None:
                         "msg msg-info",
                         meta=gn.gateway_notice_meta(gn.GATEWAY_NOTICE_REFUSAL_FALLBACK_SAME_MODEL),
                     )
-                turn.died_notice = (
-                    "The model declined to answer and the chat stopped. "
-                    "Open the chat to see why."
-                )
+                turn.died_notice = "chat_stopped_refused"
     elif _stop_reason == STOP_REASON_REFUSAL:
         # Model-side content refusal with no accompanying text: Anthropic's
         # bare `refusal` stop reason (passed through by every harness), or
@@ -1331,9 +1337,7 @@ async def _turn_settle_answer(turn: _ChatTurn) -> None:
                     "msg msg-info",
                     meta=gn.gateway_notice_meta(gn.GATEWAY_NOTICE_REFUSAL_FALLBACK_SAME_MODEL),
                 )
-            turn.died_notice = (
-                "The model declined to answer and the chat stopped. " "Open the chat to see why."
-            )
+            turn.died_notice = "chat_stopped_refused"
     elif turn._agent_started:
         # A turn the agent started answers no prompt, so neither recovery below
         # (the post-compaction continuation, the empty-response ladder) has a
@@ -1460,6 +1464,7 @@ async def _turn_settle_answer(turn: _ChatTurn) -> None:
             had_thinking=_turn_thought,
             billed=_turn_billed,
         )
+        turn._empty_verdict_left_prompt_unanswered = not _empty_activity.productive
         _empty_cause = classify_empty_turn(_empty_activity)
         # Snapshot BEFORE the rungs, each of which may increment the counter.
         # This is the ordinal of the turn just observed, which is what the
@@ -1488,10 +1493,13 @@ async def _turn_settle_answer(turn: _ChatTurn) -> None:
             # turn-complete report is still True would drop that callback
             # and strand a durable producer after the replay succeeds.
             await _report_consumed(turn, False)
+            # Without this turn's merge-card frames: _retrying_empty keeps
+            # the turn from landing, so _run_chat's finally puts those contexts
+            # back and the replay turn drains them itself.
             _queue_recovery(
                 turn,
                 0,
-                message,
+                turn._message_without_merge_cards,
                 kind=SYNTHETIC_RECOVERY_KIND,
                 # Verbatim replay: ORIGINAL only if the incoming text was the
                 # user's. On a recovery turn it is the runner's continuation.

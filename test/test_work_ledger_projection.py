@@ -11,6 +11,7 @@ mutation carrying only the fields that action set, and the rebuild round trip.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -75,6 +76,37 @@ async def test_writes_are_refused_when_the_callers_unit_is_unknown(recorded, mon
     item = wl.read_work_item(CONDUCTOR, item_id)
     assert item is not None and item.status is None
     assert len(recorded) == before
+
+
+@pytest.mark.asyncio
+async def test_a_worker_with_no_live_unit_yet_reports_into_its_boards_unit(recorded, monkeypatch):
+    """A worker bound before its first turn has no live unit yet: its report is
+    recorded as the board's copy in the conductor's unit, with no mirror, and the
+    conductor's log is never cited as the worker's evidence."""
+    item_id = await _board()
+    monkeypatch.setattr(
+        routes,
+        "unit_for_session_key",
+        lambda sessions, key: routes.UNKNOWN if key == WORKER else f"unit:{key}",
+    )
+    cited: list[str] = []
+    monkeypatch.setattr(routes, "_crew_store", lambda slot: "crew-x")
+    monkeypatch.setattr(
+        routes.crew_log_emit,
+        "on_crew_report",
+        lambda store, data, *, cite_unit: cited.append(cite_unit) or 0,
+    )
+    before = len(recorded)
+
+    status, body = await _report(WORKER, {"status": "progress", "summary": "started"})
+    assert status == 200, body
+    assert [(unit, data["action"], data["by"]) for unit, data in recorded[before:]] == [
+        (f"unit:{CONDUCTOR}", "report", WORKER)
+    ]
+    assert recorded[-1][1]["board_copy"] is True
+    assert cited == [routes.UNKNOWN]
+    item = wl.read_work_item(CONDUCTOR, item_id)
+    assert item is not None and item.status == "progress"
 
 
 # -- one entry per mutation ----------------------------------------------------
@@ -421,14 +453,13 @@ def test_a_rebuild_sets_the_create_counter_to_what_the_record_holds(monkeypatch)
     assert wl.read_conductor(CONDUCTOR).created_total == 2
 
 
-def _seed_cached_cap(goal_version: int, item_cap: int, base: int, concurrency_cap: int = 6) -> None:
-    """Write a cached header carrying the goal's caps, as goal writes would leave it."""
+def _seed_cached_cap(goal_version: int, base: int, concurrency_cap: int = 6) -> None:
+    """Write a cached header carrying the goal's cap, as goal writes would leave it."""
     wl.ensure_conductor(CONDUCTOR, goal="ship it")
     header_path = wl.conductor_dir(CONDUCTOR) / "conductor.json"
     stored = json.loads(header_path.read_text(encoding="utf-8"))
     stored.update(
         goal_version=goal_version,
-        item_cap=item_cap,
         concurrency_cap=concurrency_cap,
         goal_items_base=base,
     )
@@ -444,10 +475,10 @@ def test_a_clean_rebuild_keeps_the_cached_goal_caps(monkeypatch):
         "read_slot_projection",
         lambda slot, name, **_kw: SimpleNamespace(value=fold if name == "work" else {}),
     )
-    _seed_cached_cap(goal_version=1, item_cap=50, base=1, concurrency_cap=9)
+    _seed_cached_cap(goal_version=1, base=1, concurrency_cap=9)
     wl.rebuild_from_projection(CONDUCTOR)
     header = wl.read_conductor(CONDUCTOR)
-    assert (header.item_cap, header.concurrency_cap, header.goal_items_base) == (50, 9, 1)
+    assert (header.concurrency_cap, header.goal_items_base) == (9, 1)
 
 
 def test_a_clean_rebuild_of_an_upgraded_header_counts_from_the_upgrade(monkeypatch):
@@ -459,7 +490,7 @@ def test_a_clean_rebuild_of_an_upgraded_header_counts_from_the_upgrade(monkeypat
         "read_slot_projection",
         lambda slot, name, **_kw: SimpleNamespace(value=fold if name == "work" else {}),
     )
-    _seed_cached_cap(goal_version=1, item_cap=20, base=0)
+    _seed_cached_cap(goal_version=1, base=0)
     header_path = wl.conductor_dir(CONDUCTOR) / "conductor.json"
     stored = json.loads(header_path.read_text(encoding="utf-8"))
     stored.pop("goal_items_base")
@@ -482,13 +513,12 @@ def test_a_dirty_rebuild_drops_a_refused_goal_writes_caps_and_count_start(monkey
         "read_slot_projection",
         lambda slot, name, **_kw: SimpleNamespace(value=fold if name == "work" else {}),
     )
-    _seed_cached_cap(goal_version=2, item_cap=200, base=1, concurrency_cap=30)
+    _seed_cached_cap(goal_version=2, base=1, concurrency_cap=30)
     wl.mark_cache_dirty(CONDUCTOR, "an unrecorded write could not be undone")
     wl.rebuild_from_projection(CONDUCTOR)
     header = wl.read_conductor(CONDUCTOR)
     assert header.goal == "ship it"
-    assert (header.item_cap, header.concurrency_cap, header.goal_items_base) == (
-        wl.DEFAULT_GOAL_ITEM_CAP,
+    assert (header.concurrency_cap, header.goal_items_base) == (
         wl.DEFAULT_GOAL_CONCURRENCY_CAP,
         0,
     )
@@ -768,6 +798,27 @@ async def test_the_rebuild_route_rebuilds_the_callers_own_board_from_real_units(
     assert header is not None and header.goal == "ship it"
     item = wl.read_work_item(CONDUCTOR, item_id)
     assert item is not None and item.title == "item one"
+
+
+@pytest.mark.asyncio
+async def test_a_reported_wake_at_rides_the_record_and_the_next_report_clears_it(monkeypatch):
+    """The fold the sidebar reads holds the declared wait, so a rebuild keeps
+    it, and a later report without one clears it there as it does in the cache."""
+    _real_units(monkeypatch)
+    item_id = await _board()
+    wake = (datetime.now(timezone.utc) + timedelta(hours=3)).replace(microsecond=0).isoformat()
+    status, body = await _report(
+        WORKER, {"status": "progress", "summary": "waiting", "wake_at": wake}
+    )
+    assert status == 200, body
+    wl.rebuild_from_projection(CONDUCTOR)
+    item = wl.read_work_item(CONDUCTOR, item_id)
+    assert item is not None and item.wake_at == wake
+    status, body = await _report(WORKER, {"status": "progress", "summary": "moving"})
+    assert status == 200, body
+    wl.rebuild_from_projection(CONDUCTOR)
+    item = wl.read_work_item(CONDUCTOR, item_id)
+    assert item is not None and item.wake_at is None
 
 
 # -- the record is refused before the commit, and answered for after it -------

@@ -6,14 +6,14 @@ import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuIte
 import MessageContextMenu, { type MessageMenuItem } from './MessageContextMenu'
 import MessageActionMenuItems, { useMessageActionsFor, useMessageActionsLoadFailed } from '../../messageActions/MessageActionMenuItems'
 import { copyRichToClipboard, copyToClipboard } from '../../utils/clipboard'
-import { markdownToCleanHtml } from '../../components/markdown/richTextClipboard'
+import { markdownToCleanHtml, rangeToCleanHtml } from '../../components/markdown/richTextClipboard'
 import { stripKeepVisibleMarker } from '../../app-sdk/protocol/keepVisibleMarker'
 import { copySessionLink } from '../../utils/shareUrl'
 import { ICON_ACTION_ROW_CLS } from '../../utils/touchActions'
 import { isTouchDevice } from '../../utils/isTouchDevice'
 import MarkdownRenderer from '../../components/MarkdownRenderer'
 import MessageErrorBoundary from '../../components/MessageErrorBoundary'
-import SelectionToolbar, { useSelectionActions } from '../../components/SelectionToolbar'
+import SelectionToolbar, { selectionTextFrom, useSelectionActions } from '../../components/SelectionToolbar'
 import { useAppSelectionActions } from '../../selectionActions/useAppSelectionActions'
 import { useSearchHighlight, useCurrentOcc } from '../../hooks/SearchHighlightContext'
 import { applySearchHighlights, clearSearchHighlights } from '../../utils/domHighlight'
@@ -24,6 +24,8 @@ import DecisionStrip from './DecisionStrip'
 import { readDecisionRecords, readMemoryRecallInStrip } from './decisionRecord'
 import MemoryRecallStrip from './MemoryRecallStrip'
 import SpeakMenuItem from './SpeakMenuItem'
+import ThinkingBlock from './ThinkingBlock'
+import { extractInlineThinking } from '../../app-sdk/protocol/inlineThinking'
 import type { FileChipStyle } from './ChatSettings'
 import { loadChatConfig } from './ChatSettings'
 import { useSmoothStream } from '../../hooks/useSmoothStream'
@@ -241,7 +243,12 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
   // Applied state impossible to reach. setApplied is stable.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { if (applied) setApplied(false) }, [effectiveContent])
-  const { text: parsedText } = parseOptions(effectiveContent)
+  // An inline `<thinking>` block (a model with no separate reasoning stream)
+  // leaves the prose for the same collapsed row the streamed kind uses. It runs
+  // first, so nothing downstream (options, Copy, Quote, Speak) reads the
+  // scratchpad as the answer.
+  const { cleaned: thinkingCleaned, thinking: inlineThinking } = useMemo(() => extractInlineThinking(effectiveContent, { hidePartial: isStreaming }), [effectiveContent, isStreaming])
+  const { text: parsedText } = parseOptions(thinkingCleaned)
   // While the marker line is still arriving it has no closing `]`, so
   // OPTION_MARKER_RE can't match it yet and the raw `[OPTIONS: …` would type
   // itself out as prose before flipping to pills at turn end. Suppress the
@@ -297,7 +304,18 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
     }
     setRawMode(!rawMode)
   }
-  const selectionActions = useSelectionActions(onQuote, onAsk)
+  // The selection row's Copy: the plain text it always wrote, plus the selected
+  // part as clean HTML for editors that keep formatting (Outlook, Word). Only
+  // while the live selection is still the one the row took the text from: a
+  // mid-stream re-render can drop it, and a Firefox multi-range selection has
+  // parts one range misses. No HTML means the plain text alone.
+  const copySelection = (text: string) => {
+    const sel = window.getSelection()
+    const root = contentRef.current
+    const html = root && sel?.rangeCount === 1 && selectionTextFrom(sel) === text ? rangeToCleanHtml(root, sel.getRangeAt(0)) : ''
+    return html ? copyRichToClipboard(html, text) : copyToClipboard(text)
+  }
+  const selectionActions = useSelectionActions(onQuote, onAsk, copySelection)
   // App items (`contributes.selectionActions`) read this reply through the typed
   // `chat` source: the text the toolbar snapshotted, never the document selection.
   // They sit in their own toolbar row, so the host row never grows.
@@ -574,7 +592,7 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
               </span>
             </DropdownMenuItem>
           )}
-          {hasSpeak && <SpeakMenuItem onSelect={() => onSpeak?.(content)} />}
+          {hasSpeak && <SpeakMenuItem onSelect={() => onSpeak?.(extractInlineThinking(content).cleaned)} />}
           {oldMenuContext && shareEnabled && (
           <DropdownMenuItem className="[@media(hover:none)]:min-h-10" data-testid="share-message" onSelect={() => setShareOpen(true)}>
             <span className="flex items-center gap-2">
@@ -677,6 +695,7 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
   const regenButton = regenRow ? <button className="text-muted hover:text-text p-0.5 rounded transition-colors" title={i18nT('pages.chat.assistantMessage.regenerate')} aria-label={i18nT('pages.chat.assistantMessage.regenerate_response')} onClick={onRegenerate}><RefreshCw size={14} /></button> : null
 
   return <div data-role="assistant" className="group/msg">
+    {inlineThinking && !body && <div className="mb-1"><ThinkingBlock content={inlineThinking} disclosureKey={messageTs ? `inline-thinking:${messageTs}` : undefined} /></div>}
     {/* 'message-bubble' is a stable theming hook — see website/docs/theming-contract.md */}
     <MessageContextMenu items={contextItems} onCopyFailed={() => setCopyFailed(true)} yieldToSelection={!quoteOffered}>
     <div ref={contentRef} className={`message-bubble mc-message-font-scope msg-content group/bubble relative leading-relaxed text-text overflow-hidden${bubbleClassName ? ` ${bubbleClassName}` : ''}`} data-testid="message-bubble" data-bordered={bubbleClassName ? '' : undefined} style={rawMode && rawBoxHeight !== null && !isStreaming

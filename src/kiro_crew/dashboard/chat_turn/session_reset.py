@@ -17,7 +17,6 @@ if TYPE_CHECKING:
         STOP_REASON_END_TURN,
         DashboardState,
         _ChatSlot,
-        _pending_reset_retries,
         effective_session_key,
         expire_slack_options,
         idle_slot_admits_drain,
@@ -93,7 +92,7 @@ def _arm_pending_reset_retry(state: "DashboardState", slot: "_ChatSlot") -> None
     owner's still-live task — that task exits on its own identity check, and
     its compare-and-pop cleanup cannot remove a successor's registration.
     """
-    entry = _pending_reset_retries.get(slot.key)
+    entry = state._pending_reset_retries.get(slot.key)
     if entry is not None and entry[0] is slot and not entry[1].done():
         return
 
@@ -251,18 +250,18 @@ def _arm_pending_reset_retry(state: "DashboardState", slot: "_ChatSlot") -> None
             own = asyncio.current_task()
             if own is not None:
                 _pending_reset_wakeups.pop(own, None)
-            current = _pending_reset_retries.get(slot.key)
+            current = state._pending_reset_retries.get(slot.key)
             if current is not None and current[1] is own:
-                _pending_reset_retries.pop(slot.key, None)
+                state._pending_reset_retries.pop(slot.key, None)
 
     task = asyncio.create_task(_retry())
     _pending_reset_wakeups[task] = wake
-    _pending_reset_retries[slot.key] = (slot, task)
+    state._pending_reset_retries[slot.key] = (slot, task)
 
 
-def _wake_pending_reset_retry(slot: "_ChatSlot") -> None:
+def _wake_pending_reset_retry(state: "DashboardState", slot: "_ChatSlot") -> None:
     """Run *slot*'s armed retry now instead of at its next tick, with every guard it has."""
-    entry = _pending_reset_retries.get(slot.key)
+    entry = state._pending_reset_retries.get(slot.key)
     if entry is None or entry[0] is not slot:
         return
     wake = _pending_reset_wakeups.get(entry[1])
@@ -379,6 +378,10 @@ async def _consume_pending_reset(
                 # the next consume lands it, at worst costing one redundant
                 # cold start after the reset tears down an already-correct
                 # idle session.
+                if not slot.project and slot._pending_reset_clears_cwd:
+                    # Again here: a cold start already in flight when the project was
+                    # cleared stores the old directory as it registers.
+                    state.sessions.retract_cwd(pending_key)
                 reset_ok = await state.sessions.reset(pending_key, skip_if_busy=True)
             except Exception:
                 # A teardown that raised leaves the session in a state this
@@ -404,6 +407,7 @@ async def _consume_pending_reset(
                     torn_down = True
                     if slot._pending_reset_history_key == pending_key:
                         slot._pending_reset_history_key = None
+                        slot._pending_reset_clears_cwd = False
                     # Freshness push for open tabs; verdict-driven (see
                     # _broadcast_expired_oauth_banners).
                     _broadcast_expired_oauth_banners(state, slot)

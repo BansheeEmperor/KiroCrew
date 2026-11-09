@@ -46,17 +46,6 @@ logger = logging.getLogger("kiro_crew.context")
 
 _WIDGET_TOKEN = "{{WIDGET_BLOCK}}"
 
-#: Built-in agents that draw for a person in the dashboard chat (the conductor's
-#: introduction card and task board, a team lead's progress) and so get the
-#: per-surface widget pointer in their ``[AGENT SYSTEM PROMPT]`` block. Each maps
-#: the ``widgets`` / ``living-ui`` / ``artifacts`` skills the pointer names.
-#: ``kirocrew-ledger-conductor`` is the conductor's deprecated alias with the same
-#: body. ``kirocrew-worker`` is absent on purpose: it reports to the work ledger,
-#: not to a person.
-WIDGET_BLOCK_AGENTS = frozenset(
-    {"kirocrew-conductor", "kirocrew-ledger-conductor", "kirocrew-team-lead"}
-)
-
 
 def steering_target_admissible(resolved: Path, base: Path | None = None) -> bool:
     """Admission gate for a steering document's RESOLVED path.
@@ -121,7 +110,27 @@ def _steering_glob_anchor(pattern: str, project: Path | None) -> tuple[Path, str
 
 
 def _load_steering_resources(project: str | None = None) -> str:
-    """Load steering files from the agent config's resources array.
+    """The steering text :func:`steering_resource_documents` keeps, joined."""
+    parts = [
+        body for _path, _resolved, body in steering_resource_documents(project) if body is not None
+    ]
+    if parts:
+        logger.debug(
+            "loaded %d steering bytes from %d files", sum(len(p) for p in parts), len(parts)
+        )
+    return "\n".join(parts)
+
+
+def steering_resource_documents(
+    project: str | None = None,
+) -> list[tuple[Path, Path, str | None]]:
+    """``(path, resolved, body)`` for each document the steering load admits.
+
+    The one reader behind :func:`_load_steering_resources` and the dashboard's
+    per-chat steering list, so the two cannot disagree. *body* is ``None`` for an
+    admitted document :func:`kiro_crew.folder_steering.every_session_body` withholds.
+
+    Loads steering files from the agent config's resources array.
 
     kiro-cli injects these automatically for its sessions; the dashboard
     must do it explicitly so that dashboard chat sessions also benefit
@@ -142,7 +151,7 @@ def _load_steering_resources(project: str | None = None) -> str:
     try:
         cfg_path = ctx.kiro_agents_dir() / "kirocrew.json"
         if not cfg_path.exists():
-            return ""
+            return []
         # The agents dir is user-writable and shared with other tools, so the
         # spec goes through the hardened agent-spec reader. ``safe_read_file``
         # screens the resolved target but reads it with an unbounded
@@ -160,7 +169,7 @@ def _load_steering_resources(project: str | None = None) -> str:
             source="unknown",
         )
         if cfg is None:
-            return ""
+            return []
         declared = cfg.get("resources", [])
         project_root = Path(project).expanduser() if project else None
         resources = [
@@ -170,8 +179,8 @@ def _load_steering_resources(project: str | None = None) -> str:
         ]
     except Exception as exc:
         logger.debug("steering load failed: %s", type(exc).__name__)
-        return ""
-    parts: list[str] = []
+        return []
+    documents: list[tuple[Path, Path, str | None]] = []
     seen: set[Path] = set()
     for res in resources:
         if not isinstance(res, str) or not res.startswith("file://"):
@@ -195,13 +204,8 @@ def _load_steering_resources(project: str | None = None) -> str:
                 logger.debug("steering document skipped: %s", type(exc).__name__)
                 continue
             seen.add(resolved)
-            if body is not None:
-                parts.append(body)
-    if parts:
-        logger.debug(
-            "loaded %d steering bytes from %d files", sum(len(p) for p in parts), len(parts)
-        )
-    return "\n".join(parts)
+            documents.append((p, resolved, body))
+    return documents
 
 
 def _read_include_crew_context(agent: str, pins: Mapping[str, str] | None = None) -> bool:
@@ -722,24 +726,29 @@ def _resolve_agent_prompt(
         pp = ctx._prompt_path()
         logger.debug("Prompt selection: mode=%r → %s", mode, pp)
         agent_prompt = _read_prompt_file(pp)
+    from kiro_crew.crew_mode import CONDUCTOR_TEMPLATES
+    from kiro_crew.mate_worker import MATE_CONDUCTOR_AGENT, MATE_WORKER_AGENT
+
     # After every branch: the worker is a default-named agent, so it takes the
     # default contract above, and its crewmate's prompt follows that base.
     agent_prompt = _crewmate_worker_prompt(agent or "", agent_prompt, session_key or "")
+    # That worker reports to its crewmate's conductor, not to a person, so it
+    # drops the widget pointer the default contract carries.
+    if agent == MATE_WORKER_AGENT:
+        agent_prompt = agent_prompt.replace(_WIDGET_TOKEN, "")
     # A crewmate's conductor dispatches to worker sessions and mounts no spawn
     # tools, so it gets its own delegation rule where the sub-agent span was.
     # Resolved before the capacity token below, which sits inside that span.
     if _sections.SUBAGENTS_BEGIN in agent_prompt or _sections.SUBAGENTS_END in agent_prompt:
-        from kiro_crew.mate_worker import MATE_CONDUCTOR_AGENT
-
         agent_prompt = _sections.subagent_section(
             agent_prompt, conductor=agent == MATE_CONDUCTOR_AGENT
         )
-    # A built-in spec whose own prompt asks for widgets gets the widget pointer
-    # here rather than as a token in its spec: kiro-cli loads that spec prompt
-    # natively and a crewmate's essentials deliver it verbatim, and neither path
-    # resolves a token. This block is the one copy that is resolved per surface,
+    # Every shipped conductor talks to a person in the dashboard chat, so it gets
+    # the widget pointer here, not as a token in its spec: kiro-cli loads that
+    # spec prompt natively and a crewmate's essentials deliver it verbatim, and
+    # neither resolves a token. This block is the one copy resolved per surface,
     # and the only one a private crewmate gets, so it may hold just the pointer.
-    if agent in WIDGET_BLOCK_AGENTS and _WIDGET_TOKEN not in agent_prompt:
+    if agent in CONDUCTOR_TEMPLATES and _WIDGET_TOKEN not in agent_prompt:
         agent_prompt = f"{agent_prompt}\n\n{_WIDGET_TOKEN}" if agent_prompt else _WIDGET_TOKEN
     if not agent_prompt:
         return ""

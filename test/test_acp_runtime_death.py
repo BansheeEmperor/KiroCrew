@@ -70,6 +70,8 @@ def _track_untracks(monkeypatch, rt_mod, *, pid_exists: bool):
         rt_mod, "_untrack_root_by_identity", lambda p, tok: calls.append((p, tok)) or True
     )
     monkeypatch.setattr(rt_mod.platform_compat, "pid_exists", lambda p: pid_exists)
+    # The POSIX retirement. Windows drains the tree instead (pinned below).
+    monkeypatch.setattr(rt_mod.platform_compat, "IS_WINDOWS", False)
     return calls
 
 
@@ -163,6 +165,33 @@ async def test_eof_inside_an_oversize_line_retires_the_same_way(monkeypatch):
         await _stop_reader(task)
     assert rt._dead is True
     assert calls == [(4242, "tok-4242")]
+
+
+@pytest.mark.asyncio
+async def test_observed_exit_on_windows_drains_the_tree_instead(monkeypatch):
+    """A Windows descendant has no registry line of its own, so the confirmed
+    exit drains the root's tree, which retires the root's lines itself."""
+    import kiro_crew.acp.runtime as rt_mod
+
+    rt, reader, proc = _make_runtime()
+    calls = _track_untracks(monkeypatch, rt_mod, pid_exists=False)
+    monkeypatch.setattr(rt_mod.platform_compat, "IS_WINDOWS", True)
+    drained = []
+
+    async def _drain(process):
+        drained.append(process)
+        return True
+
+    monkeypatch.setattr(rt_mod.platform_compat, "terminate_windows_asyncio_tree", _drain)
+    proc.returncode = 1
+    task = await _start_reader(rt)
+    try:
+        reader.feed_eof()
+        await await_until(task, what="the reader loop exiting")
+    finally:
+        await _stop_reader(task)
+    assert drained == [proc]
+    assert calls == []
 
 
 # ── Death-log severity: deliberate teardown vs genuine death ──
@@ -764,6 +793,24 @@ def test_exit_reason_enospc_points_at_doctor():
     # Case-insensitive: the marker's spelling varies by libc / language runtime.
     rt._stderr_lines = ["ENOSPC: no space left on device, mkdir '/run/user/1000/tmpx'"]
     assert "kirocrew doctor" in rt._exit_reason(1)
+
+
+def test_exit_reason_eagain_points_at_the_task_ceilings():
+    """A child that panics on a refused thread spawn names the task limit."""
+    rt, _reader, _proc = _make_runtime()
+    rt._stderr_lines = [
+        "The application panicked (crashed).",
+        "Message:  called `Result::unwrap()` on an `Err` value: Os { code: 11, "
+        'kind: WouldBlock, message: "Resource temporarily unavailable" }',
+        "Location: scheduled-thread-pool-0.2.7/src/lib.rs:375",
+    ]
+    msg = rt._exit_reason(None)
+    assert "Resource temporarily unavailable" in msg
+    assert "ulimit -u" in msg
+    assert "Task ceilings" in msg
+    # A full runtime tmpfs anywhere in the tail still wins over an EAGAIN line.
+    rt._stderr_lines.append("mkdir: No space left on device")
+    assert "Runtime tmpfs" in rt._exit_reason(None)
 
 
 def test_exit_reason_finds_a_signature_that_is_not_the_last_line():

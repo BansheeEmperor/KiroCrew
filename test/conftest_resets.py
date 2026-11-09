@@ -326,6 +326,21 @@ def _forget_legacy_auth_sweep_clean_roots(_floor_monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _forget_mount_source_sweep_pacing(_floor_monkeypatch):
+    """Forget when the periodic mount-source pass last ran and where it stopped.
+
+    ``sandbox_mount_sweep._SWEEP_STATE`` rate-limits the default-roots pass and
+    ``_SWEEP_CURSORS`` remembers the resume point per root, both for the process
+    lifetime. A test that runs the sweep after another one in the same worker
+    would otherwise find its pass skipped as too soon, or started mid-listing.
+    """
+    from kiro_crew import sandbox_mount_sweep
+
+    _floor_monkeypatch.setattr(sandbox_mount_sweep, "_SWEEP_STATE", {}, raising=False)
+    _floor_monkeypatch.setattr(sandbox_mount_sweep, "_SWEEP_CURSORS", {}, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _forget_sandbox_launch_mark():
     """Forget that an entry point saw the sandbox marker.
 
@@ -574,6 +589,7 @@ def _isolate_advertised_model_cache(_floor_monkeypatch):
 
     _floor_monkeypatch.setattr(model_registry, "_ADVERTISED_MODELS", {})
     _floor_monkeypatch.setattr(model_registry, "_ADVERTISED_META", {})
+    _floor_monkeypatch.setattr(model_registry, "_PENDING_ADVERTISED_SHRINK", {}, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -654,6 +670,7 @@ def _reset_crewmate_worker_slots():
             module._CREWMATE_WORKER_SLOTS.clear()
             module._CREWMATE_WORKER_MEMBERS.clear()
             module._CREWMATE_WORKER_PROMPT_IN_CONTEXT.clear()
+            module._SESSION_BACKEND_PICKS.clear()
 
     clear()
     try:
@@ -1133,7 +1150,7 @@ def _reset_materialized_agents_snapshot():
             ("_MATERIALIZED_AGENTS", frozenset()),
             ("_MATERIALIZED_AGENTS_READY", False),
             ("_MATERIALIZED_COMPLETE", False),
-            ("_MATERIALIZED_SKIPPED", None),
+            ("_MATERIALIZED_MEMO", None),
             ("_MATERIALIZED_MATE_ONLY", frozenset()),
             ("_MATERIALIZED_AGENTS_GENERATION", 0),
             ("_MATERIALIZED_REFRESH_APPLIED", 0),
@@ -1147,11 +1164,6 @@ def _reset_materialized_agents_snapshot():
         for name in ("_MATERIALIZED_SEEN", "_MATERIALIZED_STEMS"):
             if hasattr(loader_mod, name):
                 setattr(loader_mod, name, {})
-        # The agent catalog's scan gate remembers a stamp of a snapshot this reset
-        # just dropped; a fresh gate makes the next fetch scan.
-        catalog_mod = sys.modules.get("kiro_crew.dashboard.handlers.agent_catalog")
-        if catalog_mod is not None and hasattr(catalog_mod, "_REFRESH_GATE"):
-            catalog_mod._REFRESH_GATE = catalog_mod._RefreshGate()
 
     clear()
     try:

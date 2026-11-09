@@ -15,6 +15,7 @@ import SimpleSelect from '../../components/SimpleSelect'
 import { Btn } from '../../components/ui'
 import ErrorNotice from '../../components/ErrorNotice'
 import { i18nT } from '../../i18n/t'
+import { Trans } from 'react-i18next'
 
 // Re-exported so the form's existing consumers keep one import site, while the
 // shapes themselves live in a neutral module the store can read without
@@ -22,6 +23,7 @@ import { i18nT } from '../../i18n/t'
 // that renders it is unmounted.
 export type { InstanceFormValues, InstanceDraft } from '../../types/instanceForm'
 import type { InstanceFormValues, InstanceDraft } from '../../types/instanceForm'
+import type { RemoteCrewAddLink } from '../../lib/remoteCrewAddLink'
 
 // Defaults for a brand-new crew. The port and TTL mirror the backend's own
 // defaults so an untouched form round-trips to the same record the API would
@@ -95,6 +97,20 @@ export function instanceFormFromView(inst: InstanceView): InstanceFormValues {
     remotePortAuto: false,
     ttl: inst.ttl || DEFAULT_TTL,
     remoteBin: inst.remote_bin || '',
+  }
+}
+
+/**
+ * Seed the add form from a `kirocrew://remote-crew/add` link: an SSH crew at the
+ * link's host, with its port and label when the link carries them. A port the
+ * link names stops following the transport default, as one typed by hand does.
+ */
+export function instanceFormFromLink(link: RemoteCrewAddLink): InstanceFormValues {
+  return {
+    ...EMPTY_INSTANCE_FORM,
+    name: link.name,
+    sshHost: link.host,
+    ...(link.port ? { remotePort: link.port, remotePortAuto: false } : {}),
   }
 }
 
@@ -598,7 +614,7 @@ export function InstanceFormFields({
           </label>
           <label htmlFor={`${idPrefix}-aws-region`} className="flex flex-col gap-1 text-[13px] text-muted">
             {i18nT('pages.settings.instancesPanel.aws_region')} <span className="text-muted-strong">{i18nT('pages.settings.instancesPanel.optional')}</span>
-            <input id={`${idPrefix}-aws-region`} aria-label={i18nT('pages.settings.instancesPanel.aws_region')} className={identityFrozen ? readOnlyCls : inputCls} aria-readonly={identityFrozen || undefined} value={values.awsRegion} onChange={e => set('awsRegion', e.target.value)} placeholder="us-east-1" readOnly={identityFrozen} />
+            <input id={`${idPrefix}-aws-region`} aria-label={i18nT('pages.settings.instancesPanel.aws_region')} className={identityFrozen ? readOnlyCls : inputCls} aria-readonly={identityFrozen || undefined} value={values.awsRegion} onChange={e => set('awsRegion', e.target.value)} placeholder={i18nT('pages.settings.remoteCrewPanel.region_placeholder')} readOnly={identityFrozen} />
           </label>
           {isSsm ? (
             <label htmlFor={`${idPrefix}-ssm-run-as`} className="flex flex-col gap-1 text-[13px] text-muted">
@@ -667,7 +683,7 @@ export function InstanceFormFields({
         />
         <span className="text-[12px] text-muted leading-snug">
           {i18nT('pages.settings.instancesPanel.only_needed_if')} <code className="text-text">{i18nT('pages.settings.instancesPanel.kirocrew')}</code> {i18nT('pages.settings.instancesPanel.is_installed_somewhere_non_standard_on_the_remot')} <code className="text-text">{i18nT('pages.settings.instancesPanel.command_v_kirocrew')}</code>{' '}
-          {i18nT('pages.settings.instancesPanel.commonly')} <code className="text-text">{i18nT('pages.settings.instancesPanel.local_bin_kirocrew')}</code>{i18nT('pages.settings.instancesPanel.use_an_absolute_path_no')} <code className="text-text">~</code>).
+          <Trans i18nKey="pages.settings.instancesPanel.commonly_path_use_absolute" components={{ path: <code className="text-text">{i18nT('pages.settings.instancesPanel.local_bin_kirocrew')}</code>, tilde: <code className="text-text">~</code> }} />
         </span>
       </label>
       )}

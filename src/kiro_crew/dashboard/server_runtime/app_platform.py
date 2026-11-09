@@ -8,12 +8,14 @@ wave, with the App SDK gateway hooks system.
 from __future__ import annotations
 
 import asyncio
+import functools
 from typing import TYPE_CHECKING
 
 from aiohttp import web
 
 if TYPE_CHECKING:
     from kiro_crew.dashboard.server import (
+        _RESTART_STEADY_INTERVAL,
         DashboardState,
         cautious_boot,
         init_hook_reconciler,
@@ -22,6 +24,8 @@ if TYPE_CHECKING:
         on_gateway_shutdown,
         on_gateway_startup,
         refresh_materialized_agents,
+        revive_lost_app_backends,
+        shutdown_event,
         start_enabled_app_backends,
         stop_hook_reconciler,
         subprocess_executor,
@@ -34,8 +38,12 @@ async def _warm_builtin_app_names() -> None:
     filesystem and must not run on the event loop). The gate's app-own-server
     auto-approve then does a pure in-memory membership test with zero I/O; an
     empty set (should this fail) simply fails closed (owns-server calls prompt).
+
+    A former built-in adopted from its pin joins all three sets for the servers
+    ``adopted_app_own_mcp_servers`` keeps, so adoption leaves the grant as it was.
     """
     try:
+        from kiro_crew.apps.builtin_adoption_gate import adopted_app_own_mcp_servers
         from kiro_crew.apps.execution import (
             builtin_app_agents,
             builtin_app_mcp_servers,
@@ -47,18 +55,18 @@ async def _warm_builtin_app_names() -> None:
             set_builtin_app_names,
         )
 
-        names = await asyncio.get_running_loop().run_in_executor(
-            subprocess_executor(), builtin_app_names
-        )
-        set_builtin_app_names(names)
-        servers = await asyncio.get_running_loop().run_in_executor(
-            subprocess_executor(), builtin_app_mcp_servers
-        )
-        set_builtin_app_mcp_servers(servers)
+        loop = asyncio.get_running_loop()
+        adopted = await loop.run_in_executor(subprocess_executor(), adopted_app_own_mcp_servers)
+        # An app name holds no ":", so the key's first segment is its app.
+        adopted_apps = frozenset(key.partition(":")[0] for key in adopted)
+        names = await loop.run_in_executor(subprocess_executor(), builtin_app_names)
+        set_builtin_app_names(names | adopted_apps)
+        servers = await loop.run_in_executor(subprocess_executor(), builtin_app_mcp_servers)
+        set_builtin_app_mcp_servers(servers | adopted)
         # Agent → owning app, so a builtin whose UI is not an app iframe
         # (empty Slot._app) can still auto-approve calls to its OWN server.
-        agents = await asyncio.get_running_loop().run_in_executor(
-            subprocess_executor(), builtin_app_agents
+        agents = await loop.run_in_executor(
+            subprocess_executor(), functools.partial(builtin_app_agents, adopted_apps)
         )
         set_builtin_app_agents(agents)
     except Exception:  # noqa: BLE001 — a warm failure only costs an extra prompt
@@ -251,5 +259,46 @@ def _kick_builtin_adoption_staging(state: DashboardState) -> None:
     if not adoption_pin_names():
         return
     task = asyncio.create_task(stage_builtin_adoptions())
+    state._background_tasks.add(task)
+    task.add_done_callback(state._background_tasks.discard)
+
+
+def _kick_interrupted_update_sweep(state: DashboardState) -> None:
+    """Sweep what a killed app update left beside the app, after the listener serves.
+
+    A tracked background task (``manager.sweep_interrupted_updates``): it lists the
+    apps directory and may delete whole retired trees, so it never runs before the
+    bind. Nothing waits on it; each app is swept under its lifecycle lock.
+    """
+    from kiro_crew.apps.manager import sweep_interrupted_updates
+
+    task = asyncio.create_task(sweep_interrupted_updates())
+    state._background_tasks.add(task)
+    task.add_done_callback(state._background_tasks.discard)
+
+
+def _kick_app_backend_backstop(state: DashboardState) -> None:
+    """Run the app-backend backstop sweep on the restart cadence until gateway shutdown.
+
+    A tracked background task, after the bind: boot's spawn pass has run, so the first
+    sweep only sees what that pass and every later lifecycle path left untracked. The
+    sweep spawns, so it runs on the subprocess executor like the boot pass.
+    """
+
+    async def _backstop() -> None:
+        while not shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=_RESTART_STEADY_INTERVAL)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(), revive_lost_app_backends
+                )
+            except Exception:  # noqa: BLE001 — a dead backstop is the gap it exists to bound
+                logger.warning("App backend backstop sweep failed", exc_info=True)
+
+    task = asyncio.create_task(_backstop())
     state._background_tasks.add(task)
     task.add_done_callback(state._background_tasks.discard)

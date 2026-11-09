@@ -11,7 +11,7 @@ import { stripAppEnvelope } from '../pages/chat/groupDisplayItems'
 import { hasSubagentCompletionPrefix } from '../pages/chat/subagentCompletion'
 import { prependQuote, quoteBlock, quoteExcerpt, readMessageQuote, stripQuoteBlock } from '../chat-core/composer/messageQuote'
 import { useLanguageGeneration } from '../i18n/useLanguageGeneration'
-import { splitKnowledgeEnvelope } from '../pages/chat/useKnowledgeFetch'
+import { knowledgeEnvelopeEnd } from '../utils/knowledgeEnvelope'
 import { expandAll, findTokenRanges, foldPastesInOrder, pruneBlocks, saveStoredPaste, type PasteBlock } from '../utils/pasteTokens'
 import { usePasteTokens } from '../chat-core/composer/pasteEditor'
 /** System-injected sub-agent completion deliveries waiting for the busy slot.
@@ -24,18 +24,24 @@ export function isSystemDelivery(m: ChatMessage): boolean {
 }
 
 /** A queued entry that must NOT render as an interactive (edit/cancel) user
- *  card. Two families qualify, both machine orchestration rather than user
+ *  card. Three families qualify, all machine orchestration rather than user
  *  speech:
- *    - sub-agent completion deliveries (isSystemDelivery), and
+ *    - sub-agent completion deliveries (isSystemDelivery),
  *    - synthetic turn-recovery continuations (tool refusal / stalled turn /
  *      stalled tool / interrupted / empty response), which the gateway
  *      re-queues automatically and which surface as a compact RecoveryCard in
- *      the transcript once dequeued.
- *  Editing or cancelling either would corrupt an automatic effect, so they are
+ *      the transcript once dequeued, and
+ *    - the gateway's follow-up prompt after a workflow result
+ *      (`meta.kind` `workflow_followup`), a collapsed note once dequeued.
+ *  Editing or cancelling any of them would corrupt an automatic effect, so they are
  *  filtered out of the QueueStack (sub-agent deliveries are still counted for
  *  the progress line via isSystemDelivery). */
 export function isNonInteractiveQueued(m: ChatMessage): boolean {
-  return isSystemDelivery(m) || parseRecoveryMessage(m.content || '') !== null
+  return (
+    isSystemDelivery(m) ||
+    parseRecoveryMessage(m.content || '') !== null ||
+    m.meta?.kind === 'workflow_followup'
+  )
 }
 
 /** An MCP-App ui/message entry waiting in the queue. It stays VISIBLE in the
@@ -57,8 +63,10 @@ export function isAppMessageQueued(m: ChatMessage): boolean {
  *  (when a knowledge block was picked) -- model-facing material the user never
  *  typed, so neither belongs on the card or in the editor. `quote` is set only
  *  when the content really starts with that quote's block, and `envelope` is
- *  the knowledge envelope as sent (empty when there is none), kept verbatim so
- *  an edit can put it back and the agent still receives the knowledge.
+ *  the knowledge envelope as sent, with the blank lines after it (empty when
+ *  there is none), kept verbatim so an edit can put it back and the agent
+ *  still receives the knowledge. The envelope is found by the mark the send
+ *  recorded (`meta.knowledgeEnvelope`).
  *
  *  A collapsed `[ Paste #N ]` token is the third kind of model-only text, but
  *  it expands IN PLACE with no marker around it, so the text alone cannot give
@@ -77,10 +85,11 @@ function splitQueuedContent(m: ChatMessage): {
   const carried = readMessageQuote(m.meta as Record<string, unknown> | undefined)
   const quote = carried && m.content.startsWith(quoteBlock(carried)) ? carried : null
   const afterQuote = quote ? stripQuoteBlock(m.content, quote) : m.content
-  const split = splitKnowledgeEnvelope(afterQuote)
-  const expanded = split ? split.rest : afterQuote
+  let end = knowledgeEnvelopeEnd(afterQuote, m.meta?.knowledgeEnvelope)
+  while (end && afterQuote[end] === '\n') end++
+  const expanded = afterQuote.slice(end)
   const folded = foldQueuedPastes(expanded, queuedPastes(m))
-  return { quote, envelope: split?.head ?? '', own: folded?.own ?? expanded, pastes: folded?.pastes ?? [] }
+  return { quote, envelope: afterQuote.slice(0, end), own: folded?.own ?? expanded, pastes: folded?.pastes ?? [] }
 }
 
 /** How many remains of a `[ Paste #N ]` token `text` holds outside every
@@ -161,8 +170,8 @@ function queuedOwnText(m: ChatMessage): string {
 /** True when the card hides a knowledge envelope it will still send. The card
  *  then shows only the typed words, so it needs its own mark that knowledge
  *  is attached; without one, the card reads as a plain message. False when the
- *  split refused (two close-marker lines), because then the card shows the
- *  whole text, envelope included. */
+ *  entry carries no mark that matches its text, because then the card shows
+ *  the whole text. */
 function queuedHasKnowledge(m: ChatMessage): boolean {
   return splitQueuedContent(m).envelope !== ''
 }
@@ -445,7 +454,7 @@ function EditInput({ initial, onCommit, onCancel, onDraftChange, pastes = [] }: 
   )
 }
 
-function QueueStackInner({ messages, onCancel, onInterrupt, onEdit, onEditDraft, onReorder, fuseBelow = true, pendingIds }: {
+function QueueStackInner({ messages, onCancel, onInterrupt, onEdit, onEditOpen, onEditDraft, onReorder, fuseBelow = true, pendingIds }: {
   messages: ChatMessage[]
   onCancel?: (queueId: string) => void
   onInterrupt?: (queueId: string) => void
@@ -453,6 +462,10 @@ function QueueStackInner({ messages, onCancel, onInterrupt, onEdit, onEditDraft,
    *  tokens the edit kept, in token order (empty when it kept none), for the
    *  row to carry on. Absent when the entry had none to begin with. */
   onEdit?: (queueId: string, content: string, pastes?: PasteBlock[]) => void
+  /** The editor opened (`true`) or closed without a save (`false`), so the host
+   *  can hold the entry meanwhile. A save goes through `onEdit` alone: a release
+   *  sent beside it could reach the server first and drain the old words. */
+  onEditOpen?: (queueId: string, open: boolean) => void
   onEditDraft?: (queueId: string, content: string | undefined) => void
   /** Move a queued message one step toward the front (`next`) or the back
    *  (`later`) of the run order. Index 0 runs first. */
@@ -489,6 +502,8 @@ function QueueStackInner({ messages, onCancel, onInterrupt, onEdit, onEditDraft,
   // an editor holding a token while the live row had lost its blocks would
   // commit the literal token in place of the paste.
   const editingRow = useRef<ChatMessage | null>(null)
+  // The queue id whose editor is open and holds its entry on the server.
+  const openEditRef = useRef<string | null>(null)
 
   // Reset expanded when queue drains to trivial size
   useEffect(() => {
@@ -497,16 +512,40 @@ function QueueStackInner({ messages, onCancel, onInterrupt, onEdit, onEditDraft,
 
   // Drop a stale edit target if its card leaves the queue (e.g. dequeued / cancelled).
   useEffect(() => {
-    if (editingId && !messages.some(m => (m.meta?.queueId as string) === editingId)) setEditingId(null)
+    if (editingId && !messages.some(m => (m.meta?.queueId as string) === editingId)) {
+      // The entry is gone, and its hold with it.
+      openEditRef.current = null
+      setEditingId(null)
+    }
   }, [messages, editingId])
 
+  // The editor still open when the stack unmounts (a slot switch, a closed
+  // pane) has no cancel to release its hold, so the unmount releases it.
+  const onEditOpenRef = useRef(onEditOpen)
+  onEditOpenRef.current = onEditOpen
+  useEffect(() => () => {
+    if (openEditRef.current) onEditOpenRef.current?.(openEditRef.current, false)
+  }, [])
+  const openEdit = (queueId: string) => {
+    if (openEditRef.current && openEditRef.current !== queueId) onEditOpen?.(openEditRef.current, false)
+    openEditRef.current = queueId
+    onEditOpen?.(queueId, true)
+    setEditingId(queueId)
+  }
+
   const commitEdit = (queueId: string, content: string, pastes?: PasteBlock[]) => {
+    openEditRef.current = null
     setEditingId(null)
     if (!onEdit) return
     if (pastes) onEdit(queueId, content, pastes)
     else onEdit(queueId, content)
   }
-  const cancelEdit = () => setEditingId(null)
+  const cancelEdit = () => {
+    const open = openEditRef.current
+    openEditRef.current = null
+    setEditingId(null)
+    if (open) onEditOpen?.(open, false)
+  }
 
   const peekCount = Math.min(MAX_PEEK, Math.max(0, messages.length - 1))
   const collapsedHeight = messages.length > 0 ? CARD_H + peekCount * PEEK : 0
@@ -612,6 +651,7 @@ function QueueStackInner({ messages, onCancel, onInterrupt, onEdit, onEditDraft,
             // WHEN or WHETHER the entry runs, never who authored its text.
             const isAppEntry = isAppMessageQueued(m)
             const displayText = queuedDisplayText(m)
+            const notDurable = m.meta?.durable === false
             // The card hides the knowledge envelope, so this chip is what says
             // the send still carries it. Same icon as the sent bubble's
             // knowledge chip, so the two read as one thing.
@@ -726,8 +766,16 @@ function QueueStackInner({ messages, onCancel, onInterrupt, onEdit, onEditDraft,
                       )}
                       {/* `min-w-16` only when a chip shares the row: the chip
                           gives way (truncates) before the typed words do. */}
-                      <span className={`truncate flex-1${knowledgeChip ? ' min-w-16' : ''}`}>{displayText}</span>
+                      <span className={`truncate flex-1${knowledgeChip || notDurable ? ' min-w-16' : ''}`}>{displayText}</span>
                       {knowledgeChip}
+                      {/* The server's verdict that the durable copy of the queue
+                          cannot hold this entry: accepted, but a restart before
+                          it runs loses it. Quiet on purpose, not an error. */}
+                      {notDurable && (
+                        <span data-testid="queue-card-not-durable" className="min-w-0 truncate text-[11px] italic opacity-80" title={i18nT('components.queueStack.wont_survive_a_restart')}>
+                          {i18nT('components.queueStack.wont_survive_a_restart')}
+                        </span>
+                      )}
 
                       {/* Reorder arrows only make sense with 2+ cards, and only
                           in the expanded stack where the run order is visible.
@@ -762,7 +810,7 @@ function QueueStackInner({ messages, onCancel, onInterrupt, onEdit, onEditDraft,
                           title={i18nT('components.queueStack.edit_queued_message')}
                           aria-label={i18nT('components.queueStack.edit_queued_message')}
                           disabled={isPending}
-                          onClick={(e) => { e.stopPropagation(); editingRow.current = m; setEditingId(queueId!) }}
+                          onClick={(e) => { e.stopPropagation(); editingRow.current = m; openEdit(queueId!) }}
                         >
                           <Pencil size={13} />
                         </button>
@@ -819,6 +867,7 @@ export default memo(QueueStackInner, (prev, next) =>
   prev.onCancel === next.onCancel &&
   prev.onInterrupt === next.onInterrupt &&
   prev.onEdit === next.onEdit &&
+  prev.onEditOpen === next.onEditOpen &&
   prev.onEditDraft === next.onEditDraft &&
   prev.onReorder === next.onReorder
 )

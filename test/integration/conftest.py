@@ -133,8 +133,10 @@ cross-home flake three tests later.
      shutdown, which would keep the next boot's writer from starting.
    * ``sandbox._SHIM_ARGV_CACHE`` -- the spawn shim's resolved argv, derived
      from the boot's config and home.
+   * ``apps.credential_masks._cache`` -- the parsed ``credentialMasks`` of
+     every app manifest the boot's spawns read, keyed on the home's paths.
    * ``config.loader`` materialized-agent snapshot (``_MATERIALIZED_AGENTS``,
-     ``_MATERIALIZED_STEMS``, ``_MATERIALIZED_SEEN``, ``_MATERIALIZED_COMPLETE``, ``_MATERIALIZED_SKIPPED``,
+     ``_MATERIALIZED_STEMS``, ``_MATERIALIZED_SEEN``, ``_MATERIALIZED_COMPLETE``, ``_MATERIALIZED_MEMO``,
      ``_MATERIALIZED_AGENTS_READY``) -- the declared names, file-name map,
      removal evidence and scan completeness of the home's
      ``kiro/agents`` directory, which the next boot would read as its own until
@@ -181,6 +183,10 @@ cross-home flake three tests later.
      Grant writers and gate checks fill it whenever no live snapshot is up,
      so whether a boot leaves one, and from which home, depends on timing; a
      fresh process has none.
+   * ``recall_pool._settings_cache`` -- the home's ``memory.recall_pool_*``
+     settings with the time they were read, reused for one second. Every
+     recall read refreshes it, so whether a boot leaves one, and how old, depends
+     on timing; a fresh process has none.
    * ``config.loader_credentials._boot_raw_env`` -- the raw ``.env`` map the
      first ``load_credentials`` of the process recorded, which the live watcher
      seeds its credential diff baseline from. It is home-derived and
@@ -191,6 +197,12 @@ cross-home flake three tests later.
      what ``.env`` owns, never an inherited value it merely matched). A boot's
      credential propagation grows it, so a fresh boot in a different home must
      start with none of the prior home's keys; a fresh process has none.
+   * ``agent._main_spec_unreadable`` and ``agent._main_spec_skip_generation``
+     -- whether the home's ``kirocrew.json`` could not be read, and the
+     governance generation the episode's last sibling pass ran under. Both
+     describe the previous home's spec, whose hold must not carry over to the
+     next home's rebuild; a fresh process has neither. The episode revision and
+     its warning state belong to the same episode and are cleared with it.
 
 2. **Snapshot and restore** around the boot by ``booted_gateway``, on every
    exit: the SIGINT/SIGTERM handlers ``run()`` installs; the event loop's
@@ -268,6 +280,7 @@ from typing import Any, AsyncIterator, Callable, Iterator, NoReturn
 import pytest
 from aiohttp import ClientSession, ClientTimeout
 
+from kiro_crew import agent as agent_mod
 from kiro_crew import (
     autonudge,
     crash_guard,
@@ -275,12 +288,14 @@ from kiro_crew import (
     github_runner,
     memory_startup,
     onboarding_sources,
+    recall_pool,
     safety_override,
     sandbox,
     shutdown_event,
 )
 from kiro_crew.acp import client as acp_client
 from kiro_crew.agent_sdk import host_auth
+from kiro_crew.apps import credential_masks
 from kiro_crew.apps.builtin_adoption_pins import HARNESS_PINS_ENV, load_adoption_pins
 from kiro_crew.config import live as config_live
 from kiro_crew.config import loader as config_loader
@@ -798,13 +813,15 @@ def _reset_home_bound_globals() -> None:
     sandbox._SLICE_MEMHIGH_EVENTS_SEEN = None
     sandbox._SLICE_OOM_SEEN = None
     sandbox._SHIM_ARGV_CACHE.clear()
+    credential_masks.clear_cache()
     config_loader._MATERIALIZED_AGENTS = frozenset()
     config_loader._MATERIALIZED_STEMS.clear()
     config_loader._MATERIALIZED_SEEN.clear()
     config_loader._MATERIALIZED_COMPLETE = False
-    config_loader._MATERIALIZED_SKIPPED = None
+    config_loader._MATERIALIZED_MEMO = None
     config_loader._MATERIALIZED_AGENTS_READY = False
     governance._CONFIRM_PATTERNS_MEMO = None
+    recall_pool._settings_cache = None
     dashboard_updates._auto_effect = None
     dashboard_updates._auto_effect_task = None
     dashboard_updates._shape_effect = None
@@ -824,6 +841,10 @@ def _reset_home_bound_globals() -> None:
     inventory_gauges.reset_for_testing()
     with diag_threads._prev_lock:
         diag_threads._prev_reading.clear()
+    agent_mod._main_spec_unreadable = False
+    agent_mod._main_spec_episode_revision = 0
+    agent_mod._main_spec_skip_generation = None
+    agent_mod._main_spec_warned.clear()
     live_nudge = autonudge._INSTANCE
     if live_nudge is not None:
         with contextlib.suppress(Exception):
@@ -875,12 +896,16 @@ def home_bound_globals_are_clear() -> bool:
         and not config_loader._MATERIALIZED_STEMS
         and not config_loader._MATERIALIZED_SEEN
         and not config_loader._MATERIALIZED_COMPLETE
-        and config_loader._MATERIALIZED_SKIPPED is None
+        and config_loader._MATERIALIZED_MEMO is None
         and not config_loader._MATERIALIZED_AGENTS_READY
         and governance._CONFIRM_PATTERNS_MEMO is None
         and config_loader._boot_raw_env is None
         and not config_loader._env_owned_keys
         and dashboard_updates._auto_effect is None
+        and not agent_mod._main_spec_unreadable
+        and agent_mod._main_spec_episode_revision == 0
+        and agent_mod._main_spec_skip_generation is None
+        and not agent_mod._main_spec_warned
     )
 
 

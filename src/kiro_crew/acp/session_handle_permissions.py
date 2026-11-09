@@ -16,7 +16,9 @@ Instance fields read: ``_config_options``, ``_runtime``, ``_session_id``, ``_ses
 ``_tool_call_harness_tool_name``, ``_tool_call_input_redacted``, ``_tool_call_inputs``,
 ``_tool_call_is_shell``, ``_tool_call_mcp_server``, ``_tool_call_raw_params``,
 ``_tool_call_tool_name``, ``kas_crew_answered``, ``kas_crew_answered_commands``,
-``kas_spec_shell_allowlist``, ``kas_spec_write_allowlist``, ``_bound_cwd``,
+``kas_spec_denies``, ``kas_spec_shell_allowlist``, ``kas_spec_write_allowlist``,
+``kas_spec_shell_readonly``, ``kas_crew_answered_paths``, ``kas_crew_answered_read_paths``,
+``_bound_cwd``,
 ``mirror_used``, ``spec_denied_tools``.
 """
 
@@ -25,13 +27,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kiro_crew import acp_tool_gate, mediated_request_capability, permission_floor
 from kiro_crew.acp import batch_guard
 from kiro_crew.acp._dispatch import (
     TOOL_CALL_CACHE_MAX_ENTRIES,
     TOOL_CALL_CACHE_MAX_PAYLOAD_CHARS,
+    UNREADABLE_IDENTITY_REASONS,
     build_permission_event,
     identified_mcp_call,
     is_mcp_tool_approval,
@@ -40,6 +43,7 @@ from kiro_crew.acp._dispatch import (
     scoped_tool_cache_key,
 )
 from kiro_crew.acp.client import AcpError, AcpToolGateUnroutable, _loggable_request_id
+from kiro_crew.acp.client_permissions import once_for_always
 from kiro_crew.acp.types import (
     ACP_BACKEND_KAS,
     OPTION_ALLOW_ALWAYS,
@@ -48,8 +52,11 @@ from kiro_crew.acp.types import (
     OUTCOME_SELECTED,
     AcpEvent,
     JsonRpcMessage,
+    rejection_reason_meta,
 )
 from kiro_crew.agent_sdk.backends import ACP_BACKENDS_SHARED_RUNTIME_CHILD_CALLS_MARKED
+from kiro_crew.constants import DENY_CAUSE_UNREADABLE_IDENTITY
+from kiro_crew.deny_notice import steer_refusal_notice
 from kiro_crew.metrics.events import CHILD_PERMISSION_DENIED, emit_counter
 from kiro_crew.security.deny_waiver import child_calls_marked
 from kiro_crew.session_environment import WORKSPACE_SERVER_NAME
@@ -162,6 +169,11 @@ async def approve_tool(
             resolved_id = recorded.get("once") or resolved_id
     if resolved_id is None:
         resolved_id = OPTION_ALLOW_ONCE
+    if capability.for_connection:
+        # An allow-always would stop the harness asking about this Connection
+        # tool, and the gateway proxy refuses every call no approval was minted
+        # for. Crew keeps its own approval memory; the harness is answered once.
+        resolved_id = once_for_always(resolved_id, recorded or {})
     # The wait for the write lock is the last await before the answer goes
     # out, so the runtime reads the withdrawal again under that lock, ahead
     # of its own liveness check, and the grant's deadline after it: a runtime
@@ -221,8 +233,12 @@ def _restore_withdrawn(
         self._permission_options[request_id] = recorded
 
 
-async def reject_tool(self: AcpSessionHandle, request_id: str | int) -> None:
+async def reject_tool(self: AcpSessionHandle, request_id: str | int, reason: str = "") -> None:
     """Reject a pending permission request.
+
+    *reason* is what the person typed with the rejection. On KAS it rides the
+    one-time Deny as ``_meta.kiro.rejectionReason``, which KAS hands the model;
+    every other backend, and an answer with no deny option, sends none.
 
     Prefers a clean ``selected`` reject using the reject optionId the agent
     advertised (claude-agent-acp offers ``reject`` → behavior:"deny",
@@ -242,10 +258,15 @@ async def reject_tool(self: AcpSessionHandle, request_id: str | int) -> None:
     self._note_steering_denial()
     reject_id = recorded.get("reject") if recorded else None
     if reject_id:
-        await self._runtime.send_response(
-            request_id,
-            {"outcome": {"outcome": OUTCOME_SELECTED, "optionId": reject_id}},
+        response: dict[str, Any] = {"outcome": {"outcome": OUTCOME_SELECTED, "optionId": reject_id}}
+        reason_meta = (
+            rejection_reason_meta(reason)
+            if reason and self._runtime.acp_backend == ACP_BACKEND_KAS
+            else None
         )
+        if reason_meta is not None:
+            response["_meta"] = reason_meta
+        await self._runtime.send_response(request_id, response)
     else:
         # Same last-resort warning as AcpClient.reject_tool — this is the
         # second of the two ``cancelled`` fallback sites, and the cascade
@@ -407,31 +428,55 @@ async def _refuse_unidentifiable_mcp_approval(
 async def _refuse_unreadable_mcp_identity(self: AcpSessionHandle, event: AcpEvent) -> bool:
     """Refuse a permission request whose MCP identity was PRESENT but unreadable.
 
-    The tool_call frame (or this permission frame's own ``mcpTool.identity``)
-    named a server or tool in a spelling the MCP-name bound refused -- longer
-    than what Crew's own tool surface admits. That is not a call that names
-    no tool: it is a call whose exact per-tool deny cannot be checked, and
-    left to a consumer it is judged under an EMPTY identity, where a
-    ``@server/tool`` rule does not bind and the title-keyed grant loop may
-    approve it. So it is refused here, before any consumer sees it, on every
-    harness alike (a fact about the frame, not about a backend), and audited
-    as ``mcp_identity_unreadable``. A frame that names nothing is untouched.
+    The frames named a server or tool Crew cannot read: a name the MCP-name
+    bound refused (longer than Crew's own tool surface admits, or not a
+    string), a permission identity naming a server its tool_call did not, or
+    one of the other checks ``AcpEvent.mcp_identity_unreadable_reason`` names.
+    That is not a call that names no tool: it is a call whose exact per-tool
+    deny cannot be checked, and left to a consumer it is judged under an EMPTY
+    identity, where a ``@server/tool`` rule does not bind and the title-keyed
+    grant loop may approve it. So it is refused here, before any consumer sees
+    it, on every harness alike (a fact about the frame, not about a backend).
+    A frame that names nothing is untouched.
+
+    The warning and the audit (``mcp_identity_unreadable:<reason>``) name the
+    check that fired. No consumer sees this request, so the host notice is
+    steered here, before the reject: the reject alone reaches the model as the
+    backend's generic user denial.
     """
     if not event.mcp_identity_unreadable:
         return False
+    reason = event.mcp_identity_unreadable_reason
+    clause = UNREADABLE_IDENTITY_REASONS.get(
+        reason, "the frame named an MCP server or tool the tool surface cannot read"
+    )
     logger.warning(
         "session MCP: refusing a permission request whose MCP identity is unreadable -- "
-        "the frame named a server or tool longer than the tool surface admits, so the "
-        "per-tool rules it is under cannot be checked and a consumer would judge it "
-        "under no identity [session=%s]",
+        "%s, so the per-tool rules it is under cannot be checked and a consumer would "
+        "judge it under no identity [session=%s]",
+        clause,
         self._session_id,
     )
     self._audit_handle_reject(
         event.request_id,
         "mcp__unreadable",
-        "mcp_identity_unreadable",
+        f"mcp_identity_unreadable:{reason}" if reason else "mcp_identity_unreadable",
         sub_session_id=event.sub_session_id or "",
     )
+    try:
+        await steer_refusal_notice(
+            self, event.title or "", clause, cause=DENY_CAUSE_UNREADABLE_IDENTITY
+        )
+    except asyncio.CancelledError:
+        # A cancel here skips the reject below, and an unanswered permission
+        # request wedges every later turn: answer it from a strongly referenced
+        # task, as ``batch_guard.screen_approval`` does, and re-raise at once.
+        from kiro_crew.llm_helpers_parts import tool_approval
+
+        answer = asyncio.ensure_future(self.reject_tool(event.request_id))
+        tool_approval._orphan_rejects.add(answer)
+        answer.add_done_callback(tool_approval._orphan_reject_done)
+        raise
     await self.reject_tool(event.request_id)
     return True
 
@@ -714,4 +759,8 @@ def _build_permission_event(self: AcpSessionHandle, msg: JsonRpcMessage) -> AcpE
         event.spec_shell_allowlist = getattr(self, "kas_spec_shell_allowlist", None)
         event.spec_write_allowlist = getattr(self, "kas_spec_write_allowlist", None)
         event.spec_write_cwd = str(getattr(self, "_bound_cwd", "") or "")
+        event.spec_denied_grant = getattr(self, "kas_spec_denies", None)
+        event.spec_shell_readonly = bool(getattr(self, "kas_spec_shell_readonly", False))
+        event.spec_granted_paths = tuple(getattr(self, "kas_crew_answered_paths", ()))
+        event.spec_granted_read_paths = tuple(getattr(self, "kas_crew_answered_read_paths", ()))
     return event

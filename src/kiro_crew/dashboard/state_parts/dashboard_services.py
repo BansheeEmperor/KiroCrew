@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable
 
 from kiro_crew.atomic_write import atomic_write
@@ -48,6 +49,7 @@ from kiro_crew.dashboard.state_parts.notification_log import (
 from kiro_crew.dashboard.state_parts.transcript_rows import _mark_permission_resolved
 from kiro_crew.dashboard.turn_dispatch import BackgroundTurnAbandoned, mark_turn_unstarted
 from kiro_crew.dashboard.websocket_hub import WebSocketHub
+from kiro_crew.messaging.link import is_channel_session_key
 from kiro_crew.notifications.bus import NotificationValidationError, payload_from_legacy
 from kiro_crew.preview_text import strip_markdown_preview
 from kiro_crew.safety_override import safety_override
@@ -153,6 +155,12 @@ def _web_push_payload(note: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(tag, str) or not tag or _serialized_bytes(tag) > NATIVE_TAG_MAX_BYTES:
         tag = native_notification_tag(note)
     notification["tag"] = tag
+    key = note.get("key")
+    if isinstance(key, str) and key:
+        # A keyed note shares its tag with the earlier notes under its key, so a
+        # platform would swap a banner still on screen without alerting. Only a
+        # keyed note meant to announce reaches Web Push, so each one asks to.
+        notification["renotify"] = True
     return {"web_push": 8030, "notification": notification}
 
 
@@ -397,6 +405,27 @@ def disable_yolo(self: DashboardState) -> None:
 def is_yolo_active(self: DashboardState) -> bool:
     """Return whether safety override is active (delegates to safety_override module)."""
     return safety_override().is_active()
+
+
+def yolo_reaches(self: DashboardState, slot: Any, *, channel_origin: bool = False) -> bool:
+    """Whether a live YOLO grant (``is_yolo_active``) reaches a dashboard turn in *slot*.
+
+    ``gateway --approval yolo``'s grant (``is_cli_launch``) is the dashboard's only: a
+    turn a channel message started or steered, or a slot linked to a channel, keeps
+    asking as it did before the flag armed a grant. Callers AND it with
+    ``is_yolo_active``.
+    """
+    if safety_override().is_cli_launch is not True:
+        return True
+    linked_key = getattr(slot, "linked_session_key", "") or ""
+    linked = is_channel_session_key(linked_key) or bool(getattr(slot, "_slack_channel", ""))
+    # The opener's provenance (``_turn_channel_origin``) holds for the whole turn,
+    # even if the slot is unlinked mid-turn, as does a channel steer's narrowing.
+    from_channel = channel_origin or any(
+        getattr(slot, name, False) is True
+        for name in ("_turn_channel_origin", "_turn_channel_narrowed")
+    )
+    return not (from_channel or linked)
 
 
 async def request_approval(
@@ -737,6 +766,7 @@ def notify(
     channel: str | None = None,
     member: dict[str, str] | None = None,
     publisher_session: str | None = None,
+    i18n: dict[str, Any] | None = None,
 ) -> None:
     """Validate and deliver a legacy notification without raising.
 
@@ -744,6 +774,7 @@ def notify(
     :func:`payload_from_legacy`); ``kind`` still reaches the frontend.
     ``member`` attributes the note to the crewmate that published it.
     ``publisher_session`` is the attested session publishing it; its mute applies.
+    ``i18n`` names the dashboard copy the bell renders in the reader's language.
     """
     _notifications_for(self).notify(
         self,
@@ -756,6 +787,7 @@ def notify(
         channel=channel,
         member=member,
         publisher_session=publisher_session,
+        i18n=i18n,
     )
 
 
@@ -827,6 +859,52 @@ def _deliver_note(self: DashboardState, note: dict[str, Any]) -> None:
     _notifications_for(self).deliver(self, note)
 
 
+#: The note fields (merged flat from ``meta``) that name the session a note is about.
+_BRIDGE_SESSION_FIELDS = ("session_key", "slot", "history_key")
+
+
+def bridge_subjects(
+    self: DashboardState, note: Mapping[str, Any], publisher: str
+) -> tuple[str, ...]:
+    """The session keys the notification bridge vets *note* for, besides the host.
+
+    Every field that names a session counts, and producers spell them differently:
+    the publisher may be a session key or a bare slot key (a dead-turn alert
+    publishes under ``slot.key``); a note that offers choices carries no publisher
+    but keeps its ``slot`` and ``history_key`` link; a turn-ceiling or abandoned
+    consolidation notice carries only ``session_key``. Each is resolved to the session its slot's turns run on
+    (``effective_session_key``), which is what governance classifies a surface by. A
+    session key no slot matches is vetted as written; a bare slot key no slot holds
+    raises ``LookupError``, and the bridge then sends nothing. Every name is kept,
+    so a forged or stale one can only add a denial, never remove one.
+    """
+    from kiro_crew.dashboard.chat_utils_slots import effective_session_key
+    from kiro_crew.dashboard.session_control import caller_slot_key
+
+    keys: list[str] = []
+    names = [publisher] + [note.get(field) for field in _BRIDGE_SESSION_FIELDS]
+    for name in names:
+        if not isinstance(name, str) or not name:
+            continue
+        slot = self.get_slot(caller_slot_key(self, name) or name)
+        if slot is not None:
+            keys.append(effective_session_key(slot))
+        elif ":" in name:
+            keys.append(name)
+        else:
+            # A bare slot key no slot holds any more (closed while its note was in
+            # flight): governance would read it as some other surface, so refuse.
+            raise LookupError(f"no slot for {name!r}")
+    return tuple(dict.fromkeys(keys))
+
+
+def _bridge_note(self: DashboardState, note: dict[str, Any], publisher: str = "") -> None:
+    """Hand a locally delivered note, and who published it, to the notification bridge."""
+    bridge = getattr(self, "notification_bridge", None)
+    if bridge is not None:
+        bridge.schedule(note, serving_loop=getattr(self, "serving_loop", None), publisher=publisher)
+
+
 def register_sse(self: DashboardState) -> asyncio.Queue[dict[str, Any]]:
     """Register a new SSE client and return its dedicated queue."""
     return _notifications_for(self).register_sse(self)
@@ -837,14 +915,22 @@ def unregister_sse(self: DashboardState, q: asyncio.Queue[dict[str, Any]]) -> No
     _notifications_for(self).unregister_sse(self, q)
 
 
-async def _rewrite_notifications_async(self: DashboardState) -> None:
-    """Rewrite notification storage after earlier FIFO append jobs."""
-    await _notifications_for(self).rewrite(self)
+async def _rewrite_notifications_async(self: DashboardState) -> bool:
+    """Rewrite notification storage after earlier FIFO append jobs.
+
+    Returns whether the file was written.
+    """
+    return await _notifications_for(self).rewrite(self)
 
 
 async def delete_notification(self: DashboardState, ts: str) -> bool:
     """Remove a single notification by timestamp and persist to disk."""
     return await _notifications_for(self).delete(self, ts)
+
+
+async def dismiss_notification(self: DashboardState, *, source: str, key: str) -> tuple[bool, bool]:
+    """Remove the note *source* published under *key*; ``(removed, persisted)``."""
+    return await _notifications_for(self).dismiss(self, source=source, key=key)
 
 
 async def ack_notification(self: DashboardState, ts: str) -> bool:

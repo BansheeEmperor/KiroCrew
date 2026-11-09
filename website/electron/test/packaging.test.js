@@ -712,9 +712,28 @@ describe("first-download installer design contract", () => {
       /root_uri="\$\(cd "\$ROOT" && "\$out\/python\.exe" -c[\s\S]*?sys\.stdout\.write\(Path\.cwd\(\)\.as_uri\(\)\)/
     );
     assert.match(windowsBuilder, /"kirocrew\[voice-aws\] @ \$root_uri"/);
+    assert.match(buildScript, /"\$ROOT\[voice-codex\]"/);
+    assert.doesNotMatch(windowsBuilder, /"kirocrew\[voice-codex\] @ \$root_uri"/);
     assert.match(windowsBuilder, /"kirocrew\[voice\] @ \$root_uri"/);
     assert.doesNotMatch(windowsBuilder, /"\$ROOT\[voice(?:-aws)?\]"/);
     assert.doesNotMatch(windowsBuilder, /if\s+!\s+[\s\S]*?kirocrew\[voice\]/);
+  });
+
+  it("bundles the Feishu SDK into every backend, since the app cannot install it later", () => {
+    const buildScript = fs.readFileSync(path.join(REPO_ROOT, "packaging", "build-desktop.sh"), "utf8")
+      .split("\n").filter(line => !/^\s*#/.test(line)).join("\n");
+    const between = (start, end) => {
+      const from = buildScript.indexOf(start);
+      const to = buildScript.indexOf(end, from);
+      assert.ok(from >= 0 && to > from, `${start} not found`);
+      return buildScript.slice(from, to);
+    };
+    assert.match(between("build_backend() {", "build_backend_windows() {"), /"\$ROOT\[feishu\]"/);
+    const windowsBuilder = between("build_backend_windows() {", "stdlib_probe_gate() {");
+    assert.match(windowsBuilder, /"kirocrew\[feishu\] @ \$root_uri"/);
+    // Shipped compiled, so the first Feishu start does not compile ~11k modules
+    // on the gateway loop.
+    assert.match(windowsBuilder, /precompile_windows\.py" \\\n[^\n]*--module lark_oapi\n/);
   });
 
   it("shows native progress for updates without adding setup decisions", () => {
@@ -1431,6 +1450,15 @@ describe("uninstall data preservation contract", () => {
         `${format}.depends must name ${name}, or the app fails to start where nothing else installs it`
       );
     }
+  });
+
+  it("keeps OSS4's ALSA stand-in from satisfying the deb's ALSA dependency", () => {
+    // On Ubuntu 24.04 OSS4's liboss4-salsa-asound2 provides an unversioned
+    // libasound2 and lacks ALSA symbols the binary links, so the app never starts.
+    // Naming libasound2t64 first fixes a clean install; the version keeps an
+    // already-installed stand-in from satisfying the dependency.
+    const alsa = electronPkg.build.deb.depends.filter(entry => entry.includes("libasound2"));
+    assert.deepEqual(alsa, ["libasound2t64 | libasound2 (>= 1.0.17)"]);
   });
 
   it("reclaims the updater cache the generated uninstaller cannot reach", () => {

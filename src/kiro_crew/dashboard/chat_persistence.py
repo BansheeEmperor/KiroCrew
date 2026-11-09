@@ -140,6 +140,7 @@ from kiro_crew.history import (  # noqa: F401
     carry_provenance,
     carry_unowned_metadata,
     latest_transcript_ts,
+    transcript_lock_stems,
     transcript_sort_key,
     update_metadata_off_loop,
 )
@@ -694,7 +695,9 @@ from kiro_crew.dashboard import chat_persistence_parts as _parts  # noqa: E402
 from kiro_crew.dashboard.chat_persistence_parts.member_store import (  # noqa: E402,F401
     _member_private_selection,
     _member_restore_identity,
+    _missing_member_database_repair,
     _pin_private_agent_assignment,
+    _recreate_missing_member_database,
     member_store_ownership_holds,
     pin_private_agent_store,
     release_prewarmed_session,
@@ -780,7 +783,10 @@ from kiro_crew.dashboard.slot_persistence.message_entries import (  # noqa: E402
     _build_message_entry_uncached,
     remember_unknown_row_fields,
 )
-from kiro_crew.dashboard.slot_persistence.metadata_codec import COLOR_HEX_RE  # noqa: E402,F401
+from kiro_crew.dashboard.slot_persistence.metadata_codec import (  # noqa: E402,F401
+    COLOR_HEX_RE,
+    _restore_fork_lineage,
+)
 from kiro_crew.dashboard.slot_persistence.metadata_line import (  # noqa: E402,F401
     _META_LAST_USER_AT,
     _PENDING_MEMORY_MODE_LOCK,
@@ -817,6 +823,7 @@ from kiro_crew.dashboard.slot_persistence.restore_inputs import (  # noqa: E402,
     _recover_mcp_app_claims,
     _restored_agent_name,
     _sanitize_open_slot_key,
+    _seed_session_tree,
 )
 from kiro_crew.dashboard.slot_persistence.takeover_ordering import (  # noqa: E402,F401
     _slot_closed_before,
@@ -847,6 +854,7 @@ from kiro_crew.dashboard.slot_persistence.turn_marker import (  # noqa: E402,F40
 )
 from kiro_crew.dashboard.slot_persistence.write_guards import (  # noqa: E402,F401
     _FLUSH_SNAPSHOT_RETRIES,
+    DeleteWitness,
     HeaderUnconfirmed,
     _keep_owed_after_refusal,
     _line_is_this_slots,
@@ -854,6 +862,7 @@ from kiro_crew.dashboard.slot_persistence.write_guards import (  # noqa: E402,F4
     _stable_durable_queue,
     append_window_rows,
     register_guarded_history_write,
+    session_delete_witness,
     session_transcript_remains,
     session_was_deleted,
 )

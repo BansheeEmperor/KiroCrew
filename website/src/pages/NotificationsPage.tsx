@@ -12,6 +12,7 @@ import { useFeedFocusOnDetailClose } from '../components/notifications/feedFocus
 import type { Notification } from '../types'
 
 import { i18nT } from '../i18n/t'
+import { fmtNumber } from '../i18n/format'
 
 /** Deep-link query param naming one notification by its `ts` store id:
  *  `/notifications?note=<ts>`. External pushers (e.g. an ntfy bridge relaying
@@ -84,13 +85,12 @@ export default function NotificationsPage() {
     }
     openedTs.current = null
   }, [shownDetailTs])
-  // Narrow layout only: Back, or a detail whose note is gone (Approve, Reject,
-  // a delete from another tab), returns focus to the opened row, else the
-  // first row, else the feed's first control. The wide layout's side detail
-  // is #29175.
+  // Both layouts: Back or Close, or a detail whose note is gone (Approve,
+  // Reject, a delete from another tab), returns focus to the opened row, else
+  // the first row, else the feed's first control.
   const liveTs = useMemo(() => items.map(n => n.ts), [items])
   useFeedFocusOnDetailClose(
-    shownDetailTs,
+    selected ? selected.ts : null,
     liveTs,
     feedRef,
     () => feedRef.current?.querySelector<HTMLElement>('input, button') ?? null,
@@ -154,11 +154,11 @@ export default function NotificationsPage() {
           a whole instead (the standard page skeleton). */}
       <div ref={scrollRef} className={`px-4 md:px-6 pb-8 flex-1 min-h-0 flex flex-col ${isMobile ? 'overflow-y-auto' : 'overflow-hidden'}`}>
         <div className="grid gap-3.5 grid-cols-[repeat(auto-fit,minmax(120px,1fr))] mb-4 shrink-0">
-          <StatCard label={i18nT('pages.notificationsPage.total')} value={items.length} accent />
-          <StatCard label={i18nT('pages.notificationsPage.unread')} value={unread} />
-          <StatCard label={i18nT('pages.notificationsPage.cron')} value={byCat('cron')} />
-          <StatCard label={i18nT('pages.notificationsPage.hooks')} value={byCat('hook')} />
-          <StatCard label={i18nT('pages.notificationsPage.heartbeat')} value={byCat('heartbeat')} />
+          <StatCard label={i18nT('pages.notificationsPage.total')} value={fmtNumber(items.length)} accent />
+          <StatCard label={i18nT('pages.notificationsPage.unread')} value={fmtNumber(unread)} />
+          <StatCard label={i18nT('pages.notificationsPage.cron')} value={fmtNumber(byCat('cron'))} />
+          <StatCard label={i18nT('pages.notificationsPage.hooks')} value={fmtNumber(byCat('hook'))} />
+          <StatCard label={i18nT('pages.notificationsPage.heartbeat')} value={fmtNumber(byCat('heartbeat'))} />
         </div>
 
         {/* Split layout: feed + detail */}

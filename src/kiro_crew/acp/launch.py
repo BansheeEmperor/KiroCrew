@@ -810,6 +810,8 @@ class LaunchHost(Protocol):
     _sandbox_cleanup: str | None
     _sandbox_wrapped_by_crew: bool
     _sandbox_hidden_dirs: tuple[str, ...]
+    _ssh_auth_sock_forwarded: bool
+    _child_env_names: frozenset[str]
     _spawn_work_dir: str
     _bound_workspace_fd: int | None
 
@@ -851,7 +853,7 @@ class LaunchTools:
     agent_env_overlay: Callable[[], dict[str, str]] = field(default=dict)
     #: ``sandbox.ssh_auth_sock_consent_notice``; blocking (tier floor + consent
     #: leaf), run off-loop. Diagnostic only: the forward verdict is
-    #: ``forward_ssh_auth_sock``'s.
+    #: ``forward_ssh_auth_sock``'s, as the sandbox wrap re-judged it.
     ssh_auth_sock_consent_notice: Callable[[str, str, tuple[str, ...]], str] = field(
         default=ssh_auth_sock_consent_notice
     )
@@ -1125,20 +1127,23 @@ async def launch(host: LaunchHost, request: LaunchRequest, tools: LaunchTools) -
     scratch_window = (*scratch_window, *request.extra_private_dirs)
     # Resolve the SSH_AUTH_SOCK forward OFF the event loop (the governance
     # floor and the consent leaf are filesystem reads) ONCE, then pass the
-    # resolved boolean into both the sandbox wrap below and the parent-side
-    # scrub further down, so neither reads config synchronously on the loop.
-    # The tier and this spawn's credential mask decide whether ~/.ssh is
-    # readable to the child, which is what makes the forward a default rather
-    # than a consent. Scoped to this agent spawn: generic launchers default the
-    # flag off and keep scrubbing the socket.
+    # resolved boolean into the sandbox wrap below, so nothing reads config
+    # synchronously on the loop. The wrap re-judges it on the tier it applies
+    # and appends the verdict it applied, which the parent-side scrub and the
+    # host record further down use. The tier and this spawn's credential mask
+    # decide whether ~/.ssh is readable to the child, which is what makes the
+    # forward a default rather than a consent. Scoped to this agent spawn:
+    # generic launchers default the flag off and keep scrubbing the socket.
     forward_ssh_auth_sock = await asyncio.to_thread(
         tools.forward_ssh_auth_sock, request.sandbox_mode, tuple(request.extra_hidden_dirs)
     )
+    forward_applied = [forward_ssh_auth_sock]
     argv, host._sandbox_cleanup = await tools.wrap_argv_async(
         argv,
         mode=request.sandbox_mode,
         strip_python_env=True,
         forward_ssh_auth_sock=forward_ssh_auth_sock,
+        forward_ssh_auth_sock_out=forward_applied,
         # Credential homes the standard tier exposes for kiro-cli's sake and that
         # an enforced host has no claim on. Empty for every harness this core does
         # not enforce, so their spawn arguments are unchanged.
@@ -1158,6 +1163,11 @@ async def launch(host: LaunchHost, request: LaunchRequest, tools: LaunchTools) -
     host._sandbox_wrapped_by_crew = tools.wrapped_by_crew_sandbox(argv)
     sandbox_wrapped_argv = tuple(argv)
     host._sandbox_hidden_dirs = tuple(request.extra_hidden_dirs)
+    # The verdict this child's environment is built with -- the wrap's own, so a
+    # socket the wrap dropped stays dropped -- so a server the engine starts later
+    # is judged on it, not on a later config or floor.
+    forward_ssh_auth_sock = forward_applied[-1]
+    host._ssh_auth_sock_forwarded = forward_ssh_auth_sock
     # cgroup v2 scope (OUTERMOST): bound this agent + all its MCP-server / tool
     # descendants with pids.max (fork bomb) + memory.max (RSS balloon). No-op +
     # loud warning where cgroup delegation is unavailable. --scope execs into the
@@ -1209,8 +1219,8 @@ async def launch(host: LaunchHost, request: LaunchRequest, tools: LaunchTools) -
     # Match the OS launchers' sensitive + Python env scrub in the parent. Windows
     # Kiro delegation has no POSIX `env -u` wrapper, so this is the enforcement
     # point there. Kept after the driver's credential repair so no resolver can
-    # reintroduce a denied variable. forward_ssh_auth_sock is the opt-in resolved
-    # off-loop above and reused here.
+    # reintroduce a denied variable. forward_ssh_auth_sock is the verdict the wrap
+    # applied, handed back above.
     env = tools.scrub_agent_subprocess_env(env, forward_ssh_auth_sock=forward_ssh_auth_sock)
     if had_ssh_auth_sock and not forward_ssh_auth_sock:
         await _note_ssh_auth_sock_withheld(host, tools, request)
@@ -1250,6 +1260,9 @@ async def launch(host: LaunchHost, request: LaunchRequest, tools: LaunchTools) -
     # resource_status.inject_xdist_auto_cap. Off-loop: resolving the cap reads the
     # raw config. Guarded: the sandbox temp file is live.
     await host._to_thread_guarding_sandbox(tools.inject_xdist_auto_cap, env)
+    # Names only, never values: what a ``${NAME}`` the child expands itself can
+    # resolve to (``mcp_ref_guard.warn_unset_env_placeholders``).
+    host._child_env_names = frozenset(env)
 
     await host._discard_bound_workspace()
     if request.internal_sandbox:

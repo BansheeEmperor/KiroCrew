@@ -577,6 +577,10 @@ _CREW_SECRET_LEAVES: list[str] = [
     # shell. The dashboard PUT handler is the only writer and it opens the path
     # directly, not through this gate, so the operator's Settings toggle still works.
     "computer_use.json",
+    # Verbatim endorsed copies of the two leaves above (``config.loosening_provenance``);
+    # no OS mask: their directory is a read-only bind that in-sandbox loaders read.
+    "config-provenance/endorsed/denied_commands.json",
+    "config-provenance/endorsed/computer_use.json",
     # Browser Mode's durable ENABLE gate. Same class of control as
     # ``computer_use.json`` directly above: while it is present the browse proxy
     # is registered and the ``browser_*`` tools are in the agent's tool list,
@@ -761,6 +765,9 @@ _CREW_SECRET_LEAVES: list[str] = [
     # KAS MCP launch snapshots hold servers' env values (``acp.kas_env_launch``); the
     # ``pi-gate`` split: readable in the sandbox for the launcher, fenced from file tools.
     "kas-mcp-launch",
+    # Connection bridge snapshots (per-bridge tokens): the same split, and readable by
+    # an enforced harness's child too (``sandbox_leaves._CREW_CHILD_READABLE_LEAVES``).
+    "crew-oauth-bridge",
     # Encrypted secret vault directory — denylists the entire subdirectory so
     # the key file, ciphertext store, lock, and atomic-write temp files are all
     # unreadable to the agent through any Kiro Crew-mediated channel.
@@ -1315,9 +1322,9 @@ _WRITE_PROTECTED_HOME_PATHS += list(_KIRO_MATE_STATE_LEAVES)
 # ── kiro-cli global MCP registry (~/.kiro/settings/mcp.json) ──
 # The sibling of the agents dir above, and an INPUT TO A SECURITY DECISION by the
 # same route: an ``autoApprove`` on an entry here is honoured by default
-# (``mcp.honour_auto_approve``), and kiro-cli approves an autoApproved MCP tool
-# LOCALLY and emits no permission request -- so those verbs skip
-# ``hooks.on_tool_call`` and the tool gate never runs for them.
+# (``mcp.honour_auto_approve``), and each kept verb is granted in the skill view's
+# ``allowedTools``, which kiro-cli approves LOCALLY with no permission request -- so
+# those verbs skip ``hooks.on_tool_call`` and the tool gate never runs for them.
 # ``governance._is_owner_written`` admits an entry on its NAME SHAPE (no ``:``, no
 # provenance marker), never on who wrote the file, so a plainly-named entry an agent
 # appended is indistinguishable from one the owner typed. The opt-in's own wording is

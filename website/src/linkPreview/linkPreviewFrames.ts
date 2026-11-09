@@ -10,7 +10,7 @@
  *
  * @module linkPreview/linkPreviewFrames
  */
-import { freshRate, takeMessage, type RateState } from '../appFrame/frameProtocol'
+import { freshRate, isRelayMessage, takeMessage, type RateState } from '../appFrame/frameProtocol'
 import {
   createSandboxedFrame,
   loadMintedFrame,
@@ -216,6 +216,12 @@ export class FrameHost {
     }
   }
 
+  /** The provider's card-mode hover card is on screen. */
+  isShown(key: string): boolean {
+    const frame = this.hover.get(key)
+    return Boolean(frame && frame.visible && !frame.overlay)
+  }
+
   /** A once-pinned card the app unpinned is still on screen: it belongs to an
    *  earlier hover, not the latest one. */
   hasUnpinnedDetached(): boolean {
@@ -415,6 +421,8 @@ export class FrameHost {
     if (!e.source) return
     const frame = this.frames().find((f) => f.el.contentWindow === e.source)
     if (!frame) return
+    // Relay requests are the relay's (`appFrame/frameRelay.ts`), not the card's.
+    if (isRelayMessage(e.data)) return
     // Bounded: an oversized message, or one past the burst allowance, is dropped unread.
     if (!takeMessage(frame.rate)) return
     if (messageBytes(e.data) > MAX_MESSAGE_BYTES) return

@@ -12,13 +12,14 @@ import { Btn } from '../../components/ui'
 import { api } from '../../api/client'
 import { ApiError } from '../../api/apiError'
 import { useSharedCrewPreviewSetting } from './sharedCrewPreviewSetting'
-import { PREVIEW_ARTIFACT_DEPLOY, PREVIEW_CREW_MODE, PREVIEW_CREWMATE_HARNESS, PREVIEW_EXPLORE, PREVIEW_FOLDER_CONDUCTOR, PREVIEW_LAYOUT_HARNESS, PREVIEW_MATE_SESSIONS, PREVIEW_REMOTE_CREW_CHAT, PREVIEW_SESSION_ENVIRONMENTS, PREVIEW_WEBHOOKS, setPreviewFlag, setRemoteCrewChat } from '../../utils/previewFlags'
+import { PREVIEW_ARTIFACT_DEPLOY, PREVIEW_CREW_MODE, PREVIEW_CREW_OAUTH, PREVIEW_DASHBOARD_STALE_FIELDS, PREVIEW_DASHBOARD_STALE_WAKE, PREVIEW_EXPLORE, PREVIEW_FOLDER_CONDUCTOR, PREVIEW_LAYOUT_HARNESS, PREVIEW_MATE_SESSIONS, PREVIEW_REMOTE_CREW_CHAT, PREVIEW_SESSION_ENVIRONMENTS, PREVIEW_SESSION_HARNESS, PREVIEW_WEBHOOKS, setPreviewFlag, setRemoteCrewChat } from '../../utils/previewFlags'
 import ErrorBoundary from '../../components/ErrorBoundary'
 import { KasBundleCard } from '../developer/KasBundleCard'
 import { KIRO_SIGN_IN_BACKEND } from '../developer/kiroSignInLink'
 import { useConfigSchema } from '../../components/settingRef/useConfigSchema'
 import { DecisionsCard } from './DecisionsCard'
 import { RemoteDispatchCard } from './RemoteDispatchCard'
+import { EditionPreviewRows } from './EditionPreviewRows'
 import { i18nT } from '../../i18n/t'
 
 
@@ -122,12 +123,15 @@ function previewFlagLabel(flag: string): string {
     case PREVIEW_WEBHOOKS: return i18nT('pages.developer.featurePreviewsTab.webhooks')
     case PREVIEW_CREW_MODE: return i18nT('pages.developer.featurePreviewsTab.crew_mode')
     case PREVIEW_EXPLORE: return i18nT('pages.developer.featurePreviewsTab.explore')
+    case PREVIEW_CREW_OAUTH: return i18nT('pages.developer.featurePreviewsTab.crew_oauth')
     case PREVIEW_REMOTE_CREW_CHAT: return i18nT('pages.developer.featurePreviewsTab.chat_on_a_crew')
     case PREVIEW_LAYOUT_HARNESS: return i18nT('pages.developer.featurePreviewsTab.layout_harness')
     case PREVIEW_FOLDER_CONDUCTOR: return i18nT('pages.developer.featurePreviewsTab.folder_conductor')
-    case PREVIEW_CREWMATE_HARNESS: return i18nT('pages.developer.featurePreviewsTab.crewmate_harness')
     case PREVIEW_MATE_SESSIONS: return i18nT('pages.developer.featurePreviewsTab.mate_sessions')
+    case PREVIEW_DASHBOARD_STALE_FIELDS: return i18nT('pages.developer.featurePreviewsTab.dashboard_stale_fields')
+    case PREVIEW_DASHBOARD_STALE_WAKE: return i18nT('pages.developer.featurePreviewsTab.dashboard_stale_wake')
     case PREVIEW_SESSION_ENVIRONMENTS: return i18nT('sessionEnvironments.title')
+    case PREVIEW_SESSION_HARNESS: return i18nT('pages.developer.featurePreviewsTab.session_harness')
     default: return i18nT('pages.settings.developerPanel.feature_previews')
   }
 }
@@ -154,11 +158,14 @@ export function FeaturePreviewsSection() {
   const remoteCrewChat = useRemoteCrewChat()
   const layoutHarness = usePreviewFlag(PREVIEW_LAYOUT_HARNESS)
   const folderConductor = usePreviewFlag(PREVIEW_FOLDER_CONDUCTOR)
-  const crewmateHarness = usePreviewFlag(PREVIEW_CREWMATE_HARNESS)
   const mateSessions = usePreviewFlag(PREVIEW_MATE_SESSIONS)
+  const dashboardStaleFields = usePreviewFlag(PREVIEW_DASHBOARD_STALE_FIELDS)
+  const dashboardStaleWake = usePreviewFlag(PREVIEW_DASHBOARD_STALE_WAKE)
   const sessionEnvironments = usePreviewFlag(PREVIEW_SESSION_ENVIRONMENTS)
+  const sessionHarness = usePreviewFlag(PREVIEW_SESSION_HARNESS)
   const crewMode = usePreviewFlag(PREVIEW_CREW_MODE)
   const explore = usePreviewFlag(PREVIEW_EXPLORE)
+  const crewOauth = usePreviewFlag(PREVIEW_CREW_OAUTH)
   const writeError = usePreviewFlagWriteError()
   const [gatewayRestarting, setGatewayRestarting] = useState(false)
   const [restartFailed, setRestartFailed] = useState(false)
@@ -228,15 +235,9 @@ export function FeaturePreviewsSection() {
       {writeError && (
         <ErrorNotice
           testId="feature-previews-save-error"
-          // A carry refused as owner-only names the owner rather than a reload:
-          // a reload sends the same carry and gets the same 403.
-          message={writeError.carry
-            ? writeError.denied
-              ? i18nT('pages.settings.developerPanel.feature_previews_carry_denied', { name: previewFlagLabel(writeError.flag) })
-              : i18nT('pages.settings.developerPanel.feature_previews_carry_failed', { name: previewFlagLabel(writeError.flag) })
-            : writeError.denied
-              ? i18nT('pages.settings.developerPanel.feature_previews_save_denied', { name: previewFlagLabel(writeError.flag) })
-              : i18nT('pages.settings.developerPanel.feature_previews_save_failed', { name: previewFlagLabel(writeError.flag) })}
+          message={writeError.denied
+            ? i18nT('pages.settings.developerPanel.feature_previews_save_denied', { name: previewFlagLabel(writeError.flag) })
+            : i18nT('pages.settings.developerPanel.feature_previews_save_failed', { name: previewFlagLabel(writeError.flag) })}
           onDismiss={clearPreviewFlagWriteError}
           // The hand-off is safe here: this section holds no draft input, and the
           // refused switch already shows its stored value, so leaving loses nothing.
@@ -327,6 +328,18 @@ export function FeaturePreviewsSection() {
           hint={i18nT('pages.developer.featurePreviewsTab.explore_desc')}
           checked={explore}
           onChange={v => setPreviewFlag(PREVIEW_EXPLORE, v)}
+        />
+      </SettingsCard>
+      {/* Crew-owned GitHub sign-in (`dashboard.feature_previews.crew_oauth`): a
+          gateway switch, read per call by `connections/crew_oauth.py`, and the
+          only one (the old `connections.crew_oauth` is ignored). */}
+      <SettingsCard>
+        <SettingsToggle
+          label={i18nT('pages.developer.featurePreviewsTab.crew_oauth')}
+          description={i18nT('pages.developer.featurePreviewsTab.crew_oauth_desc_summary')}
+          hint={i18nT('pages.developer.featurePreviewsTab.crew_oauth_desc')}
+          checked={crewOauth}
+          onChange={v => setPreviewFlag(PREVIEW_CREW_OAUTH, v)}
         />
       </SettingsCard>
       {/* Shared Crew (People, invites, shared sessions). Unlike the flags above, the
@@ -430,18 +443,6 @@ export function FeaturePreviewsSection() {
           onChange={v => setPreviewFlag(PREVIEW_FOLDER_CONDUCTOR, v)}
         />
       </SettingsCard>
-      {/* A crewmate's own harness: the Harness row on each crewmate's profile
-          Settings page. NO ingress button: the row appears on a profile the reader
-          already opens, and there is no one page to link to. */}
-      <SettingsCard>
-        <SettingsToggle
-          label={i18nT('pages.developer.featurePreviewsTab.crewmate_harness')}
-          description={i18nT('pages.developer.featurePreviewsTab.crewmate_harness_desc_summary')}
-          hint={i18nT('pages.developer.featurePreviewsTab.crewmate_harness_desc')}
-          checked={crewmateHarness}
-          onChange={v => setPreviewFlag(PREVIEW_CREWMATE_HARNESS, v)}
-        />
-      </SettingsCard>
       {/* A crewmate's sessions leave the person's lists for the mate's Sessions
           tab. NO ingress button: the change is to lists the reader already sees. */}
       <SettingsCard>
@@ -451,6 +452,44 @@ export function FeaturePreviewsSection() {
           hint={i18nT('pages.developer.featurePreviewsTab.mate_sessions_desc')}
           checked={mateSessions}
           onChange={v => setPreviewFlag(PREVIEW_MATE_SESSIONS, v)}
+        />
+      </SettingsCard>
+      {/* Out-of-date Bot-written Dashboard fields (`dashboard_stale_fields`): a
+          gateway switch read per page read and per Bot turn
+          (`dashboard_agentic.stale_fields_enabled`). NO ingress button: the mark
+          lands on pages the reader already opens. */}
+      <SettingsCard>
+        <SettingsToggle
+          label={i18nT('pages.developer.featurePreviewsTab.dashboard_stale_fields')}
+          description={i18nT('pages.developer.featurePreviewsTab.dashboard_stale_fields_desc_summary')}
+          hint={i18nT('pages.developer.featurePreviewsTab.dashboard_stale_fields_desc')}
+          checked={dashboardStaleFields}
+          onChange={v => setPreviewFlag(PREVIEW_DASHBOARD_STALE_FIELDS, v)}
+        />
+        {/* Waking the Bot for those fields (`dashboard_stale_wake`) needs the mark
+            above, so its switch shows only while that one is on; the gateway
+            checks both (`dashboard/stale_wake.py:enabled`). */}
+        {dashboardStaleFields && (
+          <SettingsToggle
+            label={i18nT('pages.developer.featurePreviewsTab.dashboard_stale_wake')}
+            description={i18nT('pages.developer.featurePreviewsTab.dashboard_stale_wake_desc_summary')}
+            hint={i18nT('pages.developer.featurePreviewsTab.dashboard_stale_wake_desc')}
+            checked={dashboardStaleWake}
+            onChange={v => setPreviewFlag(PREVIEW_DASHBOARD_STALE_WAKE, v)}
+          />
+        )}
+      </SettingsCard>
+      {/* Agent Harness for worker chats (`session_harness`): a gateway switch read per call
+          (`session_harness_preview.py`). Off, session_create and work_dispatch do
+          not offer `backend` and refuse one. NO ingress button: the choice is a
+          tool argument, with no page to open. */}
+      <SettingsCard>
+        <SettingsToggle
+          label={i18nT('pages.developer.featurePreviewsTab.session_harness')}
+          description={i18nT('pages.developer.featurePreviewsTab.session_harness_desc_summary')}
+          hint={i18nT('pages.developer.featurePreviewsTab.session_harness_desc')}
+          checked={sessionHarness}
+          onChange={v => setPreviewFlag(PREVIEW_SESSION_HARNESS, v)}
         />
       </SettingsCard>
       {/* Conductor remote dispatch (`work_ledger.remote_dispatch`). Like the KAS card
@@ -484,6 +523,8 @@ export function FeaturePreviewsSection() {
           onChange={value => setPreviewFlag(PREVIEW_SESSION_ENVIRONMENTS, value)}
         />
       </SettingsCard>
+      {/* Rows an edition contributes; none on the public build. */}
+      <EditionPreviewRows />
       {/* LAST, and the only card here whose switch is not in gateway config: it
           writes the KEYSTONE `decisions_consent.json`, not a config path. It lives in
           `DecisionsCard.tsx` because it is a list and a detail rather than one row,

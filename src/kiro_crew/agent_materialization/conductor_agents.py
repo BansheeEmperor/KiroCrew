@@ -189,19 +189,27 @@ _HISTORY_DASHBOARD_VERBS: frozenset[str] = frozenset(
 # ledger verbs were on the goal AND pipeline conductors for one release before the
 # ledger flow moved to its own spec, and came back to the goal conductor with
 # ``work_brief`` when it took the alias's spec over; they are the base every
-# conductor ships; ``work_report`` is the
-# WORKER's verb and no conductor has ever shipped it, so it is nobody's to drop.
+# conductor ships. ``work_report``, the worker's verb, joined them so a
+# nested conductor reports without a prompt; the pipeline and security
+# conductors have never shipped it.
 _HISTORY_WORK_VERBS: frozenset[str] = frozenset(
     {
         "@kirocrew-work/work_ledger_read",
         "@kirocrew-work/work_ledger_record",
         "@kirocrew-work/work_brief",
+        "@kirocrew-work/work_report",
     }
 )
+#: The goal conductor's fixed checks: ``accept_eval`` (``mcp_work.CHECK_TOOLS``)
+#: and the retired ``patrol_budget``, kept here so an existing install drops it
+#: (rfc-permanent-patrol.md: a work-ledger patrol has no bound to check).
+_HISTORY_CHECK_VERBS: frozenset[str] = frozenset(
+    {"@kirocrew-work/accept_eval", "@kirocrew-work/patrol_budget"}
+)
 #: Spec name -> every ``allowedTools`` grant any release has shipped on it. Retired
-#: today: the goal conductor's bare ``@kirocrew-core``. Beyond each spec's current
-#: tuple the table holds exactly that entry (pinned by test), so an entry can join
-#: it only as a grant some release is shown to have shipped. The pipeline
+#: today: the goal conductor's bare ``@kirocrew-core`` and ``patrol_budget``. Beyond
+#: each spec's current tuple the table holds exactly those entries (pinned by test),
+#: so an entry can join it only as a grant some release is shown to have shipped. The pipeline
 #: conductor's two work-ledger verbs were shipped for one release, retired, and are
 #: shipped again as the base every conductor holds.
 _SHIPPED_GRANT_HISTORY: dict[str, frozenset[str]] = {
@@ -213,6 +221,7 @@ _SHIPPED_GRANT_HISTORY: dict[str, frozenset[str]] = {
         | {"@kirocrew-dashboard/chat_folder_file_self"}
         | _HISTORY_WORK_VERBS
         | {"@kirocrew-work/work_ledger_rebuild"}
+        | _HISTORY_CHECK_VERBS
     ),
     "kirocrew-ledger-conductor": (
         frozenset({"session", "report", "tool_search"})
@@ -222,6 +231,7 @@ _SHIPPED_GRANT_HISTORY: dict[str, frozenset[str]] = {
         | {"@kirocrew-dashboard/chat_folder_file_self"}
         | _HISTORY_WORK_VERBS
         | {"@kirocrew-work/work_ledger_rebuild"}
+        | _HISTORY_CHECK_VERBS
     ),
     "kirocrew-pipeline-conductor": (
         frozenset({"session", "report", "tool_search"})
@@ -679,9 +689,11 @@ def _conductor_spec(
     ``session_send`` (runs text as a peer's turn) and ``chat_folder_move_session``
     (writes a peer session's ``folder_id``) are withheld, because the conductor
     ingests untrusted content by design and the server-side gates bound which
-    target is reachable, not what is done to it. ``work_report`` is withheld on
-    the same rule: it writes into a PARENT's record, across a dispatch
-    relationship.
+    target is reachable, not what is done to it. A send or close into a session
+    the conductor itself created is instead auto-approved at approval time
+    (``_conductor_own_child_call`` in ``dashboard/chat_turn/tool_approval.py``).
+    ``work_report`` is granted: it writes only the caller's own bound item, as it
+    does for every worker.
 
     ``execute_bash`` is withheld for a different reason that is worth keeping
     distinct: ``allowedTools`` is name-scoped with no argument matching, so
@@ -704,16 +716,13 @@ def _conductor_spec(
     config["prompt"] = agent_mod._CONDUCTOR_SYSTEM_PROMPT
     # The skills this prompt names: ``goal-conductor`` carries the operating
     # procedure it says to read first, ``dashboard`` is how it changes the page
-    # it reports on, and ``widgets`` / ``living-ui`` / ``artifacts`` are how it
-    # draws the introduction and the board in the dashboard chat: the widget
-    # pointer its contract block carries on that surface
-    # (``context_assembly.agent_spec.WIDGET_BLOCK_AGENTS``) names ``widgets`` and
-    # ``artifacts``, and ``widgets`` sends a moving picture on to ``living-ui``.
+    # it reports on, and ``WIDGET_POINTER_SKILLS`` are how it draws the
+    # introduction and the board in the dashboard chat.
     # Mapped rather than assumed reachable: this spec is a custom template, so with
     # no mapping its search scope is empty and no document can be found. The alias
     # installer emits this same body, so the alias carries the mapping too.
     skill_resources.map_prompt_skills(
-        config, "goal-conductor", "dashboard", "widgets", "living-ui", "artifacts"
+        config, "goal-conductor", "dashboard", *skill_resources.WIDGET_POINTER_SKILLS
     )
     config["tools"] = [
         "execute_bash",
@@ -918,7 +927,9 @@ def _install_pipeline_conductor_agent(*, clean: bool = False) -> bool:
     # ``dashboard`` for the page. Note ``pipeline-conductor/SKILL.md`` is larger
     # than one read's capacity, so reaching it is paged -- a separate limit the
     # mapping does not change.
-    skill_resources.map_prompt_skills(config, "pipeline-conductor", "dashboard")
+    skill_resources.map_prompt_skills(
+        config, "pipeline-conductor", "dashboard", *skill_resources.WIDGET_POINTER_SKILLS
+    )
     config["tools"] = [
         "execute_bash",
         "fs_read",
@@ -1005,11 +1016,13 @@ def _install_security_conductor_agent(*, clean: bool = False) -> bool:
         "any fix behind a human yes. Never touches the target itself."
     )
     config["prompt"] = _conductor_prompt(agent_mod._SECURITY_CONDUCTOR_SYSTEM_PROMPT)
-    # The one skill this prompt names. Its fixer dispatch hands a worker the
-    # ``kirocrew-prepare-pr`` skill, but that worker is a separate session on its
-    # own spec, so mapping it here would widen this agent's search scope past what
-    # its own charter reads.
-    skill_resources.map_prompt_skills(config, "security-conductor")
+    # The one skill this prompt names, plus the widget pointer's. Its fixer
+    # dispatch hands a worker the ``kirocrew-prepare-pr`` skill, but that worker is
+    # a separate session on its own spec, so mapping it here would widen this
+    # agent's search scope past what its own charter reads.
+    skill_resources.map_prompt_skills(
+        config, "security-conductor", *skill_resources.WIDGET_POINTER_SKILLS
+    )
     config["tools"] = [
         "execute_bash",
         "fs_read",

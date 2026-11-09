@@ -23,6 +23,7 @@ import { copyToClipboard } from '../utils/clipboard'
 import { extractToolFilePath } from '../utils/toolFilePath'
 import { deriveToolCallTitle } from '../utils/toolCallTitle'
 import { isSafePath } from '../utils/safePath'
+import { pathBasename } from '../utils/pathBasename'
 import { isHiddenInvisibleAssistantRow } from '../utils/invisibleText'
 import AssistantMessage, { type TurnStats } from '../pages/chat/AssistantMessage'
 import { type FileChangeEntry } from '../components/FileChangeChips'
@@ -34,6 +35,7 @@ import SubagentCompletionCard from '../pages/chat/SubagentCompletionCard'
 import NudgeCard from '../pages/chat/NudgeCard'
 import ElicitationCard from '../pages/chat/ElicitationCard'
 import NoticeCard from '../pages/chat/NoticeCard'
+import SpecHooksRunNowhereNotice, { isSpecHooksRunNowhereNotice, specHooksRunNowhereDismissed } from '../pages/chat/SpecHooksNotice'
 import { SystemNoticeRow, isSystemNoticeRow } from '../pages/chat/CompactionCard'
 import { replyShowsFooter } from '../pages/chat/replyFooter'
 import { toolRailColor } from '../utils/toolRailColor'
@@ -218,7 +220,7 @@ export const ToolCallPill = memo(function ToolCallPill({ message, running, onFil
   const copyResetTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   React.useEffect(() => () => { if (copyResetTimer.current) clearTimeout(copyResetTimer.current) }, [])
   // A finished call is NOT re-roled: the backend writes the result onto the 🔧
-  // row's own `meta.output` (chat_runner's EVENT_TOOL_RESULT handler; '' for a
+  // row's own `meta.output` (`_on_tool_result` in dashboard/chat_turn/tool_results.py; '' for a
   // terminal frame with no renderable output), so the role alone left every
   // completed call in a polled transcript on the loader. Same rule as the
   // store-connected ToolCallLine: a result arrived, or the session is idle and
@@ -288,7 +290,8 @@ export const ToolCallPill = memo(function ToolCallPill({ message, running, onFil
   // gets copied is exactly what the panel shows, not the portion the 160px box
   // happens to have scrolled into view.
   // The backend persists the call's `input` and its `output` on the tool row's
-  // meta (`_tool_meta` / the tool-result handler in chat_runner.py), and the
+  // meta (`_tool_meta` in chat_turn/tool_rows.py / `_on_tool_result` in
+  // chat_turn/tool_results.py), and the
   // embed's transcript response carries them. `message.content` is only the
   // "🔧 title" line, so when either payload is present the expanded row renders
   // the main chat's own `ToolDetails` (Input/Output tabs) instead of repeating
@@ -389,7 +392,7 @@ export const ToolCallPill = memo(function ToolCallPill({ message, running, onFil
           aria-label={i18nT('appSdk.chatMessageList.open_path', { path: filePath })}
           className="inline-flex items-center gap-1 text-[12px] leading-5 font-mono px-1.5 py-0.5 rounded-md border border-border text-muted cursor-pointer hover:text-text hover:border-border-strong transition-all"
         >
-          {filePath.split('/').pop()}
+          {pathBasename(filePath)}
           <PanelRight size={11} />
         </button>
       )}
@@ -537,6 +540,12 @@ export interface AssistantBubbleOptions {
    *  from `meta.redactions` and their card offers the owner's reveal of the
    *  removed value. A host drawing another gateway's rows leaves it unset. */
   redactionSlot?: string
+  /** The reply menu's Read aloud, for a host that can read this reply aloud
+   *  (a crewmate's chat). Absent: no Read aloud item. */
+  onSpeak?: (content: string) => void
+  /** Show the reply's action row without hover, for a host whose playback the
+   *  browser blocked (the recovery notice points at More → Read aloud). */
+  revealActions?: boolean
 }
 
 /**
@@ -607,6 +616,8 @@ export function renderAssistantBubble(
       fileChanges={opts.hideFileChanges ? undefined : (m.meta as Record<string, unknown> | undefined)?.file_changes as FileChangeEntry[] | undefined}
       fileChangesOmittedFiles={opts.hideFileChanges ? undefined : (m.meta as Record<string, unknown> | undefined)?.file_changes_omitted_files}
       onRegenerate={opts.onRegenerate}
+      onSpeak={opts.onSpeak}
+      revealActions={opts.revealActions}
       redactions={opts.redactionSlot ? (m.meta as Record<string, unknown> | undefined)?.redactions : undefined}
       redactionSlot={opts.redactionSlot}
       suppressSteerAck={opts.suppressSteerAck || turnHadPolicyBlock(ctx.messages, ctx.index)}
@@ -780,6 +791,17 @@ export const defaultMessageRenderers: readonly MessageRenderer[] = [
     roles: ['*'],
     match: m => m.meta?.kind === 'warm_task_brief_claim',
     render: () => null,
+  },
+  {
+    // The notice that a backend runs none of the agent spec's hooks, with its
+    // Dismiss link. Shape-matched, so a host claiming the notice role does not
+    // take the link away; once dismissed, the row draws nothing anywhere.
+    id: 'spec_hooks_run_nowhere',
+    roles: ['*'],
+    match: isSpecHooksRunNowhereNotice,
+    render: (m, ctx) => specHooksRunNowhereDismissed()
+      ? null
+      : ctx.row(<SpecHooksRunNowhereNotice content={m.content} askAgent={ctx.handOff !== false} />),
   },
   {
     id: 'notice',

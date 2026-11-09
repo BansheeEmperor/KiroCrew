@@ -25,7 +25,11 @@ from kiro_crew.dashboard.chat_utils import (
     slot_history_key,
     variant_from_row,
 )
-from kiro_crew.dashboard.kiro_readiness import reject_if_kiro_unverified
+from kiro_crew.dashboard.kiro_readiness import (
+    refuse_rerun_after_signed_out_turn,
+    reject_if_kiro_unverified,
+    rerun_signs_in_via_kiro_cli,
+)
 from kiro_crew.dashboard.relay_archive import relay_archive_refusal
 from kiro_crew.dashboard.slot_ownership import (
     checkpoint_slot_replaced,
@@ -88,6 +92,24 @@ _MAX_EDIT_CONTENT_CHARS = 32_768
 _SAVE_DRAIN_ATTEMPTS = 8
 
 
+def _crew_paused(slot: "_ChatSlot") -> bool:
+    """Whether an Ultra Mode "Pause all" holds *slot*: its history is not rewritten.
+
+    Asked before anything is truncated, so a refused edit leaves the chat as it
+    was instead of a rewritten history with no turn behind it.
+    """
+    from kiro_crew import crew_pause
+
+    return crew_pause.holds_slot(slot)
+
+
+def _crew_paused_response() -> web.Response:
+    return web.json_response(
+        {"error": "this crew is paused; resume it from the Board", "code": "crew_paused"},
+        status=409,
+    )
+
+
 def _destructive_history_busy(slot: "_ChatSlot") -> web.Response | None:
     """Refuse history mutation while a turn, admission reservation, or teardown owns
     the slot.
@@ -117,12 +139,13 @@ async def api_chat_slot_regenerate(request: web.Request) -> web.Response:
     ``chat_turn.regenerate_swap``.
     """
     # The readiness latch is honored before the turn is dispatched, as for the
-    # other history actions.
-    blocked = await reject_if_kiro_unverified(request)
-    if blocked is not None:
-        return blocked
+    # other history actions, when that turn signs in via kiro-cli.
     state: DashboardState = request.app["state"]
     name = request.match_info["slot"]
+    if await rerun_signs_in_via_kiro_cli(state.sessions, state._slots.get(name)):
+        blocked = await reject_if_kiro_unverified(request)
+        if blocked is not None:
+            return blocked
     slot = state._slots.get(name)
     # The app claim, recorded on the audit row below. Ownership itself is decided
     # before this handler runs, by the per-slot checkpoint (slot_ownership.py),
@@ -141,12 +164,20 @@ async def api_chat_slot_regenerate(request: web.Request) -> web.Response:
     if refusal is not None:
         return refusal
 
+    # The stored Ultra Mode pause is read (off the loop) before the pause
+    # check under the lock, so a paused crew's history is not rewritten
+    # right after a restart.
+    from kiro_crew import crew_pause as _crew_pause
+
+    await _crew_pause.ensure_loaded()
     async with slot._lock:
         if request_app and state._slots.get(name) is not slot:
             return slot_not_found()
         busy = _destructive_history_busy(slot)
         if busy is not None:
             return busy
+        if _crew_paused(slot):
+            return _crew_paused_response()
 
         msgs = slot.messages
         ai_idx = -1
@@ -450,12 +481,15 @@ async def api_chat_slot_edit_resend(request: web.Request) -> web.Response:
 
     # Destructive: this truncates and PERSISTS history before the background
     # turn runs, so a failed turn cannot undo it. Unlike an ordinary send, the
-    # readiness latch must be honored BEFORE the mutation.
-    blocked = await reject_if_kiro_unverified(request)
-    if blocked is not None:
-        return blocked
+    # readiness latch must be honored BEFORE the mutation, when that turn signs
+    # in via kiro-cli.
     state: DashboardState = request.app["state"]
     name = request.match_info["slot"]
+    kiro_turn = await rerun_signs_in_via_kiro_cli(state.sessions, state._slots.get(name))
+    if kiro_turn:
+        blocked = await reject_if_kiro_unverified(request)
+        if blocked is not None:
+            return blocked
     slot = state._slots.get(name)
     request_app = request.get("app", "")
     if not slot:
@@ -523,6 +557,12 @@ async def api_chat_slot_edit_resend(request: web.Request) -> web.Response:
             status=400,
         )
 
+    # The stored Ultra Mode pause is read (off the loop) before the pause
+    # check under the lock, so a paused crew's history is not rewritten
+    # right after a restart.
+    from kiro_crew import crew_pause as _crew_pause
+
+    await _crew_pause.ensure_loaded()
     async with slot._lock:
         # Reading the body above was an await, and ``linked_session_key`` can
         # be rebound on an already-live slot by a cron or workflow injection, so
@@ -536,6 +576,8 @@ async def api_chat_slot_edit_resend(request: web.Request) -> web.Response:
         busy = _destructive_history_busy(slot)
         if busy is not None:
             return busy
+        if _crew_paused(slot):
+            return _crew_paused_response()
 
         # The session whose native resume identity the discard below clears.
         # Resolved here because the two guards that follow are about THAT
@@ -556,6 +598,14 @@ async def api_chat_slot_edit_resend(request: web.Request) -> web.Response:
         )
         if attached is not None:
             return attached
+        # The probe awaited a store read: a Pause all that landed meanwhile would
+        # drop the edited turn at dispatch after the history was already cut.
+        if _crew_paused(slot):
+            return _crew_paused_response()
+        if not kiro_turn:
+            signed_out = refuse_rerun_after_signed_out_turn(slot)
+            if signed_out is not None:
+                return signed_out
 
         msgs = slot.messages
 

@@ -35,11 +35,11 @@ if TYPE_CHECKING:
         Path,
         _await_cron_fire_time_gate,
         _pre_create_cron_slot,
-        _retire_sessions_on_identity_change,
         agent_sequence_dispatches,
         build_cron_session_context,
         cron_job_env_without_reserved,
         data_home,
+        effective_job_approval_mode,
         live,
         logger,
         provider_model_pin_refused,
@@ -95,7 +95,7 @@ def _cron_extra_env(job: CronJob) -> dict[str, str] | None:
     reason, and the strip set is ``_CRON_RESERVED_ENV_KEYS``.
     """
     env = cron_job_env_without_reserved(job.env)
-    if job.approval_mode == "auto":
+    if effective_job_approval_mode(job.approval_mode) == "auto":
         env["KIROCREW_APPROVAL_MODE"] = "auto"
     return env or None
 
@@ -114,9 +114,12 @@ async def _init_cron(self: GatewayOrchestrator, *, arm: bool = True) -> None:
         # A crewmate's Daily Goal Reminder is not an ordinary cron turn: it
         # runs as one hidden turn in the crewmate's own thread, built from
         # its current goal record (dashboard.goal_reminder).
-        from kiro_crew.dashboard import goal_reminder
+        from kiro_crew.dashboard import goal_reminder, stale_wake
 
-        if goal_reminder.is_reminder_job(job):
+        # The stale-wake job (preview dashboard_stale_wake) takes the same path: it
+        # starts hidden turns in Bots' own threads, so it passes the same gate.
+        is_stale_wake = stale_wake.is_stale_wake_job(job)
+        if is_stale_wake or goal_reminder.is_reminder_job(job):
             # It still starts an agent turn, so it passes the same fire-time
             # governance gate as a message job first: a `capabilities.cron`
             # ceiling tightened after the switch was turned on must stop it.
@@ -144,7 +147,13 @@ async def _init_cron(self: GatewayOrchestrator, *, arm: bool = True) -> None:
                     )
                 await self._alert_cron_failure(job, gate_reason, denied=True)
                 return None
-            outcome = await goal_reminder.fire(self.dashboard_state, job)
+            if is_stale_wake:
+                outcome = await stale_wake.fire(self.dashboard_state, self.cron_svc)
+                # A tick every ten minutes that woke no one would fill the
+                # shared run history, so it writes no row.
+                job.quiet_run = stale_wake.quiet_outcome(outcome)
+            else:
+                outcome = await goal_reminder.fire(self.dashboard_state, job)
             # The run's summary in the job's history: a check-in delivers
             # nothing itself, so without it a skip ("the mate is busy") would
             # read as a success that said nothing, silent job or not.
@@ -348,20 +357,6 @@ async def _cron_capture(self: GatewayOrchestrator, job: CronJob) -> _CronCapture
 
     # Snapshot the job before yielding; reloading a cron cannot rebind it.
     cron_agents = list(job.agent_sequence)
-    # Only an agent run writes a transcript under this key; tagging a script or
-    # command job would create an empty transcript on every fire.
-    if (
-        not job.persistent_session
-        and not (job.script or job.command)
-        and not agent_sequence_dispatches(cron_agents)
-    ):
-
-        def tag_run_transcript() -> None:
-            from kiro_crew.history import ConversationLog
-
-            ConversationLog().update_metadata(session_key, {"cron_run": "ephemeral"})
-
-        await asyncio.to_thread(tag_run_transcript)
     # ── Default-agent fallback (LLM jobs) ──
     # A job with no agent_id runs config.agent.default_agent, like the chat
     # transports. Otherwise dispatch falls to AcpClient's "kirocrew" floor,
@@ -794,26 +789,17 @@ async def _acquire_with_model_fallback(
             expected=bound_execution,
         )
 
-    # The dashboard's per-turn account gate, run before acquiring as
-    # _run_chat runs it. A `cron:` key never claims a warm-pool
-    # process, but a fire whose sub-agents are still running skips the
-    # reset in its `finally`, and the next fire of a
-    # `persistent_session` job, or of the same `agent_sequence` step,
-    # reuses that live session. After an account switch or
-    # `kiro-cli logout` outside the dashboard it still holds the
-    # previous account, and a host where only crons run has no
-    # dashboard turn to retire it. Passed as unattended: when the gate
-    # cannot identify the signed-in account (a social login, an
-    # unreadable store) the fire touches no session, since it could
-    # not tell a stale one from a healthy one on any fire.
-    await _retire_sessions_on_identity_change(self.dashboard_state, unattended=True)
+    # The acquire runs the Kiro account check first
+    # (chat_turn.account_identity.install_acquire_identity_check), which
+    # retires a session this job kept alive past an earlier fire when the
+    # account that session holds is not the signed-in one.
     try:
         client, is_new, resumed = await self.sessions.get_or_create(
             key,
             agent=agent_id,
             crew_agent=crew_agent,
             channel_id=job.channel,
-            approval_policy=job.approval_mode,
+            approval_policy=effective_job_approval_mode(job.approval_mode),
             model=job.model or None,
             extra_env=_cron_extra_env(job),
             cwd=cwd,
@@ -849,7 +835,7 @@ async def _acquire_with_model_fallback(
             agent=agent_id,
             crew_agent=crew_agent,
             channel_id=job.channel,
-            approval_policy=job.approval_mode,
+            approval_policy=effective_job_approval_mode(job.approval_mode),
             extra_env=_cron_extra_env(job),
             cwd=cwd,
         )
@@ -901,6 +887,12 @@ async def _start_cron_after_memory_ready(self: GatewayOrchestrator) -> None:
         raise RuntimeError("Cron scheduler cannot start before memory preparation completes")
     await self.cron_svc.start()
     self._cron_armed = True
+    # The stale-wake job follows its preview switch, which the config watcher only
+    # reports when it moves: a switch already on (or off) at start is matched once
+    # here, off the boot path.
+    from kiro_crew.dashboard import stale_wake
+
+    stale_wake.schedule_sync(self.cron_svc)
     if self.sessions:
         self.cron_svc.start_reaper(self.sessions)
     else:

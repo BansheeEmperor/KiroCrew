@@ -83,6 +83,13 @@ _DARWIN_PTI_TOTAL_SYSTEM_OFFSET = 24
 _DARWIN_RUSAGE_INFO_V2 = 2
 _DARWIN_RUSAGE_INFO_V2_SIZE = 16 + 18 * 8
 _DARWIN_RI_PHYS_FOOTPRINT_OFFSET = 16 + 7 * 8
+# ``ri_pageins`` is the fifth uint64 in ``rusage_info_v2`` (user time, system
+# time, the two wakeup counters, then pageins), so 16 bytes of ``ri_uuid`` plus
+# four uint64 fields. It counts the disk pageins this process has taken since it
+# started -- a monotonic process-wide counter, NOT per-thread, and it does NOT
+# include compressor decompressions (macOS serves most memory pressure from the
+# compressor, so this can stay flat while the process stalls paging).
+_DARWIN_RI_PAGEINS_OFFSET = 16 + 4 * 8
 
 _darwin_libproc: Any = None
 _darwin_libproc_loaded = False
@@ -230,6 +237,44 @@ def proc_phys_footprint_bytes_for_pid(pid: int) -> int | None:
     if not IS_MACOS:
         return None
     return _darwin_process_phys_footprint_bytes(pid)
+
+
+def _darwin_process_pageins(pid: int) -> int | None:
+    """macOS ``ri_pageins`` of *pid* via ``proc_pid_rusage``, or None when unreadable.
+
+    The count of disk pageins the process has taken since it started: a
+    monotonic, process-wide counter. It is NOT per-thread, and it does NOT
+    count compressor decompressions, so under memory pressure served entirely
+    from the compressor it can stay flat while the process stalls paging.
+    Needs no entitlement for a same-uid process and never spawns a subprocess.
+    """
+    lib = _darwin_libproc_handle()
+    rusage = getattr(lib, "proc_pid_rusage", None) if lib is not None else None
+    if rusage is None:
+        return None
+    try:
+        buf = ctypes.create_string_buffer(_DARWIN_RUSAGE_INFO_V2_SIZE)
+        if rusage(pid, _DARWIN_RUSAGE_INFO_V2, buf) != 0:
+            return None
+        off = _DARWIN_RI_PAGEINS_OFFSET
+        # Both x86_64 and arm64 macOS are little-endian.
+        return int.from_bytes(buf.raw[off : off + 8], "little")
+    except Exception:
+        return None
+
+
+def proc_pageins_for_pid(pid: int) -> int | None:
+    """``ri_pageins`` of *pid* on macOS; None elsewhere or unreadable.
+
+    The process-wide disk page-in count (see ``_darwin_process_pageins``). Other
+    platforms have no equivalent and answer None. A rise between two readings of
+    one silence is the macOS analogue of the Linux loop-stall watchdog's
+    per-thread major-fault delta -- coarser, because it is process-wide, which
+    is why the deferral it feeds uses a shorter grace cap.
+    """
+    if not IS_MACOS:
+        return None
+    return _darwin_process_pageins(pid)
 
 
 def darwin_libproc_available() -> bool:
@@ -1421,8 +1466,21 @@ def read_proc_status_int(pid: int, label: str, *, proc_root: "Path | None" = Non
     return None
 
 
-def proc_child_map(*, proc_root: "Path | None" = None) -> "dict[int, list[int]] | None":
+def proc_child_map(
+    *, proc_root: "Path | None" = None, session_members: bool = False
+) -> "dict[int, list[int]] | None":
     """Every live process's children, from ONE pass over ``/proc``. Linux only.
+
+    ``session_members=True`` also lists every process under the leader of its
+    session (``stat`` field 6) when that leader is not already its parent. It is
+    for MEASURING a runtime started with ``start_new_session``: a job left behind
+    by a timed-out shell command is reparented to init and drops out of the
+    parent walk, but keeps the runtime's session id. The edge is sound
+    because a process can only enter a session by inheriting it from a process
+    already in it (``setsid`` makes a NEW session, never joins one), so every
+    member descends from the leader, and the kernel does not reuse the leader's
+    pid while the session has members. It is never set on a path that signals
+    anything: those walk real parent edges only.
 
     For the caller that needs the subtrees of MANY roots at once. Asking the
     kernel per root (:func:`_proc_children`) costs one read per THREAD of every
@@ -1491,9 +1549,16 @@ def proc_child_map(*, proc_root: "Path | None" = None) -> "dict[int, list[int]] 
         except OSError:
             # Exited between the listing and the open: it is in no live tree.
             continue
-        ppid = _parse_ppid(raw)
+        tokens = _stat_tokens(raw)
+        ppid = _stat_token_int(tokens, 1)
         if ppid is not None:
             children.setdefault(ppid, []).append(int(name))
+        if session_members:
+            pid = int(name)
+            sid = _stat_token_int(tokens, 3)
+            # sid 0 is a kernel thread; a leader is not its own member.
+            if sid and sid != pid and sid != ppid:
+                children.setdefault(sid, []).append(pid)
     return children
 
 

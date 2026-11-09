@@ -145,7 +145,8 @@ rows in the `chat --list-models` shape — `model_id` / `model_name` / `display_
 select alone, no structured context-window field on any option). The recording is
 process-wide and in memory, like the catalog's prices; a response with no select
 clears nothing. A select is what ONE account is served, so the next account must
-see `auto` alone until its own first session: every `session/new` and
+see `auto` alone until its own first session (a cold read starts one in the
+background; see the cold-read bullet below): every `session/new` and
 `session/load` notes the vault identity fingerprint it WENT OUT under
 (`kas_model_catalog.vault_identity`, `auth/bridge.vault_identity_fingerprint`, read
 off the loop by the KAS harness as it builds the session payload --
@@ -295,7 +296,12 @@ freshness.
 
 The cache is warm for every backend, but from two different sources. For a
 backend in `ACP_BACKENDS_ADVERTISED_MODEL_SELECTION` the client captures the
-`session/new` list. For `kiro` and `kas` the `acp` bucket is filled by
+`session/new` list. That list is entitlement-filtered, and a session born in an
+entitlement race can advertise a degraded subset, so a list that drops a cached id
+is held rather than applied (`refresh_advertised_models(confirm_shrink=True)`):
+the cache keeps its ids and takes only the list's additions until the same list is
+read again, which replaces it. A real downgrade narrows the cache one session later.
+For `kiro` and `kas` the `acp` bucket is filled by
 `GET /api/models` from the `chat --list-models` catalog — the UNFILTERED rows,
 before the deprecation and entitlement narrowing, because a deprecated or
 unentitled id is still a kiro id and dropping it would make a native pin read as
@@ -496,6 +502,20 @@ its own once the cache refreshes with a list that carries it.
   backends preserve exact wire ids (including Pi provider/model ids) without
   substituting the Kiro CLI catalog. A cold cache offers `auto` and a scoped
   configured default until that backend advertises its choices.
+- A cold read does not wait for a chat. When `/api/models` answers cold for the
+  configured harness (an advertised-selection backend with nothing cached, or the
+  KAS bundle route with no recording for the signed-in account),
+  `dashboard/handlers/models_cold_probe.start_cold_model_probe` opens one
+  throwaway background session on the shared runtime (`get_bg_session`, then
+  `destroy`) in a background task, and the request answers at once. Its
+  `session/new` fills the list through the same capture a chat session uses, and
+  a `models_changed` frame (tier 0, empty payload) makes every dashboard re-read
+  `['available-models']`. Nothing persistent is registered, so a later harness
+  switch finds no leftover background entry. One probe runs at a time, at most
+  one per backend per `COLD_PROBE_COOLDOWN_SECS` (300 s), and no frame is sent
+  when the session did not open, so a harness that advertises nothing cannot
+  loop. Only the configured harness on a shared-runtime backend is probed; a Bot
+  picker asking about another harness (`?backend=`) is not.
 - Whether a canonical registry key is a display-only spelling is the backend's
   `model_id_namespace` question, the same field `_wire_model_id` translates
   through: a provider namespace whose registry row carries an id for the key
@@ -566,6 +586,13 @@ its own once the cache refreshes with a list that carries it.
   pick (or waits for an effort write already on the wire) and sends the model
   after it; if the effort write is refused, the model pick aborts rather than
   resetting the owner's previous selection.
+- The model chip draws the session's harness mark (`HarnessLogo`) before the
+  model only when the capability read carries `models_backend`, which
+  `own_models_backend` sets only for a harness outside the install's model
+  namespace (Kiro CLI and KAS share one). The mark's tooltip and the chip's
+  accessible name say `Runs on <harness>` with the `acpBackendName` label. A
+  session on the install's harness, or one whose read has not loaded, shows no
+  mark.
 - The composer chip's marker (`modelChipMarker` in `website/src/lib/model.ts`)
   reads `default` only when the model shown is the Settings default and the slot
   takes it from there, and `auto` when the session was served a different model
@@ -754,7 +781,10 @@ backend shares the `acp` namespace and `model_registry.lacks_acp_id` says the
 registry knows the model but gives it no kiro id, the pin is refused with no
 catalog, because nothing offline can confirm kiro-cli serves it (the registry has
 no kiro id to check against). A live catalog is still asked first and accepts the
-pin if it advertises it.
+pin if it advertises it. So a registry row for a model kiro-cli advertises must
+carry that id in `providers.acp` (Fable 5.1's row carries `claude-fable-5.1`):
+a row without one makes every kiro or KAS pin of that model fail whenever no
+live session has advertised a list, after a gateway restart for example.
 
 ## The one allowed concrete fallback
 

@@ -146,6 +146,18 @@ def _published_queued_by_slot(subs: "SubagentManager | None") -> dict[str, int]:
     return by_slot
 
 
+def _published_queued_reason_by_slot(subs: "SubagentManager | None") -> dict[str, dict]:
+    """Each slot's ``subagents_queued_reason``: the wait label of the newest
+    labelled frame routed to it, so a client that missed that frame (a reload)
+    still shows why the rows wait. Routed like :func:`_published_queued_by_slot`."""
+    if not subs:
+        return {}
+    # circular import: chat_utils imports this module at load time.
+    from kiro_crew.dashboard.chat_utils import subagent_event_slot
+
+    return {subagent_event_slot(p): label for p, label in subs.published_queued_labels().items()}
+
+
 def _attach_slot_parents(
     rows: "list[dict]", resolve_aliases: "Callable[[], dict[str, str] | None] | None" = None
 ) -> None:
@@ -936,6 +948,7 @@ def serialize_slots(
 
     under_construction = getattr(self, "_slots_under_construction", None) or ()
     queued_by_slot = _published_queued_by_slot(subs)
+    queued_reason_by_slot = _published_queued_reason_by_slot(subs)
     saved_creators: dict[str, str] = {}
     for s in self._slots.values():
         if s.key in under_construction:
@@ -949,6 +962,8 @@ def serialize_slots(
         )
         d["subagents_running"] = bool(subs and subs.running_agents_for(effective_session_key(s)))
         d["subagents_queued"] = queued_by_slot.get(s.key, 0)
+        if d["subagents_queued"] and s.key in queued_reason_by_slot:
+            d["subagents_queued_reason"] = queued_reason_by_slot[s.key]
         out.append(d)
     # The slot-key/session-key correspondence the lineage join needs, read the same
     # way ``/api/sessions/memory`` reads it for the Sessions table. Handed over
@@ -984,27 +999,42 @@ def serialize_slots(
 
 
 def _attach_crew_work(self: DashboardState, rows: list[dict]) -> None:
-    """Put each Crew Mode root's open-work summary on its row (``crew_work``).
+    """Put each conductor's open-work summary on its row (``crew_work``).
 
-    Each live root's board is followed (its ``work`` fold kept current, and primed
-    once when nothing is held yet), so a restart does not leave its row on the old
-    reading until its ledger next moves; a root that left the frame is released.
-    The summary reads the held items against this frame's live slots. No I/O.
+    A conductor is a Crew Mode root, or a sub-conductor: a crew member that
+    dispatched another one, whose board holds that session's item. Each live
+    conductor's board is followed (its ``work`` fold kept current, and primed once
+    when nothing is held yet), so a restart does not leave its row on the old
+    reading until its ledger next moves, and a sub-conductor's report reaches its
+    root's worker list as a push. Roots are followed first, so the follow bound
+    never trades a root for a sub-conductor; a conductor that left the frame is
+    released. The summary reads the held items against this frame's live slots.
+    No I/O.
     """
     from kiro_crew import crew_mode
     from kiro_crew.dashboard import crew_work
     from kiro_crew.dashboard.chat_utils import effective_session_key
     from kiro_crew.session_ledger_layout import ledger_key
 
-    roots: list[str] = []
-    for row in rows:
+    dispatchers = {
+        row.get(crew_mode.DISPATCHER_FIELD) for row in rows if row.get(crew_mode.WORKER_FIELD)
+    }
+    conductors = [
+        row
+        for row in rows
+        if row.get(crew_mode.ROOT_FIELD)
+        or (row.get(crew_mode.WORKER_FIELD) and row.get("key") in dispatchers)
+    ]
+    conductors.sort(key=lambda row: not row.get(crew_mode.ROOT_FIELD))
+    followed: list[str] = []
+    for row in conductors:
         key = row.get("key")
-        if not isinstance(key, str) or not row.get(crew_mode.ROOT_FIELD):
+        if not isinstance(key, str):
             continue
         slot = self._slots.get(key)
         if slot is None:
             continue
-        roots.append(key)
+        followed.append(key)
         # The ledger spelling of the session key first: the identity the board's
         # entries are recorded under, and the one primed (``chat-7`` for a dashboard
         # slot, the channel key for a channel one). The raw key is followed too.
@@ -1013,7 +1043,7 @@ def _attach_crew_work(self: DashboardState, rows: list[dict]) -> None:
         summary = crew_work.summary_for_state(key, self)
         if summary is not None:
             row[crew_work.CREW_WORK_FIELD] = summary
-    crew_work.retain(roots)
+    crew_work.retain(followed)
 
 
 def serialize_slot_views(

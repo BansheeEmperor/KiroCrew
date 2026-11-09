@@ -36,9 +36,22 @@ import { uiLocation } from '../../uiLocations/uiLocation'
 import { copyWithOutcome } from '../../utils/clipboard'
 import { SECRETS_GUIDE_ROUTING_URL } from '../../utils/docsLink'
 import { recordError, type ErrorReport } from '../../utils/errorReport'
+import { safeGetSessionItem, safeSetSessionItem } from '../../utils/safeStorage'
 import { guideAnchor } from '../../uiLocations/targetRegistry'
 async function fetchServers(): Promise<McpServer[]> {
   return await api.mcpServers()
+}
+
+// The server filter and the servers whose tool lists are open, kept for the
+// browser session. Not the URL: the sidebar's Customize entry reopens
+// `/capabilities` with no query string, so URL state would not survive the trip
+// to a chat and back that it exists for.
+const MCP_LIST_VIEW_KEY = 'kirocrew:mcp-servers-list-view'
+function loadListView(): { q: string; open: string[] } {
+  try {
+    const saved = JSON.parse(safeGetSessionItem(MCP_LIST_VIEW_KEY) || '{}')
+    return { q: typeof saved.q === 'string' ? saved.q : '', open: Array.isArray(saved.open) ? saved.open : [] }
+  } catch { return { q: '', open: [] } }
 }
 
 // A scope key: the core scopes 'kirocrew' / 'kiroGlobal', or a provider scope
@@ -496,14 +509,18 @@ export default function McpTab({ onManagedProviderClick }: McpTabProps = {}) {
   // the SAME chat guidance a non-registry row shows — chat is again the only
   // authorize prompt (see useConnectionsUi docstring).
   const connectionsUi = useConnectionsUiEnabled()
-  const [mcpFilter, setMcpFilter] = useState('')
+  const [savedView] = useState(loadListView)
+  const [mcpFilter, setMcpFilter] = useState(savedView.q)
   // Multi-provider server browser (Add Server button) — discovery lives in
   // the modal so the installed config stays the page's primary content.
   const [browserOpen, setBrowserOpen] = useState(false)
   // Manual JSON management: add-custom modal + per-server spec editor.
   const [customOpen, setCustomOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<string | null>(null)
-  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
+  const [expandedTools, setExpandedTools] = useState<Set<string>>(() => new Set(savedView.open))
+  useEffect(() => {
+    safeSetSessionItem(MCP_LIST_VIEW_KEY, JSON.stringify({ q: mcpFilter, open: [...expandedTools] }))
+  }, [mcpFilter, expandedTools])
   const [pending, setPending] = useState<Record<string, PendingChange>>({})
   // Per-server per-tool pending overrides.  Key = server name, value = map
   // from tool name to desired enabled state.  Staged via the same Apply
@@ -801,11 +818,12 @@ export default function McpTab({ onManagedProviderClick }: McpTabProps = {}) {
             <AlertTriangle className="lucide-inline" /> {i18nT('pages.overview.mcpTab.pending_change', { count: pendingCount })}
             <span className="ml-2 text-muted">{i18nT('pages.overview.mcpTab.apply_commits_to_kirocrew_mcp_json_provider_glob')}</span>
           </div>
+          {/* The stock Btn is transparent, so on the warn tint it has no edge until hovered. */}
           <div className="flex gap-2">
-            <Btn onClick={() => apply.mutate()} disabled={apply.isPending}>
+            <Btn onClick={() => apply.mutate()} disabled={apply.isPending} className="border-border-strong bg-bg-elevated">
               {apply.isPending ? <><Zap className="lucide-inline animate-pulse" /> {i18nT('pages.overview.mcpTab.applying')}</> : <><Zap className="lucide-inline" /> {i18nT('pages.overview.mcpTab.apply')}</>}
             </Btn>
-            <Btn onClick={discard} disabled={apply.isPending}><X className="lucide-inline" /> {i18nT('pages.overview.mcpTab.discard')}</Btn>
+            <Btn onClick={discard} disabled={apply.isPending} className="border-border-strong bg-bg-elevated"><X className="lucide-inline" /> {i18nT('pages.overview.mcpTab.discard')}</Btn>
           </div>
         </div>
       )}
@@ -1044,7 +1062,9 @@ export default function McpTab({ onManagedProviderClick }: McpTabProps = {}) {
                             : mcpStatusLabel(s.status, mcpAuthState(s))}
                       </Badge>
                       {(() => {
-                        const hint = mcpStatusHint(s.status, s.name, mcpAuthState(s), s.probeFailing === true, notProbedReason)
+                        // The signed-in tip names Kiro CLI's sign-in, which a Crew-held row does not use.
+                        const hint = s.authCrewHeld && mcpAuthState(s) === 'signed_in' ? undefined
+                          : mcpStatusHint(s.status, s.name, mcpAuthState(s), s.probeFailing === true, notProbedReason)
                         return hint ? <InfoTip text={hint} placement="top" /> : null
                       })()}
                     </span>
@@ -1112,6 +1132,24 @@ export default function McpTab({ onManagedProviderClick }: McpTabProps = {}) {
                       </div>
                     )
                   ))}
+                  {s.agentDropped && (
+                    /* The agent never got this server, whatever the probe said:
+                       the rebuild could not find its program. Plain words and the
+                       next step, since the only other record is the gateway log. */
+                    <div className="text-warn text-[12px] break-words" data-testid="mcp-agent-dropped">
+                      <AlertTriangle className="lucide-inline" />{' '}
+                      {i18nT('pages.overview.mcpTab.agent_dropped_not_found', { command: s.agentDropped.command })}
+                      <span className="block mt-0.5">
+                        {i18nT('pages.overview.mcpTab.agent_dropped_fix', {
+                          page: [
+                            i18nT('nav.agent_capabilities'),
+                            i18nT('pages.capabilitiesPage.connections_label'),
+                            i18nT('pages.connectionsPage.mcp_servers'),
+                          ].join(' → '),
+                        })}
+                      </span>
+                    </div>
+                  )}
                   {notProbedReason && (
                     /* Warn tone, not the error red: no probe ran, so nothing
                        failed, but the server stays off until the reason is
@@ -1152,7 +1190,7 @@ export default function McpTab({ onManagedProviderClick }: McpTabProps = {}) {
                           scopes). Signing in again is the remedy the row can offer. */}
                       {!!s.authChallenge && !s.headers && signInTarget && (
                         <span className="flex flex-col items-start gap-1 mt-1">
-                          <McpRowSignIn target={signInTarget} serverName={s.name} again kasChatNote={kasChatNote} />
+                          <McpRowSignIn target={signInTarget} serverName={s.name} again kasChatNote={kasChatNote && !s.authCrewHeld} />
                           <span className="text-muted text-[12px]">{i18nT('pages.overview.mcpTab.sign_in_again_hint')}</span>
                         </span>
                       )}
@@ -1173,7 +1211,7 @@ export default function McpTab({ onManagedProviderClick }: McpTabProps = {}) {
                        IS something the panel can do) and names the probe step that
                        repaints the row. */
                     signInTarget ? (
-                      <McpRowSignIn target={signInTarget} serverName={s.name} kasChatNote={kasChatNote} />
+                      <McpRowSignIn target={signInTarget} serverName={s.name} kasChatNote={kasChatNote && !s.authCrewHeld} />
                     ) : (
                       <span className="text-warn text-[12px]">
                         <Trans
@@ -1182,7 +1220,7 @@ export default function McpTab({ onManagedProviderClick }: McpTabProps = {}) {
                         />
                       </span>
                     )
-                  ) : mcpAuthState(s) === 'signed_in' && signInTarget && !s.tools?.length ? (
+                  ) : mcpAuthState(s) === 'signed_in' && signInTarget && !s.tools?.length && !s.authCrewHeld ? (
                     /* A held grant the probe cannot verify. The probe never uses the
                        session's grant, so it cannot list this server's tools; the
                        line says so, plus that a tool call in chat is the real check,
@@ -1192,7 +1230,7 @@ export default function McpTab({ onManagedProviderClick }: McpTabProps = {}) {
                        on a row that reads Signed in looks like it would undo the
                        sign-in. */
                     <div className="flex flex-col items-start gap-1">
-                      <McpRowSignIn target={signInTarget} serverName={s.name} again kasChatNote={kasChatNote} />
+                      <McpRowSignIn target={signInTarget} serverName={s.name} again kasChatNote={kasChatNote && !s.authCrewHeld} />
                       <span className="text-muted text-[12px]">{i18nT('pages.overview.mcpTab.sign_in_again_no_tools_hint')}</span>
                     </div>
                   ) : s.tools?.length ? (<div>

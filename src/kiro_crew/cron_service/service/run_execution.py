@@ -9,7 +9,7 @@ patch of the member on the class or on an instance reaches every caller. A name
 tests patch on :mod:`kiro_crew.cron`, or one that module defines, is read through
 it on each call (``seams``).
 
-Instance fields written: ``_history``, ``_timeout_alerts``.
+Instance fields written: ``_fired_schedules``, ``_history``, ``_timeout_alerts``.
 
 Instance fields read: ``_dir``, ``_on_job``, ``_push_refresh``, ``_running``, ``_runs``,
 ``_timeout_alert``.
@@ -98,6 +98,9 @@ async def _run_job_isolated(self: CronService, job: CronJob, claim: _RunClaim) -
         # when a result is produced; comparing strings cannot, because a run
         # may reproduce the previous text.
         job.result_produced = False
+        # Likewise the failure marker: a run stopped in its jitter wait counted
+        # no failure, so the merge must not judge the last run's against the limit.
+        job.failure_recorded = False
         # Inside the try: a cancel() during a jitter sleep of up to 59 min
         # must still reach the finally.
         if jitter > 0:
@@ -199,9 +202,13 @@ async def _run_job_isolated(self: CronService, job: CronJob, claim: _RunClaim) -
                     and terminal.last_status != "error"
                     and not (terminal.fire_time_denied or terminal.run_never_started)
                 ):
+                    self._fired_schedules[terminal.id] = terminal.schedule
                     self.defer_removal(terminal.id)
             except Exception:
                 logger.exception("Failed to merge result for job '%s'", job.name)
+            # A quiet run that ended as it should leaves no row: a gateway job
+            # ticking often would otherwise fill the shared, capped index.
+            quiet = terminal.quiet_run and status == "success"
             try:
                 # The row's cause is this run's own. A stopped run with no
                 # outcome carries the previous run's last_error (close_run),
@@ -222,9 +229,10 @@ async def _run_job_isolated(self: CronService, job: CronJob, claim: _RunClaim) -
                     trace=run_result or "",
                     error=row_error,
                 )
-                await self._history.append(record)
-                if self._push_refresh:
-                    self._push_refresh("cron_history")
+                if not quiet:
+                    await self._history.append(record)
+                    if self._push_refresh:
+                        self._push_refresh("cron_history")
             except Exception:
                 logger.exception("Failed to record history for job '%s'", job.name)
         # Re-arm last, after this run's outcome is settled: _next_wake_secs()
@@ -335,6 +343,7 @@ async def _execute(self: CronService, job: CronJob, claim: _RunClaim | None = No
     job.fire_time_denied = False
     job.run_never_started = False
     job.refusal_cannot_clear = False
+    job.quiet_run = False
     # The callback only increments `_transient_attempts`; this method reads,
     # clears and persists it, in a `finally` so a cancelled run cannot leak a
     # half-spent retry budget into the next run.

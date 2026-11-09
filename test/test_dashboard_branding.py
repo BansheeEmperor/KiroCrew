@@ -189,6 +189,29 @@ class TestBrandingEndpoint:
         assert body["bot_name"] == "Jarvis"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stored,served",
+        [
+            ({"editor": "", "host": ""}, {"editor": "", "host": ""}),
+            ({"editor": "vscode", "host": "dev-box"}, {"editor": "vscode", "host": "dev-box"}),
+            # A key three segments deep keeps a hand-edited value the schema
+            # refuses, and both values end up in a link the menus render.
+            ({"editor": "emacs", "host": "dev-box/x?y"}, {"editor": "", "host": ""}),
+            ({"editor": "vscode", "host": ["dev-box"]}, {"editor": "vscode", "host": ""}),
+            ({"editor": "vscode", "host": "-oProxyCommand=x"}, {"editor": "vscode", "host": ""}),
+        ],
+    )
+    async def test_branding_serves_only_remote_editor_values_the_schema_accepts(
+        self, stored, served
+    ):
+        from kiro_crew.dashboard.handlers import api_branding
+
+        cfg = KiroCrewConfig(dashboard=DashboardConfig(remote_editor=stored))
+        with patch("kiro_crew.dashboard.handlers.KiroCrewConfig.load", return_value=cfg):
+            resp = await api_branding(MagicMock())
+        assert json.loads(resp.body)["remote_editor"] == served
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("present", [True, False])
     async def test_branding_reports_whether_the_host_has_a_desktop_launcher(self, present):
         # The dashboard offers "Show in file manager" and "Open with default app"
@@ -322,14 +345,9 @@ class TestBrandingReadsTheLiveConfig:
 class TestLogoAssetInvariant:
     """The dashboard-served logo and the PWA 512 icon are the same image.
 
-    ``src/kiro_crew/static/kirocrew-logo.png`` (served at ``/logo.png`` for the
-    sidebar, favicon, and notification avatar) is kept byte-identical to
-    ``website/public/icon-512.png`` (the PWA/manifest 512 icon) by hand — they
-    are two copies of one brand mark. Nothing else asserts that equality, so an
-    icon update that touches one copy and forgets the other would silently ship
-    a mismatched favicon vs. installed-app icon. This guard fails that drift in
-    CI. If the two are intentionally decoupled in future, delete this test in
-    the same change.
+    ``src/kiro_crew/static/kirocrew-logo.png`` (``/logo.png``) and
+    ``website/public/icon-512.png`` are hand-kept copies of one brand mark; this
+    catches an update to only one of them.
     """
 
     def test_logo_matches_pwa_512_icon(self):

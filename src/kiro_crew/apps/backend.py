@@ -61,6 +61,7 @@ from kiro_crew.sandbox import (
     RLIMIT_PROFILE_TOOL,
     _md_notebook_degraded_mask_dirs,
     app_backend_visible_targets,
+    app_declared_mask_targets,
     carveout_shadowed_by_foreign_mask,
     cgroup_scope_argv,
     popen_limited,
@@ -112,6 +113,7 @@ from kiro_crew.apps.backend_runtime.tracking import (  # noqa: E402
     _advance_lifecycle_locked,
     _await_inflight_spawn,
     _health_reconcile_lock,
+    _lifecycle_generation,
     _lock,
     _processes,
     _spawn_publication_owner,
@@ -352,8 +354,14 @@ def start_app_backend(app_name: str) -> AppProcess | None:
     return _start_app_backend(app_name)
 
 
-def _start_app_backend(app_name: str) -> AppProcess | None:
-    """Single-flight spawn implementation without an external lifecycle transition."""
+def _start_app_backend(
+    app_name: str, *, _untracked_at: tuple[int, str] | None = None
+) -> AppProcess | None:
+    """Single-flight spawn implementation without an external lifecycle transition.
+
+    ``_untracked_at`` (the backstop's snapshot) spawns only while the app is still
+    untracked at that lifecycle generation, checked under the reservation's own lock.
+    """
     manifest = get_app_manifest(app_name)
     if not manifest or not manifest.backend.entryPoint:
         return None
@@ -361,6 +369,11 @@ def _start_app_backend(app_name: str) -> AppProcess | None:
     await_inflight = False
     spawn_placeholder: AppProcess | None = None
     with _lock:
+        if _untracked_at is not None and (
+            app_name in _processes
+            or _lifecycle_generation.get(app_name, (0, _LIFECYCLE_START)) != _untracked_at
+        ):
+            return None
         if app_name in _processes:
             existing = _processes[app_name]
             # Already running (spawned proc alive, OR an adopted external instance) — reuse.
@@ -767,7 +780,7 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
     # start an app on a host that is running perfectly well.
     if central_ceiling_installed():
         _platform_extra[POLICY_CACHE_ONLY_ENV] = "1"
-        # An enterprise child adopts only the cache for the profile this gateway is
+        # An LTS child adopts only the cache for the profile this gateway is
         # pinned to; minimal_env() would otherwise drop the pin it inherits.
         from kiro_crew.platform.enterprise_policy_fetch import PROFILE_PIN_ENV
 
@@ -789,18 +802,6 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
     for _k, _v in os.environ.items():
         if (_k in _grant_env_names and _v) or (_grant_env_prefixes and _k.startswith(_grant_env_prefixes)):
             _platform_extra[_k] = _v
-    # The port the gateway ACTUALLY bound (``dashboard.server._export_bound_port``),
-    # handed only to a backend whose host grants ask for it (``bound_port``): one that
-    # calls back into the gateway. Scoped by app because no other backend has a
-    # consumer, and ``pod/runtime.py`` deliberately scrubs this variable from spawns
-    # that must not aim at the live gateway. Not a secret: it is the port every
-    # dashboard client already connects to, and the gateway's own auth governs what a
-    # caller may do there. Absent (a foreground gateway before its site is up, or a
-    # test) it is not passed and the backend degrades as documented.
-    if app_name in _host_grants.bound_port_apps():
-        _bound = os.environ.get("KIROCREW_BOUND_PORT", "")
-        if _bound.isdigit():
-            _platform_extra["KIROCREW_BOUND_PORT"] = _bound
     env = minimal_env(
         PORT=str(port),
         KIROCREW_APP_NAME=app_name,
@@ -1221,6 +1222,10 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
     _visible: tuple[str, ...] = ()
     if is_builtin_app(app_root=execution_path, app_name=app_name):
         _visible = app_backend_visible_targets(app_name)
+    # The masks this app declares in ``credentialMasks`` hide its own files, under its own
+    # data directory, from every other spawn; its backend is their reader. Only the
+    # declaration of the code this spawn executes is lifted, on the same provenance.
+    _visible = _visible + app_declared_mask_targets(app_name, builtin=_admitted_builtin)
     if _shipped_md_notebook:
         # Move legacy Notes state into the state directory before the backend reads it.
         # Spawn prep runs the same move on sandboxed hosts; this call covers a host with no
@@ -1718,10 +1723,13 @@ if _typing.TYPE_CHECKING:
         _app_activation_denied,
         _BackendShutdownEvent,
         _gateway_shutdown_event,
+        _keep_down,
         _read_installed,
         _restart_exited_backend,
         _settle_superseding_start,
         app_admission_denied,
+        revive_lost_app_backends,
+        shipped_builtin_app_root,
         shutdown_event,
     )
     from kiro_crew.apps.backend_runtime.stale_reap import (  # noqa: F401
@@ -1734,7 +1742,6 @@ if _typing.TYPE_CHECKING:
         _start_backends_concurrently,
         concurrent,
         list_apps,
-        shipped_builtin_app_root,
         start_enabled_app_backends,
     )
     from kiro_crew.apps.backend_runtime.supervision import (  # noqa: F401
@@ -1766,7 +1773,6 @@ if _typing.TYPE_CHECKING:
         _LIFECYCLE_STOP,
         ContextVar,
         Iterator,
-        _lifecycle_generation,
         _restart_attempts,
         contextlib,
         dataclass,

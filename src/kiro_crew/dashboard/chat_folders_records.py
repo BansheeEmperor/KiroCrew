@@ -17,6 +17,8 @@ from typing import Any
 
 from aiohttp import web
 
+from kiro_crew.config.loader import KiroCrewConfig, config_dir
+from kiro_crew.config.resolution import DEGRADED_WHOLE_CONFIG
 from kiro_crew.dashboard.chat_folder_order import next_folder_order
 from kiro_crew.dashboard.chat_folders_icons import _is_single_emoji, _is_valid_folder_color
 from kiro_crew.dashboard.chat_folders_paths import (
@@ -36,6 +38,7 @@ from kiro_crew.dashboard.token_auth import (
 )
 from kiro_crew.instances.crew_ref import clean_crew_ref
 from kiro_crew.messaging.link import is_channel_session_key
+from kiro_crew.owner_only_files import OWNER_ONLY_FILE_MODE
 from kiro_crew.sel import sel
 
 logger = logging.getLogger("kiro_crew.dashboard.chat_folders")
@@ -59,6 +62,30 @@ MAX_CHAT_FOLDERS = 500
 #: collapsing it to look past it, or a drag that renumbers its siblings. They are
 #: also the only fields a mate's home folder takes from anyone.
 LAYOUT_ONLY_FIELDS = frozenset({"collapsed", "order"})
+
+#: The longest ``default_prompt`` a folder keeps. Every slots frame carries the
+#: whole folder list, so this bounds what each folder adds to every frame.
+MAX_FOLDER_DEFAULT_PROMPT_CHARS = 4000
+
+#: The data-home file :func:`migrate_folder_member_labels` writes once it has run.
+FOLDER_MEMBER_LABELS_MARKER = "folder_member_labels_migrated"
+
+
+def clean_folder_default_prompt(raw: object) -> str:
+    """A folder's ``default_prompt`` as stored, kept as typed: ``None`` or blank is ``""``.
+
+    Raises:
+        FolderCreateError: a non-string, or one longer than
+            :data:`MAX_FOLDER_DEFAULT_PROMPT_CHARS`.
+    """
+    if raw is None:
+        return ""
+    if not isinstance(raw, str) or len(raw) > MAX_FOLDER_DEFAULT_PROMPT_CHARS:
+        raise FolderCreateError(
+            f"default_prompt must be text of at most {MAX_FOLDER_DEFAULT_PROMPT_CHARS} characters",
+            "default_prompt_invalid",
+        )
+    return raw if raw.strip() else ""
 
 
 def _validate_folder_tags(state: DashboardState, raw: Any) -> tuple[list[str] | None, str | None]:
@@ -104,7 +131,7 @@ def _folder_history_counts(state: DashboardState) -> dict[str, int]:
     counts: dict[str, int] = {}
     if not state.conversation_log:
         return counts
-    for session in state.conversation_log.list_sessions():
+    for session in state.conversation_log.list_sessions_indexed():
         fid = session.get("folder_id")
         if fid:
             counts[fid] = counts.get(fid, 0) + 1
@@ -166,7 +193,7 @@ def archived_session_names_in_folders(
     if not folder_ids or not log:
         return set()
     names: set[str] = set()
-    for session in log.list_sessions():
+    for session in log.list_sessions_indexed():
         if session.get("folder_id") not in folder_ids:
             continue
         key = ledger_key(str(session.get("key") or ""))
@@ -501,6 +528,7 @@ async def create_folder_record(
     project_dir: str = "",
     default_agent: str = "",
     default_destination_crew: str = "",
+    default_prompt: object = "",
     color: str = "",
     icon: str = "",
     request_app: str = "",
@@ -552,7 +580,8 @@ async def create_folder_record(
     Raises:
         FolderCreateError: if the folder was refused (unusable name, missing
             parent, unusable ``project_dir``, unknown color, non-emoji
-            ``icon``, or a ``unique_project_dir`` collision).
+            ``icon``, an unusable ``default_prompt``, or a
+            ``unique_project_dir`` collision).
         FolderOwnershipError: if an app tried to nest under a folder it does
             not own.
         FolderMateHomeLockedError: if the parent is a mate's home folder, or
@@ -600,6 +629,7 @@ async def create_folder_record(
         # Same contract shape as ``color``: a stored icon is always a single
         # grapheme-exact emoji, whichever caller created the folder.
         raise FolderCreateError("icon must be a single emoji", "icon_invalid")
+    default_prompt = clean_folder_default_prompt(default_prompt)
     # Off-loop like project_dir: each entry's realpath + isdir + sensitive-path
     # scan touches the filesystem, and the scaffold calls this once per folder.
     resolved_steering: list[str] = []
@@ -629,6 +659,8 @@ async def create_folder_record(
         folder["color"] = color
     if icon:
         folder["icon"] = icon
+    if default_prompt:
+        folder["default_prompt"] = default_prompt
     if resolved_steering:
         # Omitted when empty, like ``color``/``tags``: "absent means none" stays
         # the single on-disk representation.
@@ -729,6 +761,47 @@ async def create_folder_record(
     return folder
 
 
+async def migrate_folder_member_labels(state: DashboardState, cfg: KiroCrewConfig) -> None:
+    """Rewrite each folder Default agent that holds a crewmate's label to that crewmate's key.
+
+    The folder picker once listed crewmates by key, so a person who knew a crewmate
+    by its label saved the label, and the create route binds a label as a template,
+    without the crewmate's model, workspace or memory. A label that is itself a key,
+    or that two crewmates share, is left as saved. Runs once per data home
+    (:data:`FOLDER_MEMBER_LABELS_MARKER`): a template picked later under the same
+    name is the person's choice and stays. A config whose crewmates could not be
+    read, or a failed write, leaves the marker unwritten, so the next start tries
+    again. Never raises.
+    """
+    marker = config_dir() / FOLDER_MEMBER_LABELS_MARKER
+    try:
+        if {DEGRADED_WHOLE_CONFIG, "agents"} & cfg.degraded_sections:
+            return
+        if await asyncio.to_thread(marker.exists):
+            return
+        shown_by: dict[str, list[str]] = {}
+        for key, agent in cfg.agents.items():
+            if agent.display_name and agent.display_name not in cfg.agents:
+                shown_by.setdefault(agent.display_name, []).append(key)
+
+        def _rewrite(folders: list[dict[str, Any]]) -> tuple[bool, bool]:
+            changed = False
+            for folder in folders:
+                keys = shown_by.get(str(folder.get("default_agent") or ""), [])
+                if len(keys) == 1:
+                    folder["default_agent"] = keys[0]
+                    changed = True
+            return changed, changed
+
+        if await state.mutate_folders(_rewrite):
+            state.push_slots_update()
+        await asyncio.to_thread(marker.touch, mode=OWNER_ONLY_FILE_MODE)
+    except Exception:
+        logger.warning(
+            "folder Default agent migration failed; it runs again next start", exc_info=True
+        )
+
+
 def _caller_reaches_a_channel(request: web.Request, caller_key: str) -> bool:
     """Whether a channel can deliver turns into the session behind *caller_key*.
 
@@ -771,4 +844,31 @@ def _agent_in_channel_reachable_session(request: web.Request) -> bool:
     """A conversation resumed from a channel keeps the session's dashboard: key."""
     return _audit_origin(request)[0] != "dashboard" and _caller_reaches_a_channel(
         request, request.headers.get("X-Session-Key", "").strip()
+    )
+
+
+def refuse_channel_reachable_agent(
+    request: web.Request, operation: str, resources: str = ""
+) -> web.Response | None:
+    """The 403 for an agent reshaping the person's sidebar from a session a channel can
+    drive, or ``None``. The person's browser is never refused."""
+    if not _agent_in_channel_reachable_session(request):
+        return None
+    sel().log_api_access(
+        caller=_audit_origin(request)[1],
+        operation=operation,
+        outcome="denied",
+        source="channel_containment",
+        resources=resources,
+        error="agent sidebar write from a session a channel can drive",
+    )
+    return web.json_response(
+        {
+            "error": (
+                "this session can receive turns from a channel conversation, so an "
+                "agent cannot change the person's sidebar from it"
+            ),
+            "code": "channel_reachable_caller",
+        },
+        status=403,
     )

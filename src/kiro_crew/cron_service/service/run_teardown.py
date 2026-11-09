@@ -31,7 +31,7 @@ from kiro_crew.cron_service.claims import _RunClaim
 from kiro_crew.cron_service.execution import run_parks_one_shot
 from kiro_crew.cron_service.model import _JOB_TIMEOUT_SECS
 from kiro_crew.executors import subprocess_executor
-from kiro_crew.process_identity import failure_name, with_kill_failure
+from kiro_crew.process_identity import MAX_ERROR_DETAIL_LEN, failure_name, with_kill_failure
 
 if TYPE_CHECKING:
     from kiro_crew.cron import CronPauseNotSaved, CronService
@@ -45,17 +45,28 @@ logger = logging.getLogger("kiro_crew.cron")
 
 #: How often the reaper also removes stale per-run transcripts of stateless jobs.
 _RESIDUE_PRUNE_INTERVAL_SECS = 3600.0
+#: The wait before the first pass, and before the next one while a pass filled
+#: its cap: a pile left by an older build drains in minutes, not over days.
+_RESIDUE_PRUNE_SOON_SECS = 300.0
 
 
-async def _prune_run_residue(service: CronService, now: float) -> None:
-    """Remove stale per-run transcripts off the loop; never fail the reaper."""
-    from kiro_crew.cron_service.run_residue import prune_stale_run_transcripts
+async def _prune_run_residue(service: CronService, now: float) -> bool:
+    """Remove stale per-run transcripts off the loop; never fail the reaper.
+
+    Returns True when the pass filled its cap, so more may be waiting.
+    """
+    from kiro_crew.cron_service.run_residue import (
+        RUN_TRANSCRIPT_PRUNE_CAP,
+        prune_stale_run_transcripts,
+    )
 
     active = service.active_session_keys()
     try:
-        await asyncio.to_thread(prune_stale_run_transcripts, active_keys=active, now=now)
+        removed = await asyncio.to_thread(prune_stale_run_transcripts, active_keys=active, now=now)
     except Exception:
         logger.debug("Reaper: cron run transcript prune failed", exc_info=True)
+        return False
+    return removed >= RUN_TRANSCRIPT_PRUNE_CAP
 
 
 def start_reaper(self: CronService, sessions: SessionManager) -> None:
@@ -74,16 +85,17 @@ async def _reaper_loop(self: CronService) -> None:
     """
     from kiro_crew import cron as seams  # the facade holds the patched names; it imports us
 
-    # The first residue pass waits a full interval, so it never adds to the
+    # The first residue pass waits a few minutes, so it never adds to the
     # startup burst of a gateway restoring its sessions.
-    next_residue_prune = seams.time.monotonic() + _RESIDUE_PRUNE_INTERVAL_SECS
+    next_residue_prune = seams.time.monotonic() + _RESIDUE_PRUNE_SOON_SECS
     while True:
         await asyncio.sleep(seams._REAPER_INTERVAL)
         now = seams.time.time()
         now_mono = seams.time.monotonic()
         if now_mono >= next_residue_prune:
-            next_residue_prune = now_mono + _RESIDUE_PRUNE_INTERVAL_SECS
-            await _prune_run_residue(self, now)
+            backlog = await _prune_run_residue(self, now)
+            wait = _RESIDUE_PRUNE_SOON_SECS if backlog else _RESIDUE_PRUNE_INTERVAL_SECS
+            next_residue_prune = seams.time.monotonic() + wait
         # Snapshot the job list CACHE-ONLY — no store lock, no _sync, no
         # disk I/O on the loop (same rationale as list_jobs/get_job). The
         # batch-remove worker (remove_jobs → asyncio.to_thread) builds a
@@ -333,6 +345,14 @@ async def _force_reap(
                     # when the passes never ran or raised.
                     "session_keys": ended,
                     "elapsed": int(elapsed),
+                    # What the kill could not do -- each process it left running,
+                    # named -- on the row that says ``failed``, as the sub-agent
+                    # reaper's row carries it.
+                    **(
+                        {"kill_failed": kill_failed[:MAX_ERROR_DETAIL_LEN]}
+                        if kill_failed is not None
+                        else {}
+                    ),
                 },
             )
         except Exception:
@@ -604,6 +624,11 @@ async def cancel(self: CronService, job_id: str) -> bool:
                     # signal yet. Auditing that second case as
                     # "killed_subprocess" asserted a kill that never happened.
                     "cancellation_accepted": killed_proc,
+                    **(
+                        {"kill_failed": kill_failed[:MAX_ERROR_DETAIL_LEN]}
+                        if kill_failed is not None
+                        else {}
+                    ),
                 },
             )
         except Exception:

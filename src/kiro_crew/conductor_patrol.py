@@ -43,11 +43,23 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-#: Inside the conductor's 300..900 s band; with the two bounds below it passes
-#: the goal-conductor skill's ``patrol_budget.py check`` (pinned by a test).
+#: Inside the conductor's 300..900 s band. No cycle cap: the patrol runs until the
+#: conductor stops it after its final report, or a person stops it. Its one bound is
+#: the runaway backstop :func:`patrol_max_runtime_secs` (``rfc-permanent-patrol.md``).
 PATROL_INTERVAL_SECS = 600
-PATROL_MAX_CYCLES = 300
-PATROL_MAX_RUNTIME_SECS = 86400
+PATROL_MAX_CYCLES = 0
+
+
+def patrol_max_runtime_secs() -> int:
+    """The patrol's runtime: the operator's ``monitoring.max_runtime_secs`` ceiling.
+
+    Read at arm time and at the member-thread admission check alike, so both agree
+    whatever ceiling the operator configured (7 days as shipped).
+    """
+    from kiro_crew.monitoring.limits import runtime_ceiling_secs
+
+    return runtime_ceiling_secs()
+
 
 PATROL_WATCH = "work-ledger"
 
@@ -58,12 +70,39 @@ PATROL_CALLER = "conductor-patrol"
 PATROL_MESSAGE = (
     "Conductor patrol (armed by the gateway when you dispatched work and had no "
     "active loop). Run work_ledger_read with compact=true. For each item with status "
-    "done, read its bar with a full work_ledger_read, pipe the done-only "
-    "accept_batch into the goal-conductor skill's accept_eval.py, and record the "
+    "done, read its bar with a full work_ledger_read, pass the done-only "
+    "accept_batch to the accept_eval tool, and record the "
     "answer with work_ledger_record action=verdict. Answer question and blocked "
-    "items with session_send. Ignore progress. Tune this loop with "
-    "monitor_update; call autonudge_stop when every item is terminal or the user "
-    "says stop."
+    "items with session_send. Ignore progress. This loop has no cycle cap; its one "
+    "bound is the 7-day runaway backstop. When every item is terminal or the user "
+    "says stop, first send "
+    "the user one final report (what landed, what is left, links); then, in a "
+    "later step, call autonudge_stop."
+)
+
+#: Every text the gateway has armed a default patrol with. A persisted loop keeps
+#: the text it was armed with, so the fire-time check accepts each one; the old
+#: text names the evaluator script, which still runs (by shell) for its reader.
+SHIPPED_PATROL_MESSAGES: frozenset[str] = frozenset(
+    {
+        PATROL_MESSAGE,
+        "Conductor patrol (armed by the gateway when you dispatched work and had no "
+        "active loop). Run work_ledger_read with compact=true. For each item with status "
+        "done, read its bar with a full work_ledger_read, pass the done-only "
+        "accept_batch to the accept_eval tool, and record the "
+        "answer with work_ledger_record action=verdict. Answer question and blocked "
+        "items with session_send. Ignore progress. Tune this loop with "
+        "monitor_update; call autonudge_stop when every item is terminal or the user "
+        "says stop.",
+        "Conductor patrol (armed by the gateway when you dispatched work and had no "
+        "active loop). Run work_ledger_read with compact=true. For each item with status "
+        "done, read its bar with a full work_ledger_read, pipe the done-only "
+        "accept_batch into the goal-conductor skill's accept_eval.py, and record the "
+        "answer with work_ledger_record action=verdict. Answer question and blocked "
+        "items with session_send. Ignore progress. Tune this loop with "
+        "monitor_update; call autonudge_stop when every item is terminal or the user "
+        "says stop.",
+    }
 )
 
 #: Rides the bind reply whenever no ``work-ledger`` watch is active after the
@@ -144,7 +183,7 @@ def is_fixed_patrol_payload(loop: Any) -> bool:
         # Gated, as armed: an ungated row would hand delivery to the structured
         # monitor controller, whose envelope carries text this grant never covered.
         and getattr(loop, "gate", False) is True
-        and getattr(loop, "message", None) == PATROL_MESSAGE
+        and getattr(loop, "message", None) in SHIPPED_PATROL_MESSAGES
         and not getattr(loop, "banner", "")
         and not getattr(loop, "judge", None)
         and monitor is not None
@@ -339,7 +378,7 @@ async def ensure_patrol(
             message=PATROL_MESSAGE,
             idle_secs=PATROL_INTERVAL_SECS,
             max_cycles=PATROL_MAX_CYCLES,
-            max_runtime_secs=PATROL_MAX_RUNTIME_SECS,
+            max_runtime_secs=patrol_max_runtime_secs(),
             watch=PATROL_WATCH,
             gate=True,
             # The audit tag: which dispatch route armed this patrol.

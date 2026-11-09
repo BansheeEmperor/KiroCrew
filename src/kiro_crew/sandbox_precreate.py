@@ -137,6 +137,15 @@ _CREW_PRECREATE_READONLY_DIR_LEAVES: tuple[str, ...] = (
     # The redaction allow-list, on the same argument: no file means no host
     # allowed, which is what an empty directory means too, and the bind is live.
     "redaction-allow",
+    # Host-exec authorization grants (``apps/host_exec_grants.py``). Absent until the
+    # first host-exec app is enabled, so without pre-creation the read-only seal is
+    # skipped on every install that has not enabled one -- and a sandboxed shell could
+    # then create the directory and plant its own grant marker, which the pod gate
+    # reads as authorization to run code outside the sandbox. An empty directory reads
+    # as "no app granted", exactly as an absent one does, and the bind is live so a
+    # grant the gateway writes later is seen. Pre-created here as a mount point so it
+    # cannot be renamed around either.
+    "host-exec-grants",
     # Pi's gate launcher and sealed extension. Materialised here rather than only by
     # the adapter so the directory is a read-only mountpoint before ANY sandbox starts,
     # including the first pi spawn on a fresh install.
@@ -145,6 +154,8 @@ _CREW_PRECREATE_READONLY_DIR_LEAVES: tuple[str, ...] = (
     # missing one, so an empty directory means what an absent one does, and the
     # bind is live, so a snapshot the gateway writes later is seen.
     "kas-mcp-launch",
+    # Connection bridge snapshots, for the same reasons.
+    "crew-oauth-bridge",
     # Empty directories are absent-equivalent to the approval and resolution readers.
     # Pre-creation gives Linux concrete bind targets on a fresh install.
     "mcp-launch-approvals",
@@ -194,8 +205,10 @@ _CREW_NOFOLLOW_READONLY_DIR_LEAVES: tuple[str, ...] = (
     "models",
     "kirocrew-bin",
     "redaction-allow",
+    "host-exec-grants",
     "pi-gate",
     "kas-mcp-launch",
+    "crew-oauth-bridge",
     "mcp-launch-approvals",
     "mcp/resolved",
     "template-mcp-additions",
@@ -273,6 +286,11 @@ _DELEGATED_OVERLAP_LEAF_REASONS: "dict[str, tuple[str, str]]" = {
         "sealed redaction allow-list",
         "the agent could allow the host it wants to send conversation data to",
     ),
+    "host-exec-grants": (
+        "sealed host-exec grant directory",
+        "the agent could plant a grant that authorizes running a pod's code outside "
+        "the sandbox without an owner enable",
+    ),
     "pi-gate": (
         "sealed pi gate runtime",
         "the agent could plant the launcher a later pi session execs out of",
@@ -280,6 +298,10 @@ _DELEGATED_OVERLAP_LEAF_REASONS: "dict[str, tuple[str, str]]" = {
     "kas-mcp-launch": (
         "sealed KAS MCP launch snapshots",
         "the agent could choose the command and environment a later MCP server start runs",
+    ),
+    "crew-oauth-bridge": (
+        "sealed Connection bridge snapshots",
+        "the agent could choose the bridge token and port a later Connection bridge uses",
     ),
     "mcp-launch-approvals": (
         "sealed MCP launch approvals",
@@ -598,7 +620,7 @@ _CREW_PRECREATE_HIDDEN_DIR_LEAVES: tuple[str, ...] = (
     # The Web Push stores, written lazily on the first subscribe or key fetch; see
     # its entry in ``_CREW_HIDDEN_LEAVES``.
     "web-push",
-    # The governance cache, masked in every tier and lifted READ-ONLY for an enterprise
+    # The governance cache, masked in every tier and lifted READ-ONLY for an LTS
     # sandbox (``sandbox_tiers.enterprise_policy_cache_view``). Written on the first
     # successful fetch, so a sandbox spawned before then would find no name to mask or
     # seal and could create the directory and plant a ceiling there. An empty directory

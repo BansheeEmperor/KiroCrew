@@ -417,11 +417,12 @@ export function useFolderMutations({ queryClient, setFolderActionError, setFolde
 }) {
   // Folder mutations
   const createFolderMutation = useMutation({
-    mutationFn: (v: { name: string; parentId?: string; projectDir?: string; defaultAgent?: string; defaultDestinationCrew?: string; color?: string; icon?: string; tags?: string[]; steeringDirs?: string[] }) =>
+    mutationFn: (v: { name: string; parentId?: string; projectDir?: string; defaultAgent?: string; defaultDestinationCrew?: string; defaultPrompt?: string; color?: string; icon?: string; tags?: string[]; steeringDirs?: string[] }) =>
       api.createChatFolder(v.name.trim(), v.parentId, {
         project_dir: v.projectDir || undefined,
         default_agent: v.defaultAgent || undefined,
         default_destination_crew: v.defaultDestinationCrew || undefined,
+        default_prompt: v.defaultPrompt || undefined,
         color: v.color || undefined,
         icon: v.icon || undefined,
         tags: v.tags && v.tags.length > 0 ? v.tags : undefined,
@@ -502,7 +503,31 @@ export function useFolderMutations({ queryClient, setFolderActionError, setFolde
     }
     updateFolderMutation.mutate({ id, body: { collapsed: !f.collapsed } })
   }, [folders, updateFolderMutation, connected, queryClient])
-  return { createFolderMutation, deleteFolderMutation, updateFolderMutation, toggleCollapse }
+  // "Collapse all folders": the server closes the whole tree in one write. A
+  // failure changes nothing there, so the settle-time refetch redraws it.
+  const closeAllInCache = useCallback(() => {
+    queryClient.setQueryData<ChatFolder[]>(['chat-folders'], old =>
+      (old ?? []).map(f => f.collapsed ? f : { ...f, collapsed: true }))
+  }, [queryClient])
+  const collapseAllMutation = useMutation({
+    mutationKey: CHAT_FOLDERS_WRITE_KEY,
+    mutationFn: () => api.collapseAllChatFolders(),
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: ['chat-folders'] })
+      closeAllInCache()
+    },
+    onError: (err) => {
+      setFolderActionError((errMessage(err) || i18nT('components.errorBoundary.something_went_wrong')))
+      setFolderOfflineNotice('')
+    },
+    onSettled: () => invalidateFoldersWhenIdle(queryClient),
+  })
+  const collapseAllFolders = useCallback(() => {
+    // Offline it closes the cached tree and sends nothing, as `toggleCollapse` does.
+    if (!connected) closeAllInCache()
+    else collapseAllMutation.mutate()
+  }, [connected, closeAllInCache, collapseAllMutation])
+  return { createFolderMutation, deleteFolderMutation, updateFolderMutation, toggleCollapse, collapseAllFolders }
 }
 
 /** The folder writes, typed once for the owners that call them. */

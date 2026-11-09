@@ -34,6 +34,7 @@ from kiro_crew.apps.registry_pipeline.caches import (
 )
 from kiro_crew.apps.registry_pipeline.checkout import _communicate_with_timeout
 from kiro_crew.apps.registry_pipeline.git_targets import (
+    _FETCH_CAUSE_OTHER,
     _entry_git_url,
     _git_target_is_unsupported,
     _git_url_host,
@@ -46,7 +47,7 @@ from kiro_crew.apps.registry_pipeline.indexes import (
     _apply_configured_branch,
     _fetch_and_cache_external_registry,
     _load_external_registries,
-    _registry_sign_in_refused,
+    _registry_fetch_failure,
 )
 from kiro_crew.apps.registry_pipeline.manifests import _resolve_manifest
 from kiro_crew.apps.registry_pipeline.sources import (
@@ -465,9 +466,13 @@ async def refresh_registries(repo: str | None = None) -> dict[str, Any]:
     Returns ``{ok, refreshed, failed, results, apps, lastSyncedAt}`` where
     ``ok`` is True only if every matched registry refreshed successfully and
     ``results`` carries the per-registry outcome so the UI can distinguish
-    "synced" from "sync failed, serving stale"; a failed row whose clone git
-    refused for credentials also carries ``reason: "auth"`` and the ``host`` from
-    its configured URL, so the UI can name the fix and where it applies. When *repo* is supplied but
+    "synced" from "sync failed, serving stale". Every failed row carries
+    ``cached``: whether an index cache from an earlier successful fetch is still
+    there for the listing to serve, so the UI can tell a registry shown as last
+    synced from one whose apps are missing. A failed row whose failure was
+    classified also carries ``reason`` (``auth``, ``dns``, ``host_key``,
+    ``network`` or ``timeout``) and the ``host`` from its configured URL, so the
+    UI can name the fix and where it applies. When *repo* is supplied but
     matches no configured registry, returns ``ok: False`` with
     ``not_found: True`` so the route can map it to HTTP 404.
     """
@@ -511,9 +516,12 @@ async def refresh_registries(repo: str | None = None) -> dict[str, Any]:
         entries = await _fetch_and_cache_external_registry(reg)
         if entries is None:
             failed.append(display_name)
-            row: dict[str, Any] = {"name": display_name, "ok": False}
-            if _registry_sign_in_refused(reg.repo, reg.branch):
-                row["reason"] = "auth"
+            # The fetch never touches the cache on failure, so the copy read
+            # above is the one the listing serves from.
+            row: dict[str, Any] = {"name": display_name, "ok": False, "cached": prior is not None}
+            cause = _registry_fetch_failure(reg.repo, reg.branch)
+            if cause and cause != _FETCH_CAUSE_OTHER:
+                row["reason"] = cause
                 host = _git_url_host(reg.repo)
                 if host:
                     row["host"] = host
@@ -553,6 +561,13 @@ async def refresh_registries(repo: str | None = None) -> dict[str, Any]:
     # a failing prewarm still propagates exactly as it did inside the loop.
     for reg, entries in fresh:
         await _prewarm_owner_tier_store_assets(reg, entries)
+
+    # An index-tier registry has no prewarm, so the branch tip of an app installed
+    # from one of its versionless rows is read here, after the same expiry.
+    from kiro_crew.apps.installed_app_tips import refresh_installed_tips
+
+    for reg, entries in fresh:
+        await refresh_installed_tips(reg, entries)
 
     # Re-warm so the response's app count reflects post-refresh state (and
     # untouched registries read their still-valid caches).
@@ -1018,13 +1033,28 @@ async def list_catalog_apps() -> list[dict[str, Any]]:
     # Only paid when it can change the answer. With every `git` row already seeded
     # the fetch cannot unlock anything, so the storefront's hot path keeps costing
     # one cached read.
-    fresh_installable: dict[str, dict[str, Any]] = {}
-    if any(
+    #
+    # The fresh fetch and the external-registry rows do not depend on each other:
+    # the external rows are deduplicated against ``reserved_names``, which is
+    # settled above and never reads the fetch. So the two run at the same time,
+    # and the listing waits for the slower one instead of for both in turn.
+    needs_fresh_installable = any(
         row.get("source", {}).get("type") == "git" and row.get("name") not in installable_names
         for row in rows
-    ):
-        fresh_installable = await asyncio.to_thread(_catalog_installable_rows)
-        installable_names |= set(fresh_installable)
+    )
+
+    async def _fresh_installable_rows() -> dict[str, dict[str, Any]]:
+        if not needs_fresh_installable:
+            return {}
+        return await asyncio.to_thread(_catalog_installable_rows)
+
+    installed = await asyncio.to_thread(list_installed_apps)
+    installed_map = {a["name"]: a for a in installed}
+    fresh_installable, (external_rows, external_detected) = await asyncio.gather(
+        _fresh_installable_rows(),
+        _append_external_registry_apps([], reserved_names, installed_map),
+    )
+    installable_names |= set(fresh_installable)
     rows = [
         row
         for row in rows
@@ -1054,17 +1084,13 @@ async def list_catalog_apps() -> list[dict[str, Any]]:
         install_row = seed_by_name.get(name) or fresh_installable.get(name)
         resolved_repositories[name] = _entry_git_url(install_row) if install_row is not None else ""
 
-    installed = await asyncio.to_thread(list_installed_apps)
-    installed_map = {a["name"]: a for a in installed}
     # Probed like every seed row is offline, so an edition app installed outside
     # the app manager reads installed on either path.
     edition_names = {row.get("name") for row in edition_rows}
     detected = await _detect_installed_probe(
         [row for row in rows if row.get("name") in edition_names], installed_map
     )
-    rows, external_detected = await _append_external_registry_apps(
-        rows, reserved_names, installed_map
-    )
+    rows.extend(external_rows)
     detected |= external_detected
     trust_repositories = _trust_repository_bindings(rows, installed_map, resolved_repositories)
     return _apply_trust_fields(

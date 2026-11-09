@@ -10,13 +10,20 @@ An owner of the :mod:`kiro_crew.config.sections` facade; it never imports the fa
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
 from kiro_crew.config.fields import _declared_fields, field_default
 
+logger = logging.getLogger("kiro_crew.config.loader")
+
 _T = TypeVar("_T")
 _ABSENT = object()
+#: (DTO, key, stored value) of each bounded read logged as clamped since the last disk
+#: read of the config files, which clears it. ``load()`` runs the builders on every call,
+#: so a value warns once per read of the file, as its validation warnings do.
+_REPORTED_CLAMPS: set[tuple[type, str, str]] = set()
 
 
 class SectionReader:
@@ -60,9 +67,23 @@ class SectionReader:
         """``coerce(stored-or-default, default, *bounds, **options)`` for *key*.
 
         For the ``_safe_*`` coercer family, whose second argument is the fallback for
-        a value they cannot read: the fallback is the field's default too.
+        a value they cannot read: the fallback is the field's default too. The extra
+        arguments are the coercer's bounds, and a stored value they change is logged.
         """
-        return coerce(self.get(key), self.default(key), *bounds, **options)
+        value, default = self.get(key), self.default(key)
+        result = coerce(value, default, *bounds, **options)
+        if (bounds or options) and key in self._data and result != coerce(value, default):
+            seen = (self._dto, key, repr(value))
+            if seen not in _REPORTED_CLAMPS:
+                _REPORTED_CLAMPS.add(seen)
+                logger.warning(
+                    "Config: %s.%s = %r is outside its allowed range; using %r",
+                    self._dto.__name__,
+                    key,
+                    value,
+                    result,
+                )
+        return result
 
 
 DEFAULT_MODEL = "auto"
@@ -94,8 +115,11 @@ DEFAULT_AUTOCOMPACT_PCT = 70.0
 # a quarter of the range so it cannot widen back into noise.
 CONTEXT_WARN_MARGIN_PCT = 10.0
 # session.pool_size — warm pool OFF by default. Each pooled slot is a full
-# kiro-cli process plus the MCP stdio servers its agent spec spawns (~109 MB per
-# backend), and a non-zero value is also reserved out of the memory term that
+# kiro-cli process plus every MCP stdio server and stub its agent spec spawns,
+# which is hundreds of MB rather than one backend's ~109 MB (a slot carrying a
+# typical operator's MCP set measured ~700 MB of macOS footprint, and the System
+# page's memory breakdown shows the pool's live figure), and a non-zero value is
+# also reserved out of the memory term that
 # sizes the TaskRunner's auto parallel cap
 # (subagent.compute_memory_sized_parallel_cap), so the cost is paid on every host
 # whether or not the pool is ever claimed. Cold start is instead

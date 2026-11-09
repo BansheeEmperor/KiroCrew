@@ -32,8 +32,11 @@ _TOTAL_STEPS = 6
 
 # How often to poll CloudFormation events / the on-box log while launching.
 _PROGRESS_POLL_SECS = 8
-# Indirection so tests can stub the poll sleep.
+# A launch quiet for this long prints the elapsed time, so the wait never looks hung.
+_HEARTBEAT_SECS = 30
+# Indirections so tests can stub the poll sleep and the clock.
 _sleep = time.sleep
+_now = time.monotonic
 
 
 def _deploy_with_progress(
@@ -130,7 +133,9 @@ def _stream_progress(
     instance_id: str,
 ) -> None:
     """Poll + print stack events and on-box bootstrap log until the worker ends."""
+    started = last_output = _now()
     while worker.is_alive():
+        printed = False
         # 1) New stack resource events.
         try:
             for ev in ec2.list_stack_events(tag, profile, region):
@@ -142,11 +147,13 @@ def _stream_progress(
                 marker = "FAILED" in ev["status"]
                 line = f"  {ev['status']:<22} {ev['resource']}"
                 (ui.fail if marker else ui.detail)(line.rstrip())
+                printed = True
                 if ev["reason"] and (marker or "COMPLETE" not in ev["status"]):
                     ui.detail(f"      {ev['reason'][:200]}")
-                if ev["resource"] == "Instance" and not instance_id:
-                    st = ec2.describe(tag, profile, region)
-                    instance_id = str(st.get("instance_id", "") or "")
+                # The event's physical id IS the instance id; the stack's
+                # InstanceId output only exists once the WaitCondition completes.
+                if ev["resource"] == "Instance" and ev["physical_id"]:
+                    instance_id = ev["physical_id"]
         except AWSError:
             pass
         # 2) On-box bootstrap log tail (once the instance is up + SSM-managed).
@@ -156,6 +163,14 @@ def _stream_progress(
                     continue
                 seen_log_lines.add(logln)
                 ui.detail(f"      [box] {logln[:180]}")
+                printed = True
+        now = _now()
+        if printed:
+            last_output = now
+        elif now - last_output >= _HEARTBEAT_SECS:
+            mins, secs = divmod(int(now - started), 60)
+            ui.detail(f"  still working… {mins}:{secs:02d} elapsed")
+            last_output = now
         _sleep(_PROGRESS_POLL_SECS)
 
 
@@ -433,7 +448,6 @@ def launch(
     print(ui.BANNER)
     steps = ui.Steps(_TOTAL_STEPS)
 
-    # ── 1. AWS account ────────────────────────────────────────────────────
     steps.step("AWS account")
     if not profile:
         ui.info("Using the AWS CLI's default credentials (no --profile).")
@@ -459,14 +473,12 @@ def launch(
     if not _ensure_session_manager_plugin(assume_yes=assume_yes):
         return 1
 
-    # ── 2. Permissions ───────────────────────────────────────────────────
     steps.step("Permissions")
     ui.info("Launch creates a CloudFormation stack (EC2 + IAM role + security group).")
     ui.detail("If a launch fails with AccessDenied, apply this policy and retry:")
     ui.detail("  kirocrew cloud iam-policy   → prints the least-privilege policy")
     ui.ok("Reachability confirmed (first launch is the true permission test).")
 
-    # ── 3. Deployment choice + size ───────────────────────────────────────
     steps.step("Deployment choice")
     try:
         result = _select_existing_launch(
@@ -554,7 +566,6 @@ def launch(
             ui.warn(f"{names} ignored for an existing stack (set at creation).")
             ui.detail(f"Use `kirocrew cloud launch --new {names} …` for a fresh instance.")
 
-    # ── 4. Launch ─────────────────────────────────────────────────────────
     steps.step("Launching")
     if result is None:
         assert tier is not None
@@ -568,17 +579,10 @@ def launch(
             ui.info(f"Extra packages: {extra_packages}")
         if ssm_kms_key_arn:
             ui.info(f"Session Manager KMS key: {ssm_kms_key_arn} (explicit --ssm-kms-key)")
-        # NB: do NOT persist last_tag yet. Saving it BEFORE the deploy succeeds
-        # would leave the record pointing at a ROLLBACK_COMPLETE / no-instance
-        # stack on a failed first launch, and the NEXT `launch` would then treat
-        # that broken stack as the saved deployment and abort at "instance not
-        # ready" instead of cleanly creating a new one. We hold the fields in memory (so
-        # progress streaming + failure diagnostics have the tag) and only write the launch
-        # record AFTER a confirmed-healthy deploy below.
-        #
-        # The PRIOR pointer is a different question, and it is cleared HERE rather than left
-        # to the write below. See `_clear_prior_pointer`: leaving it is what would make a
-        # failed post-deploy write destructive rather than merely lossy.
+        # Do NOT persist last_tag until the deploy is healthy: a failed first launch would
+        # leave it naming a ROLLBACK_COMPLETE stack, and the next `launch` would abort at
+        # "instance not ready" instead of creating a new one. The PRIOR pointer is cleared
+        # here instead (see `_clear_prior_pointer`).
         if not _clear_prior_pointer(cfg.last_tag):
             return 1
         cfg = dataclasses.replace(cfg, profile=profile, region=region, last_tag=tag)
@@ -638,7 +642,6 @@ def launch(
         if not _ensure_running_and_ssm_ready(result.instance_id, profile, region):
             return 1
 
-    # ── 5. Sign in to Kiro ────────────────────────────────────────────────
     steps.step("Sign in to Kiro")
     instance_id = result.instance_id
     # A mismatch verified here is a verdict on the launch, not a transient
@@ -721,7 +724,6 @@ def launch(
             "sign in. Run: kirocrew cloud login"
         )
 
-    # ── 6. Open the dashboard ─────────────────────────────────────────────
     steps.step("Open the dashboard")
     try:
         conn = connect_mod.connect(instance_id, profile, region, open_browser=True)
@@ -824,42 +826,24 @@ def _ensure_session_manager_plugin(*, assume_yes: bool = False) -> bool:
 def _clear_prior_pointer(previous_tag: str) -> bool:
     """Drop the pointer to the PREVIOUS stack before a new one is provisioned.
 
-    Returns False to abort the launch, and the two halves of this decision are opposites on
-    purpose. :func:`_record_launch` writes the pointer to the stack this launch just created,
-    after it is deployed and billing, so a failure there warns and continues -- losing that
-    pointer costs a ``kirocrew cloud list``. The pointer to the LAST stack is a different
-    object with a different failure: if it is still on disk when the post-deploy write fails,
-    the record names ``kc-old`` while ``kc-new`` is the stack that exists, and a later
-    ``cloud destroy`` with no ``--tag`` resolves ``kc-old`` and deletes a stack the operator
-    did not mean to touch. That is irreversible, it takes the data with it, and nothing the
-    operator can see says the pointer is stale.
+    Returns False to abort the launch. If the old pointer survived a failed post-deploy
+    write of the new one, a later no-``--tag`` ``cloud destroy`` would delete ``kc-old``,
+    a stack the operator did not mean to touch. Clearing it first turns that failure into
+    "no target" instead of "the wrong target".
 
-    Clearing it first makes the only reachable outcome of a failed write "no target", which is
-    an inconvenience, instead of "the wrong target", which is destruction. The same move as
-    removing the power from a file rather than defending its bytes.
+    This refuses where :func:`_record_launch` only warns because nothing is provisioned
+    yet, so an abort costs no stack and no bill.
 
-    This one refuses where the later write warns because of WHEN it runs: nothing has been
-    provisioned yet, so an abort costs the operator no stack and no bill -- while the later
-    write cannot abort anything without throwing away work already paid for.
-
-    ``clear_tag`` is conditional on the pointer still naming *previous_tag*, so a launch that
-    recorded its own tag in between is left alone. That is the right answer for the FILE -- the
-    pointer is current, not stale -- and it is NOT a reason to carry on: the question that
-    decides whether to provision is whose stack a no-tag ``destroy`` would name if this
-    launch's own write then failed, and the answer is the other launch's.
-
-    Its ``False`` covers two states and only one is a hazard, which is why the bool alone does
-    not decide: it also declines when there is NO pointer, which is the state this function
-    exists to reach. So a declined clear is followed by a read of what the pointer is now, and
-    only a different NON-EMPTY tag aborts.
+    ``clear_tag`` only clears a pointer that still names *previous_tag*. When another
+    launch recorded its own tag in between, the pointer is current but provisioning must
+    still stop: a failed write here would leave a no-tag ``destroy`` naming that other
+    launch's stack. The clear also declines when there is no pointer at all, so only a
+    different NON-EMPTY tag aborts.
     """
     if not previous_tag:
         return True
     try:
-        # Both values from ONE locked call: the tag reported is the one the compare saw, not a
-        # second read that can have moved again -- and ``clear_tag``'s bool alone cannot decide
-        # here, because it declines both when another launch recorded its own tag AND when
-        # there is no pointer at all. The second is the state this function exists to reach.
+        # Both values from ONE locked call, so the tag reported is the one the compare saw.
         _cleared, saved_now = LaunchState.try_clear_tag(previous_tag)
     except OSError as exc:
         ui.fail(f"Could not clear the saved pointer to '{previous_tag}': {exc}")
@@ -872,16 +856,8 @@ def _clear_prior_pointer(previous_tag: str) -> bool:
         ui.detail("Free some disk space (or fix the file's permissions) and re-run.")
         return False
     if saved_now:
-        # A REFUSAL IS NOT A COMMIT. The clear declined and the pointer names a DIFFERENT stack,
-        # so another launch recorded its own while this one was being set up. That makes the
-        # pointer CURRENT rather than stale, which is why declining is the right answer for the
-        # file -- and reading it as success is the bug this branch exists for. The question that
-        # decides whether to provision is not "is the pointer stale", it is "if my own record
-        # write fails after the deploy, whose stack does a no-tag destroy name": that launch's,
-        # which is live and not this operator's to lose.
-        #
-        # So abort, in the same shape as the write failure above: nothing has been provisioned,
-        # so an abort costs nothing, and a re-run observes the pointer that is there now.
+        # A refusal is not a commit: another launch recorded its own tag meanwhile. Abort,
+        # since nothing is provisioned yet, and a re-run sees the current pointer.
         ui.fail(f"The saved pointer changed while this launch was starting: '{saved_now}'.")
         ui.detail("Nothing was created, and nothing is billing.")
         ui.detail(
@@ -929,7 +905,7 @@ def _select_existing_launch(
         return None
 
     launches = _discover_existing_launches(cfg, profile, region)
-    selected = _choose_existing_launch(launches, cfg, assume_yes=assume_yes)
+    selected = _choose_existing_launch(launches, assume_yes=assume_yes)
     if selected is None:
         return None
 
@@ -975,31 +951,59 @@ def _discover_existing_launches(
     if launches:
         return launches
 
-    for row in ec2.list_stacks(profile, region):
+    rows = ec2.list_stacks(profile, region)
+    live = ec2.live_instance_tags(profile, region) if rows else set()
+    where = f" --region {region}" + (f" --profile {profile}" if profile else "")
+    for row in rows:
         tag = str(row.get("tag", ""))
         if not tag or tag in seen:
             continue
-        launches.append(
-            _ExistingLaunch(
-                tag=tag,
-                stack_name=str(row.get("stack_name", ec2.stack_name(tag))),
-                stack_status=str(row.get("stack_status", "")),
-            )
-        )
         seen.add(tag)
+        stack_name = str(row.get("stack_name", ec2.stack_name(tag)))
+        stack_status = str(row.get("stack_status", ""))
+        why = _not_resumable_because(tag, stack_status, live)
+        if why:
+            # Named, not offered: it may still be billing, and it may be this
+            # installation's own stack whose launch was interrupted.
+            ui.detail(
+                f"Not offered: {stack_name} ({why}). "
+                f"Check it with `kirocrew cloud status --tag {tag}{where}`."
+            )
+            continue
+        launches.append(_ExistingLaunch(tag=tag, stack_name=stack_name, stack_status=stack_status))
     return launches
 
 
+def _not_resumable_because(tag: str, stack_status: str, live: set[str]) -> str:
+    """Why a discovered stack cannot be resumed, or "" when it can.
+
+    Resumable means neither failed nor in progress, with a live managed instance
+    carrying the tag: nothing on this machine vouches for a discovered stack.
+    """
+    if stack_status in ec2._FAILED_STATES or stack_status.endswith("_IN_PROGRESS"):
+        return stack_status
+    if tag not in live:
+        return "no live Kiro Crew instance"
+    return ""
+
+
 def _choose_existing_launch(
-    launches: list[_ExistingLaunch], cfg: LaunchState, *, assume_yes: bool = False
+    launches: list[_ExistingLaunch], *, assume_yes: bool = False
 ) -> _ExistingLaunch | None:
-    """Return the stack the user chose to keep, or None to create a new one."""
+    """Return the stack the user chose to keep, or None to create a new one.
+
+    Only the saved launch is kept by default; it is always alone (see
+    :func:`_discover_existing_launches`). A discovered stack is one this installation
+    has no record of, possibly another person's, and keeping it makes it the stack
+    ``destroy`` acts on, so it is never the default and ``--yes`` keeps none.
+    """
     if not launches:
         return None
+    saved = launches[0].saved
 
     if assume_yes:
-        if len(launches) == 1 or cfg.last_tag:
-            chosen = _preferred_existing_launch(launches, cfg)
+        if saved:
+            chosen = launches[0]
             ui.info(
                 f"Existing KiroCrew cloud stack found: {chosen.stack_name}. "
                 "Keeping it by default."
@@ -1008,15 +1012,15 @@ def _choose_existing_launch(
             return chosen
         tags = ", ".join(launch.tag for launch in launches)
         raise AWSError(
-            "multiple existing KiroCrew cloud stacks found; rerun interactively "
-            f"to choose one ({tags}), or pass `kirocrew cloud launch --new` "
+            f"found Kiro Crew cloud stacks this installation has no record of ({tags}); "
+            "rerun interactively to choose one, or pass `kirocrew cloud launch --new` "
             "to create a separate instance"
         )
 
     if len(launches) == 1:
         launch = launches[0]
         idx = ui.choose(
-            "Existing KiroCrew cloud deployment",
+            "Existing Kiro Crew cloud deployment",
             [
                 ("Keep and resume existing", _launch_summary(launch)),
                 (
@@ -1024,7 +1028,7 @@ def _choose_existing_launch(
                     "Leaves the existing AWS stack untouched.",
                 ),
             ],
-            default_index=0,
+            default_index=0 if saved else 1,
         )
         if idx == 0:
             return launch
@@ -1033,22 +1037,11 @@ def _choose_existing_launch(
 
     options = [(f"Keep {launch.tag}", _launch_summary(launch)) for launch in launches]
     options.append(("Create a new installation", "Leaves existing AWS stacks untouched."))
-    idx = ui.choose("Existing KiroCrew cloud deployments", options, default_index=0)
+    idx = ui.choose("Existing Kiro Crew cloud deployments", options, default_index=len(launches))
     if idx < len(launches):
         return launches[idx]
     ui.info("Creating a new installation; existing stacks are unchanged.")
     return None
-
-
-def _preferred_existing_launch(
-    launches: list[_ExistingLaunch], cfg: LaunchState
-) -> _ExistingLaunch:
-    """Prefer the saved launch when non-interactive defaults are accepted."""
-    if cfg.last_tag:
-        for launch in launches:
-            if launch.tag == cfg.last_tag:
-                return launch
-    return launches[0]
 
 
 def _launch_summary(launch: _ExistingLaunch) -> str:

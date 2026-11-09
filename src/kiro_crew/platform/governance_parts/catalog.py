@@ -53,6 +53,10 @@ class ScopeSpec:
     # loader's contract is that registering a scope needs no loader edit, and a
     # second scope with a floor should be a catalog entry, not another `if`.
     always_permitted: tuple[str, ...] = ()
+    #: Identifiers a PROFILE (or the policy ``fallback``) may not forbid, on top of
+    #: ``always_permitted``: ones only the installed policy enforces, so a profile deny
+    #: would describe a control that does not hold.
+    profile_always_permitted: tuple[str, ...] = ()
 
 
 # ── CAPABILITY-DEFAULT CONTRACT (read before touching any capability_default) ──
@@ -79,7 +83,7 @@ class ScopeSpec:
 # validate`` reports a partially-governed ``capabilities`` block so the gap is
 # visible instead of implied.
 #
-# An ENTERPRISE build is the exception: there an unnamed scope is answered by the
+# An LTS build is the exception: there an unnamed scope is answered by the
 # built-in baseline (``baseline.py``, RFC D3), so a new row here also needs a row
 # in ``BASELINE_CONTROLS`` or ``BASELINE_UNGATED``; a test fails until it has one.
 #
@@ -99,34 +103,29 @@ class ScopeSpec:
 # fails closed — the asymmetry is documented on ``_parse_controls``.)
 SCOPE_CATALOG: Dict[str, ScopeSpec] = {
     "tools": ScopeSpec(RULESET, matcher="identifier"),
-    # Dashboard tool-approval modes. Today this scope governs exactly ONE mode:
-    # ``yolo`` (auto-approve every tool everywhere), e.g.
-    # ``{"approval_modes": {"mode": "deny", "deny": ["yolo"]}}``. An absent scope
-    # permits every mode (unchanged behavior).
+    # Tool-approval modes (KGL ``permission_mode``): ``normal``, ``trust_reads``,
+    # ``trust`` and ``yolo``, e.g. ``{"approval_modes": {"mode": "allow", "allow":
+    # ["normal", "trust_reads"]}}``. An absent scope permits every mode (unchanged
+    # behavior).
     #
-    # ``always_permitted`` carries the three modes this scope may not forbid, for two
-    # DIFFERENT reasons, both enforced at parse time so a policy author is told
-    # rather than left with a control that silently does not hold:
-    #
-    # * ``normal`` is the interactive floor. Denying it would leave no selectable
-    #   mode and brick tool approval, and the trust-root ``security_policy.json`` is
-    #   the one file the dashboard may not rewrite to repair itself.
-    # * ``trust`` and ``trust_reads`` are NOT YET GOVERNED. Their grants are honoured
-    #   by consumption predicates this scope does not reach — the in-memory trusted
-    #   set, and the session ``approval_policy`` a spawned subagent inherits — so
-    #   accepting a deny for them would advertise enforcement that does not exist.
-    #   Governing those read paths is tracked separately.
+    # ``normal`` is the one mode this scope may not forbid, enforced at parse time:
+    # denying it would leave no selectable mode and brick tool approval, and the
+    # trust-root ``security_policy.json`` is the one file the dashboard may not
+    # rewrite to repair itself. A policy deny of ``trust`` or ``trust_reads`` holds where
+    # the grant is set and where it is honoured (``kiro_crew.approval_mode_policy``).
+    # Only the installed policy narrows those two, so a profile may not deny them.
     "approval_modes": ScopeSpec(
         RULESET,
         matcher="identifier",
-        always_permitted=("normal", "trust", "trust_reads"),
+        always_permitted=("normal",),
+        profile_always_permitted=("trust", "trust_reads"),
     ),
     "mcp": ScopeSpec(RULESET, matcher="mcp"),
     "apps": ScopeSpec(RULESET, matcher="identifier"),
     # Which app versions may be installed and loaded, as ``<app>@<version>``
     # (``{"mode": "allow", "allow": ["file-explorer@1.*"]}``). Asked by
     # ``apps.admission.app_admission_denied`` at install, update, boot and enable
-    # (``extension_governance.app_version_denied``). RFC enterprise edition,
+    # (``extension_governance.app_version_denied``). RFC LTS edition,
     # appendix row "App versions".
     "app_versions": ScopeSpec(RULESET, matcher="identifier"),
     "commands": ScopeSpec(RULESET, matcher="command"),
@@ -178,7 +177,7 @@ SCOPE_CATALOG: Dict[str, ScopeSpec] = {
     # existing single gate ``resolve_selected_backend`` reads the narrowed registry, so
     # it degrades a denied persisted value with no second check.
     "agent_backend": ScopeSpec(RULESET, matcher="identifier"),
-    # Which inbound webhook sources may start work (RFC crew-enterprise-edition,
+    # Which inbound webhook sources may start work (RFC crew-lts-edition,
     # appendix rows "Incoming webhooks" and Red "Webhooks by source"). Members are
     # source ids: ``agent`` (``POST /api/hooks/agent``) and ``ops-mission-control``
     # (that app's signal webhook), e.g. ``{"webhooks": {"mode": "allow", "allow":
@@ -204,7 +203,7 @@ SCOPE_CATALOG: Dict[str, ScopeSpec] = {
     # Inner ``events`` ruleset (``identifier`` matcher): which hook trigger events
     # may fire a script hook once the capability is on, by event name --
     # ``AgentSpawn``, ``PreToolUse``, ``Stop`` and the rest (``hooks.HOOK_EVENT_*``)
-    # (RFC crew-enterprise-edition, appendix row "Hook trigger events"). Queried as
+    # (RFC crew-lts-edition, appendix row "Hook trigger events"). Queried as
     # ``events:<event>`` by ``hook_runtime.governance_gate`` before a hook runs, and
     # for each event of the user's kiro hooks before they are installed. An unnamed
     # ruleset permits every event.
@@ -233,7 +232,7 @@ SCOPE_CATALOG: Dict[str, ScopeSpec] = {
     # gate only decides WHETHER + to WHERE.  Not a lever over ``git push`` (deny
     # floor) or ``network.egress`` (fetch host) — those are separate planes.
     #
-    # Three more inner rulesets (RFC crew-enterprise-edition, appendix rows "Deploy
+    # Three more inner rulesets (RFC crew-lts-edition, appendix rows "Deploy
     # regions", "Publish audiences", "Deploy accounts"), checked before anything is
     # uploaded (``publish_governance``): ``regions`` (the cloud region a deploy
     # writes to), ``audience`` (who may read the result: ``public``, ``shared`` or
@@ -298,7 +297,7 @@ SCOPE_CATALOG: Dict[str, ScopeSpec] = {
     # theme_install).
     #
     # Inner ``otlp_hosts`` ruleset (``host`` matcher): which OTLP collector hosts
-    # the metrics exporter may send to (RFC crew-enterprise-edition, appendix row
+    # the metrics exporter may send to (RFC crew-lts-edition, appendix row
     # "Diagnostic telemetry target"). Queried as ``otlp_hosts:<host>`` for every
     # destination before its reader is built and before each export
     # (``metrics/otlp_governance.py``), policy layer only like the beacon probe. A policy that names the row with
@@ -448,8 +447,8 @@ SCOPE_CATALOG: Dict[str, ScopeSpec] = {
     # call -- so this is a presentation switch a managed fleet may pin off, and it
     # outranks ``dashboard.milestones_enabled``. Read through ``policy_permits``
     # by ``GET /api/milestones``; a denial answers ``enabled: false``. Default
-    # True keeps the feature for the standalone user; the enterprise baseline
-    # keeps it off until a policy names it, like every other capability row.
+    # True keeps the feature for the standalone user; the LTS baseline
+    # leaves it open (``BASELINE_UNGATED``, RFC D3).
     # Data row only.
     "capabilities.milestones": ScopeSpec(CAPABILITY, capability_default=True),
     # The Jev decision seam: an enabled, sampled session sends message excerpts and
@@ -507,7 +506,7 @@ SCOPE_CATALOG: Dict[str, ScopeSpec] = {
     # Enforced at the seam every caller goes through
     # (``capability_bound.BoundedCapabilityManager``, via
     # ``extension_governance``). Default True: naming the row without ``enabled``
-    # keeps install working. RFC enterprise edition, appendix rows "Extension
+    # keeps install working. RFC LTS edition, appendix rows "Extension
     # install", "Extension uninstall" and "Plugin sync". Named by the RFC's policy
     # term, not its ``capability_install`` Crew key: an edition may already
     # ``register_scope`` that name with its own spec, and a second spec under one
@@ -519,7 +518,7 @@ SCOPE_CATALOG: Dict[str, ScopeSpec] = {
     # serving of an app's own UI tree. Asked at the toggle and on every read, so a
     # policy that turns it off also stops apps already in dev mode. Default True.
     # ``extension_governance.developer_mode_permitted`` is the one reader. RFC
-    # enterprise edition, appendix row "App developer mode".
+    # LTS edition, appendix row "App developer mode".
     "capabilities.app_dev_mode": ScopeSpec(CAPABILITY, capability_default=True),
     # Kiro Cloud Sessions (``session_environments.kiro_cloud_profiles``): the session's
     # agent and tools run in Kiro's cloud, where none of this ceiling is applied.
@@ -531,6 +530,10 @@ SCOPE_CATALOG: Dict[str, ScopeSpec] = {
     # (capability_default=False), like messaging and publish. Data row only --
     # CONTRACT_VERSION and the evaluator are untouched.
     "capabilities.kiro_cloud_sessions": ScopeSpec(CAPABILITY, capability_default=False),
+    # Opt-in: on a host whose policy governs any scope, only ``enabled: true`` here
+    # lets the owner turn Files-view credential redaction off
+    # (``redaction_switch.owner_may_disable``, policy layer only). Data row only.
+    "capabilities.credential_redaction_off": ScopeSpec(CAPABILITY, capability_default=False),
 }
 
 

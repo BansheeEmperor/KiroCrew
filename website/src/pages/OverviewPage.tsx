@@ -1,6 +1,7 @@
 import { lazy, Suspense, type ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
+import { Trans } from 'react-i18next'
 import { ArrowLeft, ArrowRight, BarChart3, Brain, Clock } from 'lucide-react'
 import { useAppSelector } from '../store'
 import { useUptime } from '../hooks/useUptime'
@@ -22,7 +23,7 @@ import { providerUsageQuery } from '../api/providerUsageQuery'
 
 import { i18nT } from '../i18n/t'
 import { uiLocation } from '../uiLocations/uiLocation'
-import { compactPluralCount, fmtCompact, fmtDuration } from '../i18n/format'
+import { compactPluralCount, fmtCompact, fmtDuration, fmtNumber } from '../i18n/format'
 import { formatCost } from '../utils/formatCost'
 
 // The record editor and recovery tools are needed only inside this drill-in.
@@ -96,7 +97,7 @@ function UsageSummaryCard({ onOpen }: { onOpen: () => void }) {
         <ErrorNotice title={data ? i18nT('pages.sessionsTab.could_not_refresh') : undefined} message={error?.message} askAgent testId="overview-usage-error" />
       )}
       {!provider.capabilities.usageBilling ? (
-        <div className="text-[13px] text-muted">{i18nT('pages.overviewPage.usage_tracking_is_not_available_for')} {provider.displayName}.</div>
+        <div className="text-[13px] text-muted">{i18nT('pages.overview.usageTab.usage_tracking_is_not_available_for', { provider: provider.displayName })}</div>
       ) : !data ? (
         !isError && <div className="skeleton h-14 rounded" />
       ) : (
@@ -161,7 +162,7 @@ function WakaTimeSummaryCard({ onOpen }: { onOpen: () => void }) {
         <div className="text-[13px] text-muted">{i18nT('pages.overviewPage.wakatime_not_connected')}</div>
       ) : (
         <div className="text-[13px] text-muted">
-          {i18nT('pages.overviewPage.wakatime_last_7_days')} <span className="text-text font-mono">{fmtHm(total)}</span>
+          <Trans i18nKey="pages.overviewPage.wakatime_last_7_days_total" values={{ time: fmtHm(total) }} components={[<span key="time" className="text-text font-mono" />]} />
         </div>
       )}
     </Card>
@@ -191,9 +192,9 @@ function MemorySummaryCard({ onOpen }: { onOpen: () => void }) {
       ) : (
         <div className="flex flex-col gap-1 text-[13px] text-muted">
           <span>
-            {i18nT('pages.overviewPage.summarizes_chats_into_memory_after')} {data.history_idle_hours ?? 3}{i18nT('pages.overviewPage.h_idle')}
-            {!data.migrated && <> {i18nT('pages.overviewPage.keeps')} {data.history_max_days ?? 90} {i18nT('pages.overviewPage.days_of_history')}</>}
-            {data.migrated && <> {i18nT('pages.overviewPage.semantic_memory_active')}</>}
+            {data.migrated
+              ? i18nT('pages.overviewPage.memory_summary_semantic', { hours: fmtNumber(data.history_idle_hours ?? 3) })
+              : i18nT('pages.overviewPage.memory_summary_kept', { hours: fmtNumber(data.history_idle_hours ?? 3), count: data.history_max_days ?? 90, days: fmtNumber(data.history_max_days ?? 90) })}
           </span>
           <Link to="/settings/developer/memory" className="text-accent hover:underline w-fit">{i18nT('pages.overviewPage.memory_developer_link')} <ArrowRight size={12} className="lucide-inline" /></Link>
         </div>
@@ -274,7 +275,9 @@ export default function OverviewPage() {
             {connected && status ? i18nT('pages.overviewPage.all_systems_running') : status ? i18nT('pages.overviewPage.reconnecting') : i18nT('pages.overviewPage.connecting')}
           </div>
           <div className="text-[12.5px] text-muted mt-0.5">
-            {i18nT('pages.overviewPage.up')} <Uptime />{status?.version ? <> {i18nT('pages.overviewPage.v')}{status.version}</> : null}
+            {status?.version
+              ? <Trans i18nKey="pages.overviewPage.uptime_line_version" values={{ version: status.version }} components={{ uptime: <Uptime /> }} />
+              : <Trans i18nKey="pages.overviewPage.uptime_line" components={{ uptime: <Uptime /> }} />}
           </div>
         </div>
       </div>

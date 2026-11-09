@@ -145,6 +145,7 @@ if TYPE_CHECKING:  # every owner-defined name this module forwards, for type che
         _clean_pinned_filter,
         _content_cache,
         _content_cache_bytes,
+        _content_cache_key,
         _content_cache_lock,
         _context_snippet,
         _load_content,
@@ -281,6 +282,7 @@ if TYPE_CHECKING:  # names this module re-exported from other modules
     from kiro_crew.dashboard.handlers._shared import read_bounded_json  # noqa: F401
     from kiro_crew.dashboard.handlers._shared import require_owner_dashboard_request  # noqa: F401
     from kiro_crew.dashboard.state import _normalize_slot_key  # noqa: F401
+    from kiro_crew.executors import discovery_executor  # noqa: F401
     from kiro_crew.executors import subprocess_executor  # noqa: F401
     from kiro_crew.hooks import FileTooLargeError  # noqa: F401
     from kiro_crew.hooks import safe_read_file_bytes_with_identity  # noqa: F401

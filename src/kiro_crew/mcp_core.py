@@ -11,6 +11,7 @@ Tools:
     learn_add       — save a learned correction
     learn_list      — list one window of lessons, with the total
     learn_remove    — remove lessons by substring
+    learn_update    — change one lesson's always/on_topic tier
     task_run        — start the autonomous task runner
 """
 
@@ -710,6 +711,12 @@ def _artifact_reemit_hint(slug: str, name: str, kind: str = "widget") -> str:
 def _validate_args(name: str, args: dict[str, Any]) -> dict[str, Any]:
     """Validate tool arguments against schema. Returns cleaned args."""
     schema = MCP_CORE_SCHEMAS.get(name)
+    if schema is None:
+        # A tool an installed app declares is validated against its declared schema,
+        # through the same field engine; a core name never resolves to an app's.
+        from kiro_crew.mcp_tools import app_tools
+
+        schema = app_tools.tool_schema(name)
     if schema:
         # Repair an int that an upstream deferred-schema runtime re-typed from a
         # numeric-looking string ("42" -> 42) back to its string form on a
@@ -916,22 +923,6 @@ def _format_anchor(anchor: dict) -> str:
     return f' [on: "{head}" [TRUNCATED: {omitted} chars omitted' f'{offset_info}] "{tail}"]'
 
 
-# ── Issue Radar crew ledger helpers ──
-#
-# Two allowlisted app routes, both FULL paths in
-# ``dashboard.server._MIXED_INTERNAL_API_PATHS`` (see the comment there for why
-# the ``/api/apps/issue-radar`` prefix must never be admitted).
-#
-# That listing is necessary but not sufficient: it is matched
-# ``path == p or path.startswith(p + "/")`` and carries no method, so the
-# ``/crew`` entry also reaches ``/crew/pause`` and
-# ``PUT``/``DELETE /crew``. The app closes that itself —
-# ``crew_routes._AGENT_REACHABLE`` refuses an internal-secret caller on every
-# crew route except the exact two below.
-_CREW_READ_PATH = "/api/apps/issue-radar/crew"
-_CREW_WORK_PATH = "/api/apps/issue-radar/crew/work"
-
-
 def _call_tool_inner(name: str, args: dict[str, Any]) -> "str | DeferredTool":
     """Run one tool call and return its text result.
 
@@ -950,7 +941,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> "str | DeferredTool":
     under global YOLO or channel trust the request is approved with no human in
     the loop -- so the boundary has to hold at MCP dispatch too.
     """
-    chan_err = _deny_channel_agent_dispatch(name, args)
+    chan_err = _deny_channel_agent_dispatch(name)
     if chan_err:
         return chan_err
     # Second fence behind the unmount, for a caller that reaches the server
@@ -990,6 +981,12 @@ def run_mcp_core_server() -> None:
     from kiro_crew.mcp_tools.sessions import gateway_cjk_words
 
     register_cjk_segmenter(gateway_cjk_words)
+    # Before the first request: an enforced harness's element carries a one-time
+    # pickup in place of the secret it withholds (agent_ipc_client).
+    from kiro_crew.agent_ipc_client import redeem_at_startup
+    from kiro_crew.mcp_core_parts import gateway as _gateway_part
+
+    redeem_at_startup(_gateway_part._api_port)
     run_mcp_stdio_loop(
         "kirocrew-core",
         "1.0.0",
@@ -1022,7 +1019,6 @@ _OWNERS = (
     "kiro_crew.mcp_core_parts.governance",
     "kiro_crew.mcp_core_parts.crew",
     "kiro_crew.mcp_core_parts.history",
-    "kiro_crew.mcp_core_parts.radar_crew",
 )
 for _owner in _OWNERS:
     _importlib.import_module(_owner)
@@ -1083,12 +1079,4 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _session_key_from_token,
         require_strict_session_key,
         strict_identity_diagnosis,
-    )
-    from kiro_crew.mcp_core_parts.radar_crew import (  # noqa: F401
-        _CREW_MAX_EVENTS,
-        _crew_identity,
-        _crew_ledger_view,
-        _crew_machine_markers,
-        _crew_public_text,
-        _redact_json_strings,
     )

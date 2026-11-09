@@ -24,7 +24,10 @@ from kiro_crew.dashboard.chat_utils import (
     is_harness_slash_command,
     parse_workflow_command,
 )
-from kiro_crew.dashboard.kas_local_commands import answer_kas_inspect_command
+from kiro_crew.dashboard.kas_local_commands import (
+    KAS_KIRO_CLI_ONLY_COMMANDS,
+    answer_kas_inspect_command,
+)
 from kiro_crew.dashboard.kas_local_commands import answers_locally as kas_answers_locally
 from kiro_crew.dashboard.session_directive_apply import _reset_conversation
 from kiro_crew.dashboard.state import (
@@ -33,7 +36,9 @@ from kiro_crew.dashboard.state import (
     SUBAGENT_SYNTHESIS_PREFIX,
 )
 from kiro_crew.messaging.commands import compact_unsupported_backend, compact_unsupported_reply
+from kiro_crew.quick_prompts import user_quick_prompt
 from kiro_crew.security import redact
+from kiro_crew.workflows.library import command_ref
 
 if TYPE_CHECKING:
     from kiro_crew.dashboard.chat_runner import (
@@ -92,15 +97,18 @@ async def _slash_command_backend(state: DashboardState, session_key: str) -> str
     if provider is not None and await state.sessions.is_provider_alive(session_key) is True:
         return capabilities_of(provider).backend
     from kiro_crew.crewmate_harness import CrewmateHarnessUnavailable, crewmate_backend_pin
+    from kiro_crew.members import session_backend_pick
 
     cfg = KiroCrewConfig.load()
     agent_cfg = cfg.agent
+    pick = session_backend_pick(session_key)
     try:
         backend = select_provider_backend(
             session_key,
             getattr(agent_cfg, "member_acp_backend", ""),
             getattr(agent_cfg, "acp_backend", ""),
-            crew_backend=crewmate_backend_pin(cfg, session_key),
+            backend_override=pick,
+            crew_backend=crewmate_backend_pin(cfg, session_key) if pick is None else None,
         )
     except CrewmateHarnessUnavailable:
         # Only a pre-check: the turn goes on to the session start, which refuses
@@ -117,14 +125,19 @@ async def _forwards_harness_command(
     :func:`is_harness_slash_command`, with its harness-owned rule granted by the
     backend the command would reach (``runs_own_slash_commands``) as well as by the
     dormant ``claude_code`` label. Only a word that rule alone would forward pays for
-    the backend lookup; a kiro-cli command name or plain text never does.
+    the backend lookup; a kiro-cli command name or plain text never does. A word
+    naming the user's own quick prompt is a macro, like ``/plain``, so it is kept
+    for ``build_message`` to expand rather than forwarded.
     """
-    if is_harness_slash_command(first_word, cc_provider=cc_provider):
+    if is_harness_slash_command(first_word, cc_provider=False):
         return True
     if not is_harness_slash_command(first_word, cc_provider=True):
         return False
-    backend = await _slash_command_backend(state, session_key)
-    return capabilities_for(backend).runs_own_slash_commands
+    if not cc_provider:
+        backend = await _slash_command_backend(state, session_key)
+        if not capabilities_for(backend).runs_own_slash_commands:
+            return False
+    return await asyncio.to_thread(user_quick_prompt, first_word) is None
 
 
 async def _answer_slash_without_channel(
@@ -157,10 +170,12 @@ async def _answer_slash_for_harness(
     turn boundary. Any other command gets a notice naming *backend*'s harness as a
     person reads it.
 
-    On KAS, ``/agent``, ``/context``, ``/help``, ``/mcp``, ``/model``, ``/tools`` and
-    ``/usage`` are answered from the dashboard's own state (``kas_local_commands``,
-    which reads KAS's own registration); *message* is the whole command line, for
-    ``/model <id>`` and for the arguments ``answers_locally`` leaves to the notice.
+    On KAS, ``/agent``, ``/code``, ``/context``, ``/help``, ``/hooks``, ``/knowledge``,
+    ``/mcp``, ``/model``, ``/tools`` and ``/usage`` are answered by
+    ``kas_local_commands`` (from the dashboard's own state, or KAS's own verb for
+    ``/code``, ``/knowledge`` and ``/context add|remove|clear``); *message* is the
+    whole command line, for their arguments and for those ``answers_locally``
+    leaves to the notice.
     Another harness gets the notice for them.
 
     Returns the outcome it records: ``discarded``, ``queued``, ``shown``,
@@ -225,7 +240,14 @@ async def _handle_workflow_command(
         text = "Saved workflows are not available in this runtime."
         outcome = "unavailable"
     elif not workflow_ref:
-        definitions = await asyncio.to_thread(workflow_service.list_definitions)
+        # A workflow neither of whose refs reaches it has no command that
+        # runs it, so this list leaves it out; the library in Customize >
+        # Workflows still shows it.
+        definitions = [
+            definition
+            for definition in await asyncio.to_thread(workflow_service.list_definitions)
+            if command_ref(definition)
+        ]
         if not definitions:
             text = "No saved workflows yet. Create one under Customize > Workflows."
             outcome = "empty"
@@ -235,7 +257,7 @@ async def _handle_workflow_command(
                 description = definition.get("description") or ""
                 suffix = f" — {description}" if description else ""
                 lines.append(
-                    f"- `/workflow {definition.get('slug')}` "
+                    f"- `/workflow {command_ref(definition)}` "
                     f"(revision {definition.get('revision')}){suffix}"
                 )
             text = "\n".join(lines)
@@ -250,8 +272,13 @@ async def _handle_workflow_command(
             text = str(started.get("error") or "Could not start the saved workflow.")
             outcome = "error"
         else:
+            # When the slug does not reach this workflow (a removed workflow
+            # holds it, or another one answers to it first), only the ref typed
+            # (its id) starts it; naming the slug would offer another command.
+            shadowed = started.get("shadowed_refs") or []
+            shown = workflow_ref if started.get("slug") in shadowed else started.get("slug")
             text = (
-                f"Started `/workflow {started.get('slug') or workflow_ref}` as "
+                f"Started `/workflow {shown or workflow_ref}` as "
                 f"`{started.get('run_id')}` from revision {started.get('revision')}. "
                 "Its result will appear here when it finishes."
             )
@@ -753,15 +780,18 @@ async def _turn_slash_gate(turn: _ChatTurn) -> _Flow | None:
                 CrewmateHarnessUnavailable,
                 crewmate_backend_pin,
             )
+            from kiro_crew.members import session_backend_pick
 
             _cfg = KiroCrewConfig.load()
             _agent_cfg = _cfg.agent
+            _pick = session_backend_pick(session_key)
             try:
                 _cfg_backend = select_provider_backend(
                     session_key,
                     getattr(_agent_cfg, "member_acp_backend", ""),
                     getattr(_agent_cfg, "acp_backend", ""),
-                    crew_backend=crewmate_backend_pin(_cfg, session_key),
+                    backend_override=_pick,
+                    crew_backend=crewmate_backend_pin(_cfg, session_key) if _pick is None else None,
                 )
             except CrewmateHarnessUnavailable:
                 # As in _slash_command_backend: the session start reports it.
@@ -808,8 +838,9 @@ async def _turn_slash_gate(turn: _ChatTurn) -> _Flow | None:
     # model reads "/clear" as a request and the conversation stays. KAS also
     # refuses _kiro.dev/commands/execute itself, so that verb is no way out.
     # Answer here instead, before any session work: /clear takes the same discard
-    # reset_conversation queues, /agent, /context, /help, /mcp, /model, /tools and
-    # /usage are read from the dashboard's own state (kas_local_commands), and every
+    # reset_conversation queues, /agent, /context, /help, /hooks, /mcp, /model, /tools
+    # and /usage are read from the dashboard's own state, /context add|remove|clear,
+    # /code and /knowledge go to KAS's own verbs (kas_local_commands), and every
     # other command gets a notice rather than
     # reaching the model. /compact passes through: on KAS the session handle
     # sends it as the engine's own compaction verb, not as prompt text. A /todos
@@ -818,16 +849,26 @@ async def _turn_slash_gate(turn: _ChatTurn) -> _Flow | None:
     # either, or (claude) run one Crew cannot observe, so /clear alone is answered
     # here for them too; their other commands keep the prompt path, where those
     # harnesses serve the ones they know.
+    # A kiro-cli command that is not a Crew harness command (/knowledge, /effort,
+    # /plan, /rewind) is answered here on KAS alone; anywhere else it stays text.
+    # The user's own quick prompt of that name is a macro and keeps the text path.
+    _kas_only_word = (
+        not is_slash
+        and first_word.lower() in KAS_KIRO_CLI_ONLY_COMMANDS
+        and await asyncio.to_thread(user_quick_prompt, first_word) is None
+    )
     if (
-        is_slash
+        (is_slash or _kas_only_word)
         and not _is_cc_provider
         and first_word != "/compact"
         and first_word not in _KIRO_ONLY_BLOCKED_SLASH_COMMANDS
     ):
         _command_backend = await _slash_command_backend(state, session_key)
-        if _command_backend in ACP_BACKENDS_LOCAL_HARNESS_COMMANDS or (
-            _this_turn_is_clear and _command_backend in ACP_BACKENDS_LOCAL_CLEAR
-        ):
+        if (
+            _command_backend == ACP_BACKEND_KAS
+            if _kas_only_word
+            else _command_backend in ACP_BACKENDS_LOCAL_HARNESS_COMMANDS
+        ) or (_this_turn_is_clear and _command_backend in ACP_BACKENDS_LOCAL_CLEAR):
             turn_exit.local_command = first_word
             await _answer_slash_for_harness(
                 state, slot, session_key, first_word, _command_backend, message

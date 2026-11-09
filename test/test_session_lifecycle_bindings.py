@@ -46,7 +46,10 @@ from kiro_crew.session_lifecycle import SessionLifecycleService
 
 pytestmark = pytest.mark.xdist_group(name="tree_scan_session_lifecycle_bindings")
 
-SHARED_BINDINGS_CHECKS = ("the_field_scan_counts_every_read_and_write_shape",)
+SHARED_BINDINGS_CHECKS = (
+    "the_field_scan_counts_every_read_and_write_shape",
+    "the_class_only_scan_can_fail",
+)
 
 #: Member -> (kind, coroutine, signature digest, owning module). Frozen at the split: the
 #: kind, coroutine flag and signature are BASE's; the owner is where the member lives now
@@ -94,6 +97,12 @@ _MEMBERS: dict[str, tuple[str, bool, str, str]] = {
     "drain_all_providers": ("function", True, "0624c13b3dee", "fleet"),
     "end_children_for": ("function", True, "958babeb61c8", "parent_end"),
     "flag_identity_stamp_mismatches": ("function", True, "946212e80718", "identity_retirement"),
+    "holds_kiro_process_of_unknown_account": (
+        "function",
+        False,
+        "542f3ac72725",
+        "identity_retirement",
+    ),
     "note_stop": ("function", False, "1eda252b53bd", "turn_stop"),
     "open_replay_gap": ("function", False, "958babeb61c8", "turn_stop"),
     "refresh_defaults": ("function", True, "8d9c819b471f", "fleet"),
@@ -289,11 +298,6 @@ def _class_only_constructs(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[s
         if isinstance(spelled, str) and spelled.startswith("__") and not spelled.endswith("__"):
             found.append(spelled)
     return found
-
-
-def test_the_class_only_scan_can_fail() -> None:
-    tree = ast.parse("def f(self):\n    super().g()\n    return __class__, self.__hidden\n")
-    assert sorted(_class_only_constructs(tree.body[0])) == ["__class__", "__hidden", "super()"]
 
 
 @pytest.mark.parametrize("owner", session_lifecycle._OWNERS)

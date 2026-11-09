@@ -6,7 +6,7 @@
  * Shows full description, features, screenshots, tags, and action buttons.
  */
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import {
   ArrowLeft, Download, Check, Loader2, Power, PowerOff,
@@ -25,9 +25,11 @@ import { uiLocation } from '../uiLocations/uiLocation'
 import SessionApprovalModes from '../components/appstore/SessionApprovalModes'
 import AppIcon from '../components/AppIcon'
 import TrustAppModal, {
-  APP_EXECUTION_DENIED, DESKTOP_BUILD_STEP_UNSUPPORTED, isTrustDeniedError, useTrustGate,
+  APP_EXECUTION_DENIED, DESKTOP_BUILD_STEP_UNSUPPORTED, isSessionApprovalConsentRequiredError,
+  isTrustDeniedError, localOnlyTrustRepository, SESSION_APPROVAL_CONSENT_REQUIRED, useTrustGate,
 } from '../components/appstore/TrustAppModal'
-import { isRegistrySourced, normalizeRegistryApp, type RegistryApp } from '../components/appstore/types'
+import { isRegistrySourced } from '../components/appstore/types'
+import { REGISTRY_STALE_MS, registryQueryFn } from './apps/useAppsData'
 import AppSource from '../components/appstore/AppSource'
 import { consentTierFor } from '../components/appstore/registryTier'
 import { backendRefusedNotice } from '../components/appstore/backendRefused'
@@ -50,50 +52,29 @@ import {
 } from '../components/appstore/appManifest'
 import { isBuiltinServerRow, mergeBuiltinRow } from '../components/appstore/mergeBuiltinRow'
 import { classifyManifestArt, installedArt, installedArtList, installedArtListAligned, installedIcon } from '../components/appstore/useHeroArt'
-import { fmtDateNumeric, fmtCompact, fmtNumber } from '../i18n/format'
+import { fmtDateNumeric, fmtCompact, fmtNumber, fmtList } from '../i18n/format'
 import { HeroBanner, ScreenshotGallery } from './AppDetailPageArt'
 import { messageActionGrantLabel } from '../messageActions/messageActionRegistry'
 import AppDetailAdoptionNotice from './AppDetailAdoptionNotice'
 import AppDetailLinks from './AppDetailLinks'
+import AppDetailPageLocalOnlyNotice from './AppDetailPageLocalOnlyNotice'
+import { openLocalSourceSwitch } from './appDetailPageLocalSwitch'
 import { selectionActionGrantLabel } from '../selectionActions/selectionActionRegistry'
 import type { AppInfo, NormalizedRegistryEntry, RegistryEntry } from './appDetailPageTypes'
 import { actionGrant } from '../composerActions/composerActionRegistry'
 import { memoryAccessLabel } from '../components/appstore/memoryAccessLabel'
+import { managerLabel, originLabel } from './appDetailPageLabels'
 // The page's parts live in sibling owners that never import this module:
 // `AppDetailPageArt.tsx` (the hero banner and the screenshot gallery, each with
-// its local-art second chance) and `appDetailPageTypes.ts` (the page's view
-// model). Callers import the two art components from this module.
+// its local-art second chance), `appDetailPageTypes.ts` (the page's view
+// model) and `appDetailPageLabels.ts` (the origin and lifecycle words).
+// Callers import the two art components from this module.
 export { HeroBanner, ScreenshotGallery }
-
-// Display words for the installed record's origin, resources and lifecycle
-// values. A value outside these maps is shown as it is.
-const ORIGIN_LABEL_KEYS = {
-  builtin: 'pages.appDetailPage.origin_builtin',
-  registry: 'pages.appDetailPage.origin_registry',
-  local: 'pages.appDetailPage.origin_local',
-  external: 'pages.appDetailPage.origin_external',
-} as const
-const MANAGER_LABEL_KEYS = {
-  gateway: 'pages.appDetailPage.managed_by_gateway',
-  app: 'pages.appDetailPage.managed_by_app',
-  locked: 'pages.appDetailPage.lifecycle_locked',
-} as const
-
-function originLabel(value: string): string {
-  return Object.hasOwn(ORIGIN_LABEL_KEYS, value)
-    ? i18nT(ORIGIN_LABEL_KEYS[value as keyof typeof ORIGIN_LABEL_KEYS])
-    : value
-}
-
-function managerLabel(value: string): string {
-  return Object.hasOwn(MANAGER_LABEL_KEYS, value)
-    ? i18nT(MANAGER_LABEL_KEYS[value as keyof typeof MANAGER_LABEL_KEYS])
-    : value
-}
 
 export default function AppDetailPage() {
   const { name } = useParams<{ name: string }>()
   const [app, setApp] = useState<AppInfo | null>(null)
+  const queryClient = useQueryClient()
   const { data: registriesData, error: registriesError } = useQuery({
     queryKey: ['registries'],
     queryFn: () => api.listRegistries(),
@@ -149,7 +130,9 @@ export default function AppDetailPage() {
   // Selection actions an update added or changed (a new source, more text, a new effect).
   const stagedSelection = app?.selectionActionGrant?.staged || []
   const declaredSelectionActions = (app?.manifest as { contributes?: { selectionActions?: unknown } } | undefined)?.contributes?.selectionActions
-  const hasStagedGrants = stagedApi.length + stagedEvents.length + stagedLinkHosts.length + stagedLinkPatterns.length + stagedMessageActions.length + stagedOpenHosts.length + stagedComposerActions.length + stagedSelection.length > 0 || stagedFullUrl || stagedOpenFullUrl
+  // An update that added `permissions.workerAutoApprove` waits the same way.
+  const stagedWorkerAutoApprove = app?.workerAutoApproveGrant?.staged === true
+  const hasStagedGrants = stagedApi.length + stagedEvents.length + stagedLinkHosts.length + stagedLinkPatterns.length + stagedMessageActions.length + stagedOpenHosts.length + stagedComposerActions.length + stagedSelection.length > 0 || stagedFullUrl || stagedOpenFullUrl || stagedWorkerAutoApprove
   // Shown where the notice was once the owner approves, so the moment is confirmed.
   const [grantsApprovedMsg, setGrantsApprovedMsg] = useState('')
   const enableLabel = app?.sessionApprovalConsentPending
@@ -191,6 +174,8 @@ export default function AppDetailPage() {
    * permanent refusal from a failure worth retrying.
    */
   const installFailureRef = useRef<{ message: string; code: string }>({ message: '', code: '' })
+  /** An `app_trust_local_only` refusal's repository, offered while its message is the error. */
+  const [localSwitch, setLocalSwitch] = useState<{ message: string; repository: string } | null>(null)
   const [clientInstall, setClientInstall] = useState<{ shell?: string; postInstall?: string } | null>(null)
   const [copied, setCopied] = useState(false)
   const [serverHostname, setServerHostname] = useState('')
@@ -257,56 +242,90 @@ export default function AppDetailPage() {
   // Abort in-flight streaming install on unmount
   useEffect(() => () => { installAbortRef.current?.abort() }, [])
 
-  const load = useCallback(async () => {
+  /**
+   * Resolve the page's record. The three reads are independent, so they run at
+   * the same time: the installed record, the registry listing (richer metadata
+   * such as screenshots and highlights) and the server hostname for the client
+   * install template.
+   *
+   * `shareListing` reads the listing through the `['registry']` query the app
+   * shell observes, so the first render shares the request the shell already
+   * has in flight, or its fresh answer, instead of building the whole listing a
+   * second time. Every other caller (a reload after an action, Retry) asks the
+   * server again, because the rows carry server-stamped install state that the
+   * action just changed.
+   */
+  const load = useCallback(async ({ shareListing = false, keepView = false }: { shareListing?: boolean; keepView?: boolean } = {}) => {
     if (!name) return
-    setLoading(true)
-    // Drop the previous record before resolving the new name: a genuine miss
-    // sets nothing below, and without this an in-session navigation from a
-    // loaded app to a non-existent one would keep rendering the old app under
-    // the new URL instead of the not-found page.
-    setApp(null)
+    // `keepView` refreshes in place: the loader would unmount the pressed button.
+    if (!keepView) {
+      setLoading(true)
+      // Drop the previous record before resolving the new name: a genuine miss
+      // sets nothing below, and without this an in-session navigation from a
+      // loaded app to a non-existent one would keep rendering the old app under
+      // the new URL instead of the not-found page.
+      setApp(null)
+    }
     clearError()
     try {
-      // Try installed app first. Only a 404 means "not installed"; any other
-      // rejection is a load failure and must not be shown as "not found".
+      const [installedRead, registryRead, systemRead] = await Promise.allSettled([
+        api.getApp(name),
+        shareListing
+          ? queryClient.fetchQuery({
+              queryKey: ['registry'],
+              queryFn: registryQueryFn,
+              staleTime: REGISTRY_STALE_MS,
+            })
+          : registryQueryFn(),
+        api.system(),
+      ])
+      // Only a 404 means "not installed"; any other rejection is a load failure
+      // and must not be shown as "not found".
       let installed: Awaited<ReturnType<typeof api.getApp>> | null = null
-      try {
-        installed = await api.getApp(name)
-      } catch (e: unknown) {
-        if (!isNotFoundError(e)) throw e
-      }
-      // Also check registry for richer metadata (screenshots, highlights). A
-      // failure here is held rather than swallowed: an INSTALLED app can still
-      // render from its manifest, but the reader is told the catalog was not
-      // reachable; an app that is not installed cannot be resolved without it.
+      if (installedRead.status === 'fulfilled') installed = installedRead.value
+      else if (!isNotFoundError(installedRead.reason)) throw installedRead.reason
+      // A registry failure is held rather than swallowed: an INSTALLED app can
+      // still render from its manifest, but the reader is told the catalog was
+      // not reachable; an app that is not installed cannot be resolved without it.
       //
-      // Rows are normalized ONCE here, at the fetch site, by the same
-      // `normalizeRegistryApp` the browse list uses -- so every branch below
-      // reads coerced display fields and a sanitized star count instead of
-      // re-defending them field by field. The RAW rows are kept beside them for
-      // one reader only: `mergeBuiltinRow` is row-first, and normalize fills a
-      // missing `displayName` with the slug, which would then beat the
-      // manifest's own name. The merge already accepts a loose row and fills
-      // its own gaps, so it is handed the row as the server sent it.
+      // `registryQueryFn` normalizes the rows with the same `normalizeRegistryApp`
+      // the browse list uses, so every branch below reads coerced display fields
+      // and a sanitized star count. The RAW rows ride beside them for one reader
+      // only: `mergeBuiltinRow` is row-first, and normalize fills a missing
+      // `displayName` with the slug, which would then beat the manifest's own
+      // name. The merge already accepts a loose row and fills its own gaps, so it
+      // is handed the row as the server sent it.
       let rawRegistryList: RegistryEntry[] = []
       let registryList: NormalizedRegistryEntry[] = []
       let sideFailure: unknown = null
-      try {
-        const registryData = await api.listRegistry()
-        rawRegistryList = (registryData.apps || []) as RegistryEntry[]
-        registryList = rawRegistryList.map(
-          (r) => normalizeRegistryApp(r as RegistryApp) as NormalizedRegistryEntry,
-        )
-      } catch (e: unknown) {
-        sideFailure = e
+      let listing = registryRead.status === 'fulfilled' ? registryRead.value : null
+      if (registryRead.status === 'rejected') sideFailure = registryRead.reason
+      // A shared listing can be up to REGISTRY_STALE_MS old, and its `installed`
+      // stamp is server state. When it says installed but the fresh installed
+      // read just answered 404 (the app was removed, by the CLI for example),
+      // ask the server again instead of rendering a removed app as installed.
+      // The fresh row still says installed for an app the server detects
+      // outside the app manager (`detectInstalled`).
+      if (shareListing && !installed && listing?.apps.some((r) => r.name === name && r.installed)) {
+        try {
+          listing = await queryClient.fetchQuery({
+            queryKey: ['registry'],
+            queryFn: registryQueryFn,
+            staleTime: 0,
+          })
+        } catch (e: unknown) {
+          listing = null
+          sideFailure = e
+        }
       }
-
-      // Fetch server hostname for client install template variables
-      try {
-        const sysInfo = await api.system()
-        if (sysInfo.hostname) setServerHostname(sysInfo.hostname)
-      } catch (e: unknown) {
-        sideFailure ??= e
+      if (listing) {
+        rawRegistryList = listing.rawApps as RegistryEntry[]
+        registryList = listing.apps as NormalizedRegistryEntry[]
+      }
+      if (systemRead.status === 'fulfilled') {
+        if (systemRead.value.hostname) setServerHostname(systemRead.value.hostname)
+      } else {
+        sideFailure ??= systemRead.reason
       }
       const registryEntry = registryList.find((r) => r.name === name)
       const rawRegistryEntry = rawRegistryList.find((r) => r.name === name)
@@ -335,6 +354,7 @@ export default function AppDetailPage() {
             linkOpenGrant: installed.linkOpenGrant,
             composerActionGrant: installed.composerActionGrant,
             selectionActionGrant: installed.selectionActionGrant,
+            workerAutoApproveGrant: installed.workerAutoApproveGrant,
             managed: installed.managed,
             source: installed.source,
             installedAt: installed.installedAt,
@@ -469,6 +489,7 @@ export default function AppDetailPage() {
             linkOpenGrant: installed.linkOpenGrant,
             composerActionGrant: installed.composerActionGrant,
             selectionActionGrant: installed.selectionActionGrant,
+            workerAutoApproveGrant: installed.workerAutoApproveGrant,
             managed: installed.managed,
             source: installed.source,
             installedAt: installed.installedAt,
@@ -494,18 +515,20 @@ export default function AppDetailPage() {
         // Neither installed nor in the catalog — but the catalog read FAILED, so
         // this is a load failure, not a missing app.
         throw sideFailure
+      } else {
+        // A real not-found (null app, no error) shows the "doesn't exist" page;
+        // a `keepView` refresh still holds the old record, so drop it here.
+        setApp(null)
       }
-      // Otherwise a real not-found: `app` stays null with no error, and the
-      // render below shows the "doesn't exist" page for exactly that pair.
       if (sideFailure) setError(sideFailure instanceof Error ? sideFailure.message : String(sideFailure))
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : i18nT('pages.appDetailPage.failed_to_load_app'))
     } finally {
       setLoading(false)
     }
-  }, [name, clearError])
+  }, [name, clearError, queryClient])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load({ shareListing: true }) }, [load])
 
   // Auto-trigger install/update after an IN-APP action navigated here.
   //
@@ -525,12 +548,9 @@ export default function AppDetailPage() {
     autoActionTriggered.current = true
     // Clear the state so a refresh or Back/Forward doesn't re-fire it.
     navigate(`${location.pathname}${location.search}`, { replace: true, state: null })
-    // An installed app whose bytes came from a directory on this machine has no
-    // registry row to install from — its refresh is the update endpoint, which
-    // re-copies the source directory recorded at install. The streaming registry
-    // install is for everything else: a registry-sourced app, and an app not
-    // installed at all.
-    if (stateAction === 'update' && app.installed && !isRegistrySourced(app)) {
+    // A directory install with no registry update pending is this page's Sync (a
+    // re-copy). Everything else runs the streaming registry install, as Update does.
+    if (stateAction === 'update' && app.installed && !isRegistrySourced(app) && !app.updateAvailable) {
       handleAction('update')
       return
     }
@@ -560,6 +580,7 @@ export default function AppDetailPage() {
     // Drop the previous attempt's reason: a retry that fails for a new cause (or
     // is aborted, which has none) must never show the first attempt's.
     installFailureRef.current = { message: '', code: '' }
+    setLocalSwitch(null)
     setBackendRefusedMsg('')
     setClientInstall(null)
     installAbortRef.current?.abort()
@@ -612,7 +633,14 @@ export default function AppDetailPage() {
         await load()
         window.dispatchEvent(new Event('mc:apps-changed'))
       } else {
-        reportInstallFailure(result.error || i18nT('pages.appDetailPage.install_failed'), 'system', result.code || '')
+        const message = result.error || i18nT('pages.appDetailPage.install_failed')
+        reportInstallFailure(message, 'system', result.code || '')
+        const repository = localOnlyTrustRepository(result)
+        if (repository) {
+          // Refused before the clone: the log is empty and the banner's button is the way on.
+          setShowInstallLog(false)
+          setLocalSwitch({ message, repository })
+        }
         return 'failed'
       }
     } catch (e: unknown) {
@@ -645,9 +673,15 @@ export default function AppDetailPage() {
     return 'done'
   }
 
-  /** The single enable path — shared by the action buttons and the trust retry. */
-  const runEnable = useCallback(async (name: string) => {
-    const result = await api.enableApp(name, app?.sessionApprovalConsentPending === true)
+  /**
+   * The single enable path — shared by the action buttons and the trust retry.
+   * `memberThreads` is what the confirmed disclosure named; the trust retry
+   * passes none, so it falls back to the same `app` snapshot its modal showed.
+   */
+  const runEnable = useCallback(async (name: string, memberThreads?: boolean) => {
+    const consent = app?.sessionApprovalConsentPending === true
+    const shownMemberThreads = memberThreads ?? app?.manifest?.permissions?.memberThreads === true
+    const result = await api.enableApp(name, consent, undefined, consent && shownMemberThreads)
     recordEvent('app_enable', { app: name, version: app?.installedVersion || app?.version })
     setBackendRefusedMsg(backendRefusedNotice(app ? appDisplayName(app) : name, result))
     await load()
@@ -665,7 +699,9 @@ export default function AppDetailPage() {
   // instead of the first-party fallback label (#20656).
   // Until the registries list lands (or when it fails) the tier is unknown, so
   // the not-vetted box shows (`consentTierFor`) rather than read it as vetted.
-  const consentTarget = trust.target && app && app.name === trust.target.name && app.origin !== 'local' && app._registry
+  // Except a local-source switch: it asks to trust the listing's own repository.
+  const consentTarget = trust.target && app && app.name === trust.target.name
+    && (app.origin !== 'local' || trust.target.switchesLocalSource === true) && app._registry
     ? { ...trust.target, _registry: app._registry, ...consentTierFor(app._registry, sourceNames, registriesData === undefined) }
     : trust.target
   const { confirm: confirmConsent, confirmDialog: consentDialog } = useConfirm()
@@ -689,6 +725,8 @@ export default function AppDetailPage() {
         trustRepository: app.trustRepository,
         origin: app.origin,
         sessionApproval: app.manifest?.permissions?.sessionApproval === true,
+        memberThreads: app.manifest?.permissions?.memberThreads === true,
+        workerAutoApprove: app.manifest?.permissions?.workerAutoApprove === true,
         retryInstalls: true,
         // The Update buttons funnel here too, over an app that is already there.
         replacesInstalled: app.installed === true,
@@ -723,6 +761,21 @@ export default function AppDetailPage() {
     )
   }
 
+  // The local-only refusal's way on (`appDetailPageLocalSwitch.ts`).
+  const openLocalSwitch = () => {
+    if (!app || !localSwitch) return
+    openLocalSourceSwitch(app, localSwitch.repository, {
+      openTrust: trust.open,
+      settle: async () => {
+        clearError(); setLocalSwitch(null); setShowInstallLog(false)
+        await load()
+        window.dispatchEvent(new Event('mc:apps-changed'))
+      },
+      setBackendRefusedMsg,
+      showSuccess: (msg) => { setSuccessMsg(msg); setTimeout(() => setSuccessMsg(''), 4000) },
+    })
+  }
+
   const handleAction = async (action: 'enable' | 'disable' | 'uninstall' | 'update') => {
     if (!app) return
     // Intercept uninstall to show confirmation modal
@@ -742,16 +795,31 @@ export default function AppDetailPage() {
         // the untrusted path alike, so the button has one ceremony: a dialog
         // that names the grant, then enable (the trust modal may still follow
         // for an untrusted repository).
+        // What the dialog names is what the enable consents to: an update that
+        // adds the scope while the dialog is open is refused, not lent this click.
+        const memberThreads = app.manifest?.permissions?.memberThreads === true
         if (app.sessionApprovalConsentPending) {
+          // The dialog is the consent moment, and for a trusted repository the
+          // only one (no trust modal follows), so it must name everything the
+          // grant reaches: when the manifest widens it to member threads --
+          // which may be the very reason re-consent is pending -- say so here,
+          // in the same words as the Permissions box and the trust modal.
           const ok = await confirmConsent({
             title: i18nT('pages.appDetailPage.session_approval_confirm_title', { name: appDisplayName(app) }),
-            body: i18nT('pages.appDetailPage.session_approval_desc'),
+            body: memberThreads
+              ? (
+                <>
+                  <p className="m-0">{i18nT('pages.appDetailPage.session_approval_desc')}</p>
+                  <p className="m-0 mt-1">{i18nT('pages.appDetailPage.session_approval_member_threads')}</p>
+                </>
+              )
+              : i18nT('pages.appDetailPage.session_approval_desc'),
             confirmLabel: i18nT('pages.appDetailPage.enable_and_allow_chat_control'),
             danger: false,
           })
           if (!ok) return
         }
-        await runEnable(app.name)
+        await runEnable(app.name, memberThreads)
         await load()
         return
       }
@@ -760,7 +828,8 @@ export default function AppDetailPage() {
       if (action === 'disable') {
         recordEvent('app_disable', { app: app.name, version: app.installedVersion || app.version })
       }
-      await load()
+      // Sync stays on screen after a refresh, so reload in place and keep its focus.
+      await load(action === 'update' ? { keepView: true } : undefined)
       // `load()` clears the error but does not speak to success, and a same-version
       // re-copy changes nothing visible, so say it explicitly. The Sync button that
       // reaches here is not gated on source, and `handle_update_app` re-clones a
@@ -794,7 +863,14 @@ export default function AppDetailPage() {
           trustRepository: app.trustRepository,
           origin: app.origin,
           sessionApproval: app.manifest?.permissions?.sessionApproval === true,
+          memberThreads: app.manifest?.permissions?.memberThreads === true,
+          workerAutoApprove: app.manifest?.permissions?.workerAutoApprove === true,
         })
+      } else if (action === 'enable' && isSessionApprovalConsentRequiredError(e)) {
+        // The grant changed under the dialog (an update added a scope it did not
+        // name). Reload so the next click shows the grant as it now stands.
+        await load()
+        setError(e instanceof Error ? e.message : i18nT('pages.appDetailPage.failed_to', { action }))
       } else {
         setError(e instanceof Error ? e.message : i18nT('pages.appDetailPage.failed_to', { action }))
       }
@@ -943,6 +1019,7 @@ export default function AppDetailPage() {
   // the journal key, so a later unrelated `setError` never inherits an install
   // failure's code.
   const errorReport = error ? findReport(error) : undefined
+  const localOnlyRepo = localSwitch && localSwitch.message === error ? localSwitch.repository : ''
   // The desktop build-step refusal is permanent for this app as it is: the
   // Install / Update buttons below are disabled while its banner is up, because
   // pressing them runs the same clone and build into the same refusal. The
@@ -976,6 +1053,14 @@ export default function AppDetailPage() {
         disabledTitle: i18nT('pages.appDetailPage.dismiss_notice_to_install_again'),
       }
   const installDisabledTitle = refusalCopy?.disabledTitle
+  // An enable refused for a `memberThreads` scope the dialog did not name shows
+  // the catalog's sentence, picked by the journal entry's code like the build
+  // refusal above; `error` keeps the server's English, the report's key. The
+  // grant's own pending refusal shares the code and keeps the server's text
+  // unless the reloaded manifest declares the scope.
+  const memberThreadsRefused = Boolean(error)
+    && errorReport?.code === SESSION_APPROVAL_CONSENT_REQUIRED
+    && app.manifest?.permissions?.memberThreads === true
 
   return (
     <>
@@ -1145,6 +1230,9 @@ export default function AppDetailPage() {
               {stagedOpenFullUrl && (
                 <div className="text-[13px]">{i18nT('pages.appDetailPage.grants_reconsent_link_open_full_url')}</div>
               )}
+              {stagedWorkerAutoApprove && (
+                <div className="text-[13px]">{i18nT('pages.appDetailPage.grants_reconsent_worker_auto_approve')}</div>
+              )}
               {app.enabled && (
                 <span className="text-[13px] text-muted">{i18nT('pages.appDetailPage.grants_reconsent_undo', { name: appDisplayName(app) })}</span>
               )}
@@ -1157,7 +1245,7 @@ export default function AppDetailPage() {
               primary
               onClick={async () => {
                 startAction('approve_grants')
-                const approved = [...stagedApi, ...stagedEvents, ...stagedLinkHosts, ...stagedLinkPatterns, ...(stagedFullUrl ? ['fullUrl'] : []), ...stagedMessageActions.map(e => messageActionGrantLabel(e, declaredMessageActions)), ...stagedOpenHosts, ...(stagedOpenFullUrl ? ['fullUrl'] : []), ...stagedComposerActions, ...stagedSelection.map(e => selectionActionGrantLabel(e, declaredSelectionActions))].join(', ')
+                const approved = [...stagedApi, ...stagedEvents, ...stagedLinkHosts, ...stagedLinkPatterns, ...(stagedFullUrl ? ['fullUrl'] : []), ...stagedMessageActions.map(e => messageActionGrantLabel(e, declaredMessageActions)), ...stagedOpenHosts, ...(stagedOpenFullUrl ? ['fullUrl'] : []), ...stagedComposerActions, ...stagedSelection.map(e => selectionActionGrantLabel(e, declaredSelectionActions)), ...(stagedWorkerAutoApprove ? ['workerAutoApprove'] : [])].join(', ')
                 try {
                   const result = await api.enableApp(app.name, false, {
                     api: stagedApi,
@@ -1170,6 +1258,7 @@ export default function AppDetailPage() {
                     linkOpenFullUrl: stagedOpenFullUrl ? ['fullUrl'] : [],
                     composerActions: stagedComposerActions.map(actionGrant),
                     selectionActions: stagedSelection,
+                    workerAutoApprove: stagedWorkerAutoApprove ? ['ownSlots'] : [],
                   })
                   setBackendRefusedMsg(backendRefusedNotice(appDisplayName(app), result))
                   setGrantsApprovedMsg(i18nT('pages.appDetailPage.grants_approved', { entries: approved }))
@@ -1235,8 +1324,16 @@ export default function AppDetailPage() {
             dismissLabelVisible
             className="mb-4 animate-rise"
           />
+        ) : localOnlyRepo ? (
+          // The refusal's error notice keeps the trust-and-update path in its footer.
+          <AppDetailPageLocalOnlyNotice name={appDisplayName(app)} repository={localOnlyRepo}
+            report={errorReport} busy={actionBusy} onTrust={openLocalSwitch} onDismiss={clearError} />
         ) : (
-          <ErrorNotice message={error} askAgent onDismiss={clearError} className="mb-4 animate-rise" />
+          <ErrorNotice
+            message={memberThreadsRefused ? i18nT('pages.appDetailPage.session_approval_member_threads_refused') : error}
+            report={memberThreadsRefused ? errorReport : undefined}
+            askAgent onDismiss={clearError} className="mb-4 animate-rise"
+          />
         )}
 
         {/* Third-party execution-trust consent. Opened when an enable OR a
@@ -1443,7 +1540,7 @@ export default function AppDetailPage() {
                     </>
                   )}
                   {canUpdate && app.updateAvailable && <Btn {...uiLocation('apps.detail.update')} onClick={handleInstall} disabled={actionBusy || installRefusedForGood} title={installDisabledTitle} className="!bg-[var(--info)] !text-info-fg hover:!opacity-80">{isActionRunning('install') ? <><Loader2 size={14} className="animate-spin" /> {i18nT('pages.appDetailPage.updating')}</> : <><ArrowUp size={14} /> {i18nT('pages.appDetailPage.update')}</>}</Btn>}
-                  {canUpdate && !app.updateAvailable && <Btn {...uiLocation('apps.detail.sync')} onClick={() => handleAction('update')} disabled={actionBusy} title={i18nT('pages.appDetailPage.sync_app_from_its_source_directory')}><RefreshCw size={14} /> {i18nT('pages.appDetailPage.sync')}</Btn>}
+                  {canUpdate && !app.updateAvailable && <Btn {...uiLocation('apps.detail.sync')} onClick={() => { if (!actionBusy) void handleAction('update') }} aria-disabled={isActionRunning('update') || undefined} disabled={actionBusy && !isActionRunning('update')} className="aria-disabled:cursor-not-allowed aria-disabled:opacity-30" title={i18nT('pages.appDetailPage.sync_app_from_its_source_directory')}><RefreshCw size={14} /> {i18nT('pages.appDetailPage.sync')}</Btn>}
                   {canUninstall && <Btn {...uiLocation('apps.detail.uninstall')} danger onClick={() => handleAction('uninstall')} disabled={actionBusy}><Trash2 size={14} /> {i18nT('pages.appDetailPage.uninstall')}</Btn>}
                 </>
               )}
@@ -1533,7 +1630,7 @@ export default function AppDetailPage() {
                 <div className="relative group/cmd">
                   <pre className="bg-bg border border-border rounded-lg p-3 pr-10 text-[13px] font-mono text-text overflow-x-auto whitespace-pre-wrap break-all">{resolvedShell}</pre>
                   <button
-                    className="absolute top-2 right-2 p-1.5 rounded-md bg-bg-elevated border border-border text-muted hover:text-text hover:border-accent/40 transition-all opacity-0 group-hover/cmd:opacity-100 [@media(hover:none)]:opacity-100"
+                    className="absolute top-2 right-2 p-1.5 rounded-md bg-bg-elevated border border-border text-muted hover:text-text hover:border-accent/40 transition-all opacity-0 group-hover/cmd:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
                     aria-label={i18nT('pages.appDetailPage.copy_command')}
                     onClick={async () => {
                       // Gate the confirmation on the boolean: a tick over an
@@ -1690,12 +1787,30 @@ export default function AppDetailPage() {
                       <ShieldAlert size={13} className="mt-[2px] shrink-0 text-warn" />
                       <span>{i18nT('pages.appDetailPage.session_approval_desc')}</span>
                     </div>
+                    {app.manifest.permissions.memberThreads && (
+                      <div className="mt-1 text-text">
+                        {i18nT('pages.appDetailPage.session_approval_member_threads')}
+                      </div>
+                    )}
                     <SessionApprovalModes
                       className="mt-1.5 text-[12px]"
                       label={i18nT('pages.appDetailPage.session_approval_modes')}
                     />
                     <div className="mt-1.5 text-[11px] text-muted">
                       {i18nT('pages.appDetailPage.session_approval_manifest_key')}: <code>sessionApproval</code>
+                      {app.manifest.permissions.memberThreads && <>, <code>memberThreads</code></>}
+                    </div>
+                  </div>
+                )}
+                {app.manifest.permissions.workerAutoApprove && (
+                  <div className="rounded-md border border-warn/30 bg-warn-subtle px-2.5 py-2">
+                    <div className="flex items-start gap-2 text-text">
+                      <ShieldAlert size={13} className="mt-[2px] shrink-0 text-warn" />
+                      <span>{i18nT('pages.appDetailPage.worker_auto_approve_desc')}</span>
+                    </div>
+                    <div className="mt-1.5 text-[11px] text-muted">
+                      {i18nT('pages.appDetailPage.session_approval_manifest_key')}: <code>workerAutoApprove</code>
+                      {stagedWorkerAutoApprove && <span className="ml-1 text-warn">· {i18nT('pages.appDetailPage.grant_not_approved')}</span>}
                     </div>
                   </div>
                 )}
@@ -1752,19 +1867,19 @@ export default function AppDetailPage() {
                 {agents.length > 0 && (
                   <div className="flex items-start gap-2 text-muted">
                     <Bot size={13} className="mt-0.5 shrink-0" />
-                    <div>{agents.map((a: string) => a.split('/').pop()?.replace('.json', '')).join(', ')}</div>
+                    <div>{fmtList(agents.map((a: string) => String(a.split('/').pop()?.replace('.json', '') ?? '')), { style: 'narrow' })}</div>
                   </div>
                 )}
                 {skills.length > 0 && (
                   <div className="flex items-start gap-2 text-muted">
                     <Zap size={13} className="mt-0.5 shrink-0" />
-                    <div>{skills.map((s: string) => s.split('/').pop()).join(', ')}</div>
+                    <div>{fmtList(skills.map((s: string) => String(s.split('/').pop() ?? '')), { style: 'narrow' })}</div>
                   </div>
                 )}
                 {crons.length > 0 && (
                   <div className="flex items-start gap-2 text-muted">
                     <Clock size={13} className="mt-0.5 shrink-0" />
-                    <div>{crons.map((c) => c.name).join(', ')}</div>
+                    <div>{fmtList(crons.map((c) => String(c.name ?? '')), { style: 'narrow' })}</div>
                   </div>
                 )}
               </div>
@@ -1874,7 +1989,7 @@ export default function AppDetailPage() {
                 </div>
               )}
               {app.manifest?.minKiroCrewVersion && <div>{i18nT('pages.appDetailPage.min_product_version', { version: app.manifest.minKiroCrewVersion })}</div>}
-              {app.platform?.os && <div>{i18nT('pages.appDetailPage.platform_list', { os: app.platform.os.join(', ') })}</div>}
+              {app.platform?.os && <div>{i18nT('pages.appDetailPage.platform_list', { os: fmtList(app.platform.os.map((o) => String(o ?? '')), { style: 'narrow' }) })}</div>}
             </div>
           </Card>
         </div>

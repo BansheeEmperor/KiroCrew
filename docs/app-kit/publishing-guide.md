@@ -169,7 +169,7 @@ and update paths are not masked and check out LFS content as usual.
 |------|--------------|---------|
 | `onInstall` | After a **registry** install has cloned and built the source, before the files are copied into the data home | 300s |
 | `onUninstall` | Before app files are removed, and only after cron cleanup has succeeded | 120s |
-| `onEnable` | After resources are registered, the backend is started, and dependencies are resolved | 30s, or `onEnableTimeout` (1-300) |
+| `onEnable` | After resources are registered, the backend is started, and dependencies are resolved; and after every update of an enabled app, once it is re-registered and its backend started | 30s, or `onEnableTimeout` (1-300) |
 | `onDisable` | First step of disable, before hooks, backend stop, and deregistration | 30s, or `onDisableTimeout` (1-300) |
 
 Execution model:
@@ -199,9 +199,16 @@ Execution model:
 - Installing from a **local path** (`POST /api/apps/install`, `kirocrew app
   install <dir>`) copies and registers the app but does not run `onInstall`. Do
   any build step yourself while iterating locally.
+- An update of an enabled app re-runs `onEnable` once the new version is in
+  place. The update replaces the installed folder with a fresh copy that never
+  carries `node_modules` or `.venv`, so an `onEnable` that installs them (for
+  example `cd runtime && npm ci --omit=dev`) puts them back. Keep it idempotent.
+  If it fails, the app stays enabled on the new version and the user is told
+  why; the next enable or update runs it again.
 - `setup.onUpdate` parses and round-trips through the manifest, but no code path
-  executes it. Do not put work an update depends on there. Make `onInstall`
-  idempotent instead, since a registry update re-runs it.
+  executes it. Do not put work an update depends on there. Put it in `onEnable`,
+  or in an idempotent `onInstall` for a build step, since a registry update
+  re-runs it.
 
 Only declare `onUninstall` for state Kiro Crew cannot see: app binaries outside
 the data home, shell aliases, launchd plists. For `resources: "gateway"` apps the
@@ -490,6 +497,13 @@ credential-free by default: an anonymous environment plus a strict sandbox that
 hides `~/.ssh`. This is a confused-deputy defense, because an index the owner did
 not author could otherwise point at a private sibling repo on the owner's own
 trusted forge and have the gateway read it with ambient credentials.
+
+Such a clone also reads no ssh config, so an app repo on a host you reach only
+through `~/.ssh/config` (a `ProxyCommand`, `ProxyJump` or `Host` alias) cannot be
+cloned that way, and the install fails with `git_clone_failed_strict_ssh_route`.
+Clone the repo from your own shell and run `kirocrew app install <dir>`, or use
+the same-repo carve-out or an owner-tier registry below, which clone with your
+credentials.
 
 **The same-repo carve-out** relaxes that for the monorepo layout. When an index
 entry's effective clone URL is byte-identical to the registry repo URL the owner

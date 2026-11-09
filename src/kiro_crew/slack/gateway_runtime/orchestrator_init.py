@@ -180,6 +180,7 @@ def __init__(
     self.channel_history = None
     self.dashboard_state = None
     self._background_tasks = set()  # prevent GC of fire-and-forget tasks
+    self._skills_sync_task = None
     # Approval-state persistence is scheduled while the MCP broker starts,
     # but its task waits for the dashboard/API readiness boundary.
     self._mcp_launch_approval_ready = asyncio.Event()
@@ -201,7 +202,7 @@ def __init__(
     # write-after-clear race without any event-loop dependency.
     self._marker_clear_pending = threading.Event()
     self._dashboard_runner = None
-    # Enterprise build: the service whose boot probe saw the kiro login, handed
+    # LTS build: the service whose boot probe saw the kiro login, handed
     # to the dashboard so its gate starts open on that verdict. None in oss.
     self._boot_kiro_service = None
     self._handler_tasks = set()  # type: ignore[type-arg]

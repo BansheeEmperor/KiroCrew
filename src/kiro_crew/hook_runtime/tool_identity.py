@@ -33,8 +33,11 @@ if TYPE_CHECKING:
         DEEPSEEK_READ_ONLY_TOOLS,
         KIRO_TOOL_ALIASES,
         TOOL_AUTO_APPROVE,
+        SpecDeniedGrant,
         ToolHookResult,
         _bounded_pattern_search,
+        _every_operation_names_a_path,
+        as_spec_denied_grant,
         logger,
         policy_aliases,
         security,
@@ -197,6 +200,21 @@ class ToolCall:
     #: ``spec-write-allowlist`` tier joins a relative write target to. ``""``
     #: leaves a relative target uncovered.
     spec_write_cwd: str = ""
+    #: ``AcpEvent.spec_denied_grant``: grants that hold only after the
+    #: ``spec-denies`` row finds no deny naming the call. ``None`` grants nothing.
+    spec_denied_grant: SpecDeniedGrant | None = None
+    #: ``AcpEvent.spec_shell_readonly``: the KAS session's own agent sets
+    #: ``autoAllowReadonly: true`` beside ``denyByDefault``, so the
+    #: ``spec-shell-allowlist`` tier lets a read-only command past for the
+    #: read-only tier to answer. ``False`` lifts nothing.
+    spec_shell_readonly: bool = False
+    #: ``AcpEvent.spec_granted_paths``: the KAS session's own agent's write
+    #: ``allowedPaths`` as absolute globs. Read by the ``spec-builtin-grant`` tier
+    #: only, against every target of a file write. Empty grants nothing.
+    spec_granted_paths: tuple[str, ...] = ()
+    #: ``AcpEvent.spec_granted_read_paths``: the same for the read ``allowedPaths``,
+    #: against the target of a file read. Empty grants nothing.
+    spec_granted_read_paths: tuple[str, ...] = ()
     #: ``AcpEvent.harness_builtin_tool``: the kiro-cli read built-in a claude call
     #: is for, from the name claude-agent-acp stamped on the tool_call frame. A
     #: deny target, so a rule on ``web_fetch`` binds claude's WebFetch, and the
@@ -266,6 +284,12 @@ class ToolCall:
                 getattr(event, "spec_write_allowlist", None)
             ),
             "spec_write_cwd": _plain_str(getattr(event, "spec_write_cwd", "")),
+            "spec_denied_grant": as_spec_denied_grant(getattr(event, "spec_denied_grant", None)),
+            "spec_shell_readonly": getattr(event, "spec_shell_readonly", False) is True,
+            "spec_granted_paths": _granted_patterns(getattr(event, "spec_granted_paths", None)),
+            "spec_granted_read_paths": _granted_patterns(
+                getattr(event, "spec_granted_read_paths", None)
+            ),
             "harness_builtin_tool": getattr(event, "harness_builtin_tool", "") or "",
             "deepseek_tool_name": getattr(event, "deepseek_tool_name", "") or "",
             "spawn_target": getattr(event, "spawn_target", "") or "",
@@ -296,6 +320,10 @@ class ToolCall:
             "spec_shell_allowlist": self.spec_shell_allowlist,
             "spec_write_allowlist": self.spec_write_allowlist,
             "spec_write_cwd": self.spec_write_cwd,
+            "spec_denied_grant": self.spec_denied_grant,
+            "spec_shell_readonly": self.spec_shell_readonly,
+            "spec_granted_paths": self.spec_granted_paths,
+            "spec_granted_read_paths": self.spec_granted_read_paths,
             "harness_builtin_tool": self.harness_builtin_tool,
             "deepseek_tool_name": self.deepseek_tool_name,
             "spawn_target": self.spawn_target,
@@ -500,6 +528,53 @@ def _is_host_search_builtin_call(
         pattern = raw_params.get("pattern")
         if not isinstance(pattern, str) or _glob_pattern_leaves_root(pattern):
             return False
+    return _builtin_paths_proven(raw_params)
+
+
+def _is_host_file_read_builtin_call(
+    mcp_tool_name: str,
+    mcp_server_name: str,
+    raw_params: object,
+    *,
+    mcp_identity_trusted: bool,
+) -> bool:
+    """True when a kiro-cli file read is proven to only read the files it names.
+
+    The interactive read-only tier's proof for kiro-cli's file reader: its
+    permission request carries no ``kind`` (only the tool_call frame states
+    ``read``), so the kind allow-list never sees the call, and its ``Reading …``
+    title is no form the title fallback takes. All of this must hold:
+
+    * the identity is host-trusted and names a built-in, by the same rule as
+      :func:`_is_host_read_only_builtin` (``mcp_identity_trusted``, no server);
+    * the tool is the FILE reader, ``read`` or ``fs_read`` after
+      :func:`_host_builtin_alias`. ``web_fetch`` and ``web_search`` are host
+      read-only built-ins too, but they reach the network, so they get no proof
+      here, as :data:`_HOST_SEARCH_BUILTIN_TOOLS` keeps them out of the search one;
+    * every operation names its target under a key the argument scan reads and
+      none is an Image read (``governance._every_operation_names_a_path``): an
+      Image read's ``image_paths`` is not scanned, so its target would be unproven;
+    * the path checks of :func:`_is_host_search_builtin_call`
+      (:func:`_builtin_paths_proven`). A Directory read lists the tree below its
+      path, so a path that contains a sensitive location keeps the prompt.
+
+    A call that fails any of these is not refused here; it reaches the prompt it
+    reached before.
+    """
+    if not mcp_identity_trusted or mcp_server_name or not isinstance(raw_params, Mapping):
+        return False
+    if (_host_builtin_alias(mcp_tool_name, mcp_server_name) or mcp_tool_name) != "fs_read":
+        return False
+    return _every_operation_names_a_path(raw_params) and _builtin_paths_proven(raw_params)
+
+
+def _builtin_paths_proven(raw_params: Mapping) -> bool:
+    """Whether a host file built-in's paths name what it reads for the gate as well.
+
+    At least one path argument, the scan not truncated, and every path anchored
+    (:func:`_search_root_anchored`) with no sensitive location below it
+    (``security.path_contains_sensitive``, which counts a stall as one).
+    """
     paths = target_paths(raw_params)
     if paths.truncated or not paths:
         return False
@@ -631,7 +706,10 @@ def set_builtin_app_mcp_servers(names: Iterable[str]) -> None:
 
     Called once at gateway boot with the names from
     ``apps.execution.builtin_app_mcp_servers`` (which enumerates the same
-    immutable manifest sources as ``builtin_app_names``). Dependency-inverted
+    immutable manifest sources as ``builtin_app_names``) and the adopted servers
+    ``apps.builtin_adoption_gate`` keeps (each one a shipped manifest declares,
+    launched as adoption carried it, under the pin's repository trust).
+    Dependency-inverted
     like ``set_builtin_app_names`` so ``hooks`` never imports ``apps`` and the
     gate never touches the filesystem. Idempotent; a later call replaces the set.
     """
@@ -657,8 +735,9 @@ def set_builtin_app_names(names: Iterable[str]) -> None:
 
     Called once at gateway boot with the names discovered from the shipped
     manifests (``apps.execution.builtin_app_names``, which enumerates the same
-    sources as ``shipped_builtin_app_root`` — core + the active edition). The
-    dependency is
+    sources as ``shipped_builtin_app_root`` — core + the active edition) plus each
+    former builtin whose adopted record keeps a server
+    (``apps.builtin_adoption_gate``). The dependency is
     inverted on purpose — boot code (which already imports ``apps``) pushes the
     names in, so ``hooks`` never imports ``apps`` and the gate never touches the
     filesystem. Idempotent; a later call replaces the set.
@@ -670,8 +749,10 @@ def set_builtin_app_names(names: Iterable[str]) -> None:
 def _is_first_party_app(app: str) -> bool:
     """True when *app* is a shipped builtin (first-party gateway code).
 
-    Only a BUILTIN app's MCP server is provably the gateway's own shipped code,
-    so only then does the app-own-server auto-approve's justification — "the
+    Only a BUILTIN app's MCP server is provably the gateway's own shipped code (a
+    former builtin adopted from its pin keeps it under the operator's grant to the
+    pinned repository, ``apps.builtin_adoption_gate``), so only then does the
+    app-own-server auto-approve's justification — "the
     server is the app's own declared code and only touches the app's own data,
     never a host surface" — actually hold.  A THIRD-PARTY installed app's server
     is arbitrary operator-installed code whose internals the PreToolUse gate
@@ -692,7 +773,8 @@ def set_builtin_app_agents(mapping: "Mapping[str, str]") -> None:
     """Install the agent → owning-builtin-app map for the gate.
 
     Called once at gateway boot with ``apps.execution.builtin_app_agents()`` —
-    derived only from shipped manifests whose install is builtin-owned, with
+    derived only from shipped manifests whose install is builtin-owned (or adopted
+    with a kept server, ``apps.builtin_adoption_gate``), with
     ambiguous names already dropped. Dependency-inverted like
     ``set_builtin_app_names`` so ``hooks`` never imports ``apps``. Idempotent; a
     later call replaces the map.

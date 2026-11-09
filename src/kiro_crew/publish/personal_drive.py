@@ -83,6 +83,7 @@ from kiro_crew.publish.personal_drive_parts import (  # noqa: F401
     _sandbox_policy_config,
     _serialized,
     _unknown_profile_message,
+    _with_utf8_charset,
     bound_account,
     make_external_id,
     split_external_id,
@@ -123,7 +124,7 @@ logger = logging.getLogger(__name__)
 #: the default path. Flipping this key to ``DEFAULT_PROVIDER`` is the last step of that
 #: work, not a step of this change.
 #:
-#: The value satisfies the ``^[a-z0-9-]{1,32}$`` shape the one HTTP boundary that
+#: The value satisfies the ``^[a-z0-9_-]{1,32}$`` shape the one HTTP boundary that
 #: accepts a provider id validates against, so the picker row it renders can actually
 #: be submitted.
 PERSONAL_DRIVE_PROVIDER = "personal-drive"
@@ -208,7 +209,7 @@ class PersonalDriveProvider(PublishProvider):
         """One destination, one registry key.
 
         There is deliberately no per-account variant: a provider id is validated at the
-        HTTP boundary against ``^[a-z0-9-]{1,32}$``, so an account-qualified key could be
+        HTTP boundary against ``^[a-z0-9_-]{1,32}$``, so an account-qualified key could be
         listed in the picker but never submitted -- a row that 400s on click is worse
         than no row. Which account a NEW publish uses is the profile registry's default;
         an EXISTING publication pins the ACCOUNT ID that holds it into its ``external_id``,
@@ -712,6 +713,33 @@ class PersonalDriveProvider(PublishProvider):
         except PublishError:
             return False
         return True
+
+    async def source_problem(self, *, external_id: str) -> tuple[str, str] | None:
+        """Why this publication's drive copy cannot be read, or ``None``.
+
+        The one cause known without an AWS call: the profile the publication is bound
+        to is not in the registry, so every call for it refuses (see
+        :meth:`reachable_for`). Reads the local profile registry only, because
+        ``upstream_status`` asks on every artifact page open.
+
+        shortcut: does not check whether the object itself still exists; that needs
+        AWS calls on each page open, so add it only behind a cache.
+        """
+        _key, _account, bound = _parse_external_id(external_id)
+        if not bound:
+            return None
+        try:
+            if profiles.resolve_profile(bound) is not None:
+                return None
+        except Exception as exc:  # an unreadable registry proves nothing either way
+            logger.info("source_problem: could not read the profile registry: %s", exc)
+            return None
+        return (
+            f"This artifact's drive copy is in AWS profile {bound!r}, which is no "
+            "longer registered here, so Kiro Crew can't read or change it. Your local "
+            "copy is unchanged; register the profile again on the Artifact Deploy page.",
+            "personal_drive_profile_not_registered",
+        )
 
     async def serving_notice(self, *, external_id: str) -> tuple[str, str] | None:
         """Re-derive this drive's CURRENT serving notice, or ``None`` if it cannot look.
@@ -1329,7 +1357,7 @@ class PersonalDriveProvider(PublishProvider):
             "--body",
             body,
             "--content-type",
-            content_type or "application/octet-stream",
+            _with_utf8_charset(content_type or "application/octet-stream"),
             "--cache-control",
             f"max-age={_EDGE_MAX_AGE_SECONDS}",
             "--metadata",
@@ -1845,7 +1873,7 @@ def register_public_edition_providers() -> None:
     back and what has to land before the key moves.
 
     There is deliberately no per-account key. A provider id is validated at the one HTTP
-    boundary that accepts one against ``^[a-z0-9-]{1,32}$``, so an account-qualified key
+    boundary that accepts one against ``^[a-z0-9_-]{1,32}$``, so an account-qualified key
     would be listed by ``list_providers`` and rejected on submit -- a picker row that
     400s when clicked is worse than no row at all. Choosing an account per publish needs
     a real publish argument on the shared seam, which is its own change. Until then a

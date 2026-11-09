@@ -584,6 +584,9 @@ class SessionManager:
     _has_allocation_reservation = _claims._has_allocation_reservation
     _spawn_in_flight = _claims._spawn_in_flight
     try_acquire = _claims.try_acquire
+    is_retiring = _claims.is_retiring
+    run_identity_check = _claims.run_identity_check
+    _acquire_after_identity_check = _claims._acquire_after_identity_check
     capability_runtime_view = _claims.capability_runtime_view
     active_providers = _claims.active_providers
     any_active_turn = _claims.any_active_turn
@@ -603,6 +606,7 @@ class SessionManager:
     ending_key = _claims.ending_key
     allocation_requested_model = _claims.allocation_requested_model
     fresh_start_unclaimed = _claims.fresh_start_unclaimed
+    rearm_first_turn = _claims.rearm_first_turn
     record_effort_override = _claims.record_effort_override
     record_success = _claims.record_success
     record_failure = _claims.record_failure
@@ -643,12 +647,12 @@ class SessionManager:
     clear_queue = _claims.clear_queue
     is_provider_alive = _claims.is_provider_alive
     get_approval_policy = _claims.get_approval_policy
+    approval_revocation = _claims.approval_revocation
     get_agent = _claims.get_agent
     get_agent_selection = _claims.get_agent_selection
     set_approval_policy = _claims.set_approval_policy
     # -- Background, warm-pool and companion runtimes (session_parts.runtimes).
     start_pool = _runtimes.start_pool
-    _start_cleanup_for_waiting_deletes = _runtimes._start_cleanup_for_waiting_deletes
     _ensure_background = _runtimes._ensure_background
     _configured_bg_backend_raw = _runtimes._configured_bg_backend_raw
     _configured_bg_backend = _runtimes._configured_bg_backend
@@ -673,6 +677,8 @@ class SessionManager:
     _drain_and_claim = _runtimes._drain_and_claim
     _schedule_replenish = _runtimes._schedule_replenish
     _pool_pids = _runtimes._pool_pids
+    _spare_pid_providers = _runtimes._spare_pid_providers
+    _remove_pooled_providers_by_pid = _runtimes._remove_pooled_providers_by_pid
     _in_flight_pids = _runtimes._in_flight_pids
     _companion_runtime_pids = _runtimes._companion_runtime_pids
     _POOL_HEALTH_INTERVAL = _runtimes._POOL_HEALTH_INTERVAL
@@ -703,6 +709,8 @@ class SessionManager:
     consume_needs_reinjection = _turn_context.consume_needs_reinjection
     provider_switch_replay_pending = _turn_context.provider_switch_replay_pending
     mark_provider_switch_replay = _turn_context.mark_provider_switch_replay
+    provider_switch_replay_delivered = _turn_context.provider_switch_replay_delivered
+    note_provider_switch_replay_delivered = _turn_context.note_provider_switch_replay_delivered
     consume_provider_switch_replay = _turn_context.consume_provider_switch_replay
     first_turn_history_owed_pending = _turn_context.first_turn_history_owed_pending
     unlanded_marker_pending = _turn_context.unlanded_marker_pending
@@ -775,6 +783,7 @@ class SessionManager:
     remove = _teardown.remove
     retire_kiro_identity_sessions = _teardown.retire_kiro_identity_sessions
     flag_identity_stamp_mismatches = _teardown.flag_identity_stamp_mismatches
+    holds_kiro_process_of_unknown_account = _teardown.holds_kiro_process_of_unknown_account
     _retire_kiro_subagent_runtimes = _teardown._retire_kiro_subagent_runtimes
     _retire_kiro_bg_runtime = _teardown._retire_kiro_bg_runtime
     remove_if_unclaimed = _teardown.remove_if_unclaimed
@@ -863,6 +872,14 @@ class SessionManager:
         # different account than the live one even when no read ever observed
         # the interim (see ``flag_identity_stamp_mismatches``).
         self.spawn_identity_reader: "Callable[[], Awaitable[str]] | None" = None
+        # Installed by the dashboard next to ``spawn_identity_reader``: the Kiro
+        # account check (``chat_runner._retire_sessions_on_identity_change``, as
+        # its unattended caller) that ``get_or_create``, ``open_task_session`` and
+        # ``try_acquire`` await before they hand out a session, so no acquire path
+        # can skip it.
+        # None means no identity store to check against -- CLI entry points and
+        # tests -- and acquires run unchecked, as they did before it existed.
+        self.identity_check_before_acquire: "Callable[[], Awaitable[None]] | None" = None
         # Installed by the gateway once it owns this manager (set_injection_probe);
         # None means "no gateway, so no completion injection can be in flight".
         self._injection_probe: "Callable[[str], bool] | None" = None
@@ -916,7 +933,8 @@ class SessionManager:
         self.on_stuck_turn: Callable[[str, float], None] | None = None
         # Fired after a turn lease is released (``release``), with the folded
         # key. Also a seam: the dashboard uses it to land a model pick at a
-        # channel turn's end, which no dashboard turn boundary sees.
+        # channel turn's end, which no dashboard turn boundary sees, and to push
+        # the row of a tab linked to that session.
         self.on_session_released: Callable[[str], None] | None = None
 
         self._compaction = CompactionCoordinator(
@@ -1078,6 +1096,30 @@ class SessionManager:
         cache[cache_key] = (model, dir_mtime, now)
         return model
 
+    def retract_cwd(self, key: str) -> None:
+        """Forget *key*'s directory after its project was cleared, keeping the conversation.
+
+        Drops the stored cwd, and flags a live session so no later write stores it again.
+        """
+        folded = self._fold_key(key)
+        self._session_map.clear_cwd(folded)
+        self._allocation_boundary().retract_reservation_cwds(folded)
+        session = self._sessions.get(folded)
+        if session is not None:
+            session.cwd_retracted = True
+
+    async def aprepare_cwd_clear(self) -> None:
+        """Make the session map writable before a project clear changes anything.
+
+        After a failed load the map holds none of the file's entries, so a clear would
+        drop nothing and the next save would adopt the old cwd from the file. This
+        retries that read and lands any owed write, and raises when either fails, so a
+        clear whose earlier save failed is not acknowledged until it is on disk.
+        """
+        await self._session_map.aflush()
+        if self._session_map.writes_refused():
+            raise OSError("the session map is unreadable, so a project clear would not hold")
+
     def commit_provider_switch_replay_sid(self, key: str) -> bool:
         """Settle replay, promoting the live ACP SID when one was deferred.
 
@@ -1105,7 +1147,7 @@ class SessionManager:
             folded,
             sid,
             provider=_provider_label(session.provider),
-            cwd=session.provider.cwd,
+            cwd="" if session.cwd_retracted else session.provider.cwd,
         )
         session.provider_switch_replay = False
         return True

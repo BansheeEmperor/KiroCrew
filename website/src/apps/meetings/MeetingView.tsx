@@ -1,8 +1,8 @@
 // One meeting, live: the agent panels, the transcription controls, the task
 // sidebar, and (once it has ended) the task-review gate.
 
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   AlertTriangle,
@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 
 import { i18nT } from '../../i18n/t'
+import { useConfirm } from '../../components/ConfirmDialog'
 import ErrorNotice from '../../components/ErrorNotice'
 import { settingsPath } from '../../components/settingsPath'
 import { Badge, Btn, SendBtn, Skeleton } from '../../components/ui'
@@ -33,6 +34,7 @@ import AgentPanel from './components/AgentPanel'
 import AgentPanelSlot from './components/AgentPanelSlot'
 import AgentPillBar from './components/AgentPillBar'
 import BroadcastBar from './components/BroadcastBar'
+import ExportMenuItems from './components/ExportMenuItems'
 import MeetingTitle from './components/MeetingTitle'
 import MeetingWorkspace from './components/MeetingWorkspace'
 import NoteSidebar from './components/NoteSidebar'
@@ -49,6 +51,8 @@ interface Props {
   config: MeetingsConfig | undefined
   onBack: () => void
   onOpenSettings: () => void
+  /** Open another meeting (the one a refused start names). */
+  onOpenMeeting?: (eventId: string, title: string) => void
   notify: (message: string, opts?: { type?: 'info' | 'success' | 'error' }) => void
 }
 
@@ -58,24 +62,73 @@ export default function MeetingView({
   config,
   onBack,
   onOpenSettings,
+  onOpenMeeting,
   notify,
 }: Props) {
   const session = useMeetingSession({ eventId, fallbackTitle, config, notify })
+  const navigate = useNavigate()
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  // Agent ids whose AgentPanel holds an unsaved minutes draft. Those drafts are
+  // panel-local and unmount with this view, which `leave` cannot save.
+  const dirtyMinutes = useRef(new Set<string>())
+  // The inputs marked `data-unsent` are uncontrolled: their unsent text lives
+  // only in the DOM under this root.
+  const rootRef = useRef<HTMLDivElement>(null)
+  const { confirm, confirmDialog } = useConfirm()
+  // Asks before an exit drops what this view holds and cannot keep: a minutes
+  // draft, or text typed and never sent. Blank text is what Send refuses, so it
+  // does not count. Checked only after the note save: these fields stay editable
+  // while the note saves, so a check made before it would miss text typed in the
+  // meantime. The dialog is modal, so nothing new is typed between its answer
+  // and the navigation. Both wordings name the exit and what is lost: confirming
+  // leaves the meeting, not just the editor.
+  const unsavedMayBeDiscarded = async () => {
+    // `input` too: agent output renders under this root, and its sanitized
+    // markdown may carry the same attribute on an element with no value.
+    const inputs = rootRef.current?.querySelectorAll<HTMLInputElement>('input[data-unsent]')
+    const unsent = Array.from(inputs ?? []).some(input => input.value.trim() !== '')
+    const minutes = dirtyMinutes.current.size > 0
+    if (!minutes && !unsent) return true
+    return confirm(
+      unsent
+        ? {
+            title: i18nT('apps.meetings.meeting.leaveUnsent'),
+            body: i18nT(
+              minutes
+                ? 'apps.meetings.meeting.leaveUnsentWithEditsHint'
+                : 'apps.meetings.meeting.leaveUnsentHint',
+            ),
+            confirmLabel: i18nT('apps.meetings.meeting.leaveUnsentConfirm'),
+          }
+        : {
+            title: i18nT('apps.meetings.meeting.leaveWithEdits'),
+            body: i18nT('apps.meetings.meeting.leaveWithEditsHint'),
+            confirmLabel: i18nT('apps.meetings.meeting.leaveUnsentConfirm'),
+          },
+    )
+  }
 
   // Every way out of this view goes through here. The note draft lives in the
   // session hook and unmounts with this view, so the exit first waits for its save
   // and navigates only once the note is on disk; a refusal keeps the user here, where
   // the panel is showing that refusal, instead of navigating away from the only copy.
+  // Then it asks before dropping anything else unsaved (`unsavedMayBeDiscarded`).
   // Browser-level navigation is not intercepted — see `useNoteDraft` for what covers it.
-  // `to` is where the exit goes: the meeting list by default, or settings from the
-  // agent bar, which unmounts this view just the same.
+  // `to` is where the exit goes: the meeting list by default, settings from the
+  // agent bar or the transcription notice, or the meeting a refused start names;
+  // each unmounts this view.
   const leave = async (to: () => void = onBack) => {
-    if (await session.leaveNote()) to()
-    // A refusal opens the note panel; the task sidebar closes so only one shows.
-    else setSidebarOpen(false)
+    if (!(await session.leaveNote())) {
+      // A refusal opens the note panel; the task sidebar closes so only one shows.
+      setSidebarOpen(false)
+      return
+    }
+    if (await unsavedMayBeDiscarded()) to()
   }
+  const openMeeting = (id: string, title: string) => leave(() => onOpenMeeting?.(id, title))
   const [attachMenuOpen, setAttachMenuOpen] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
 
   const {
     meta,
@@ -87,6 +140,7 @@ export default function MeetingView({
     outputs,
     startError,
     startErrorMessage,
+    startBlockingMeeting,
     transcriptionErrorMessage,
     transcriptionErrorCode,
     dismissStartError,
@@ -141,10 +195,16 @@ export default function MeetingView({
         provider={config?.task_provider ?? ''}
         filing={pending.filing}
         filingIds={pending.filingIds}
+        closing={pending.stopping}
+        // The stop route has no 409, so a failed End is always the plain stop failure.
+        closeError={session.stopError ? i18nT('apps.meetings.session.stopFailed') : null}
+        leaving={pending.settingStatus !== null}
         onBack={actions.backToMeeting}
+        // Leave the meeting once the stop has landed, through the same note
+        // check as Back; the control reads as pending until then, and a stop
+        // that failed keeps the view, with its notice, so End can be tried again.
         onClose={() => {
-          actions.stop()
-          void leave()
+          void actions.stop().then(landed => { if (landed) void leave() })
         }}
         onFile={actions.fileTask}
         onArchive={actions.archiveTask}
@@ -175,7 +235,7 @@ export default function MeetingView({
     // content 49px at 390px. `min-w-0`/`min-h-0` on the content column is what
     // lets it actually shrink -- without it the row overflowed sideways instead,
     // pushing the meeting off-screen rather than narrowing it.
-    <div className="flex flex-col lg:flex-row h-full overflow-hidden">
+    <div ref={rootRef} className="flex flex-col lg:flex-row h-full overflow-hidden">
       <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
         <div className="flex-none px-4 md:px-6 py-4 border-b border-border flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
@@ -342,6 +402,13 @@ export default function MeetingView({
                     {tasks.length > 0 ? ` (${tasks.length})` : ''}
                   </span>
                 </DropdownMenuItem>
+                <ExportMenuItems
+                  agents={enabledAgents}
+                  outputs={outputs}
+                  title={meta?.title ?? ''}
+                  date={meta?.started_at || meta?.created_at}
+                  onError={setExportError}
+                />
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -360,19 +427,50 @@ export default function MeetingView({
             className="mx-4 mt-2 animate-rise"
             footer={
               transcriptionErrorCode === 'stt_streaming_disabled' ? (
-                <Link to={settingsPath({ tab: 'voice' })} className="underline">
+                <button
+                  type="button"
+                  className="underline"
+                  onClick={() => void leave(() => navigate(settingsPath({ tab: 'voice' })))}
+                >
                   {i18nT('apps.meetings.session.openVoiceSettings')}
-                </Link>
+                </button>
               ) : null
             }
           />
         )}
         {/* No hand-off: the minutes drafts in the AgentPanel below are unsaved. */}
+        <ErrorNotice
+          message={exportError}
+          onDismiss={() => setExportError(null)}
+          className="mx-4 mt-2 animate-rise"
+        />
+        {/* No hand-off to chat: the minutes drafts and any unsent chat,
+             broadcast or quick-add text below are unsaved. The one action
+             opens the meeting that holds the slot through the same `leave`
+             as the back button. That meeting opens on its review screen when
+             it is in review, because MeetingView renders TaskReviewView for
+             that status. */}
+        {confirmDialog}
         {startError && startErrorMessage && (
           <ErrorNotice
             message={startErrorMessage}
             onDismiss={dismissStartError}
             className="mx-4 mt-2 animate-rise"
+            footer={
+              startBlockingMeeting && onOpenMeeting ? (
+                <button
+                  type="button"
+                  className="underline"
+                  onClick={() =>
+                    void openMeeting(startBlockingMeeting.id, startBlockingMeeting.title)
+                  }
+                >
+                  {startBlockingMeeting.reviewing
+                    ? i18nT('apps.meetings.session.openBlockingReview')
+                    : i18nT('apps.meetings.session.openBlockingMeeting')}
+                </button>
+              ) : null
+            }
           />
         )}
         <AgentPillBar
@@ -455,6 +553,10 @@ export default function MeetingView({
                         : undefined
                     }
                     onRevertOutput={() => session.revertOutput(agent.id)}
+                    onDirtyChange={dirty => {
+                      if (dirty) dirtyMinutes.current.add(agent.id)
+                      else dirtyMinutes.current.delete(agent.id)
+                    }}
                   />
                 </AgentPanelSlot>
               ))}

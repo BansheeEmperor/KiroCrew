@@ -21,12 +21,18 @@ from pathlib import Path
 from typing import Any, Container, Mapping
 
 from kiro_crew import pinned_fs, platform_compat
+from kiro_crew.apps.agent_template_values import HOST_PLACEHOLDERS, host_placeholder_values
 from kiro_crew.apps.bridges_mcp_config import (
     _health_reconcile_guard,
     _mcp_lock,
     _read_mcp_json_unlocked,
 )
-from kiro_crew.apps.bridges_sources import _kiro_agents_dir, _namespace, _safe_link_name
+from kiro_crew.apps.bridges_sources import (
+    _app_resource_root,
+    _kiro_agents_dir,
+    _namespace,
+    _safe_link_name,
+)
 from kiro_crew.apps.manager import app_data_dir, app_dir
 from kiro_crew.apps.manifest import (
     AppManifest,
@@ -531,21 +537,13 @@ def _managed_mcp_spec(name: str) -> dict[str, Any] | None:
     """Launch spec for a HOST-MANAGED MCP server, or None.
 
     Managed servers live in the host agent's config rather than the global MCP
-    config, so a grant naming one finds nothing in the ambient map.
+    config, so a grant naming one finds nothing in the ambient map. A grant is an
+    explicit assignment, so an ``opt_in`` server resolves; a closed ``spec_gate``
+    still answers ``None``, as it does for the host spec writers.
     """
-    from kiro_crew.agent import _MANAGED_MCP_SERVERS
+    from kiro_crew import agent as agent_mod
 
-    managed = _MANAGED_MCP_SERVERS.get(name)
-    if managed is None:
-        return None
-    invocation_fn = managed.get("invocation_fn")
-    if invocation_fn is None:
-        return None
-    try:
-        command, args = invocation_fn()
-    except Exception:  # noqa: BLE001 -- a broken invocation must not block the agent
-        return None
-    return {"command": command, "args": list(args)}
+    return agent_mod.managed_mcp_spec_entry(name, include_opt_in=True)
 
 
 def _materialize_managed_refs(agent_data: dict[str, Any]) -> None:
@@ -556,6 +554,10 @@ def _materialize_managed_refs(agent_data: dict[str, Any]) -> None:
     (cron/core) are written into the HOST agent config only, so an app agent
     that lists them in ``tools`` holds a dangling reference unless the spec is
     copied in here.
+
+    A server whose ``spec_gate`` is closed (``kirocrew-computer`` while computer
+    use is off) is not copied, as on the host agent: its backend would advertise
+    no tools and hold the KAS readiness barrier for its whole timeout.
     """
     from kiro_crew.agent import _MANAGED_MCP_SERVERS
 
@@ -565,18 +567,12 @@ def _materialize_managed_refs(agent_data: dict[str, Any]) -> None:
         if isinstance(t, str) and t.startswith("@")
     }
     servers = agent_data.get("mcpServers") or {}
-    for name, managed in _MANAGED_MCP_SERVERS.items():
+    for name in _MANAGED_MCP_SERVERS:
         if name not in refs or name in servers:
             continue
-        invocation_fn = managed.get("invocation_fn")
-        if invocation_fn is None:
-            continue
-        try:
-            command, args = invocation_fn()
-        except Exception:  # noqa: BLE001 -- a broken invocation must not block the agent
-            logger.warning("Could not resolve managed MCP server %r for an app agent", name)
-            continue
-        servers[name] = {"command": command, "args": list(args)}
+        entry = _managed_mcp_spec(name)
+        if entry is not None:
+            servers[name] = entry
     agent_data["mcpServers"] = servers
 
 
@@ -597,6 +593,8 @@ def _unresolvable_tool_refs(agent_data: dict[str, Any]) -> list[str]:
     become fatal. The global config is read only when a candidate survives the
     merged map (the common all-resolved case costs no I/O).
     """
+    from kiro_crew.agent import _spec_gate_answers_closed
+
     servers = agent_data.get("mcpServers")
     known = set(servers) if isinstance(servers, dict) else set()
     candidates: list[tuple[str, str]] = []
@@ -604,7 +602,8 @@ def _unresolvable_tool_refs(agent_data: dict[str, Any]) -> list[str]:
         if not isinstance(entry, str) or not entry.startswith("@"):
             continue
         server = entry[1:].split("/", 1)[0]
-        if server not in known:
+        # A gate-closed managed server is left out on purpose, not a finding.
+        if server not in known and not _spec_gate_answers_closed(server):
             candidates.append((entry, server))
     if not candidates:
         return []
@@ -741,16 +740,17 @@ def _preserve_user_agent_edits(
 
 #: Placeholder syntax an agent template uses for a path only known at runtime.
 #:
-#: A shipped builtin's agent config is read from the immutable package root
-#: (:func:`_registration_source`) so mutable installed metadata cannot borrow a
-#: builtin's name. That is correct and stays. But it means a builtin whose agent
-#: config must name a RUNTIME path — one under the data home, which ``KIROCREW_HOME``
-#: can move, or a dependency resolved from the installed Python package — cannot
-#: express it in the packaged file at all.
+#: An app's agent config ships inside the app (a builtin's is read from the immutable
+#: package root, :func:`_registration_source`, so mutable installed metadata cannot
+#: borrow a builtin's name), so it cannot name a RUNTIME path: one under the data home,
+#: which ``KIROCREW_HOME`` can move, or a dependency resolved from the installed Python
+#: package. It names a placeholder instead, and the gateway renders it.
 #:
-#: Such a builtin ships an ``agent_placeholders`` submodule whose
-#: ``placeholder_values()`` computes them (an MCP server under a provisioned engine
-#: root, launched with a ``uv`` resolved per host, has no fixed location).
+#: The values any app's template may name are the fixed host set of
+#: :mod:`kiro_crew.apps.agent_template_values`. A builtin may add its own through an
+#: ``agent_placeholders`` submodule whose ``placeholder_values()`` computes them; for a
+#: released name only the names outside the host set are taken from it
+#: (:func:`_placeholder_values`).
 
 
 _TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{[A-Z][A-Z0-9_]*\}")
@@ -762,24 +762,55 @@ _TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{[A-Z][A-Z0-9_]*\}")
 _RENDERED_AGENTS_DIRNAME = "rendered-agents"
 
 
-def _placeholder_values(app_name: str) -> dict[str, str]:
+def _placeholder_values(
+    app_name: str, app_root: Path | None = None, *, named: frozenset[str] = frozenset()
+) -> dict[str, str]:
     """Trusted substitutions for *app_name*'s agent templates, or ``{}``.
 
-    Every value is COMPUTED in the gateway process, by the builtin's own shipped
-    ``agent_placeholders.placeholder_values()``, from the data home and the installed
-    Python package — the same way the app's own provisioner computes them. Nothing is
-    read back from disk, so there is nothing for an attacker with write access to the
-    engine directory to influence. Only a package in ``BUILTIN_NAMES`` is consulted, so
-    the code that computes them is shipped package code, never an installed app's.
+    Every value is COMPUTED in the gateway process, never read back from disk, so there
+    is nothing for an attacker with write access to the app's tree or data to influence:
 
-    An app with no such module gets ``{}``, which leaves its template unrendered and
-    therefore unregistered (see :func:`_render_shipped_agent`) — fail-closed, so adding
-    a placeholder to a new app's config is inert until its package computes the value.
-    A result that is not a ``{"{NAME}": str}`` mapping is refused whole the same way.
+    * the host set (:func:`~kiro_crew.apps.agent_template_values.host_placeholder_values`),
+      for every app, from *app_root*, the root its agents register from (by default
+      the one :func:`_registration_source` picks);
+    * for a package in ``BUILTIN_NAMES``, what its own shipped
+      ``agent_placeholders.placeholder_values()`` adds (only shipped package code, never
+      an installed app's). While the wheel copy is the one registering, all of it. For a
+      RELEASED name (``execution.shipped_builtin_app_root`` answers None) the wheel copy
+      must not register, serve or execute (app-kit-platform.md § 33), so the module is
+      consulted only when *named*, the placeholders the template names, holds one
+      outside the host set, and only those names are taken from it. A tree adopted at
+      an earlier pin names the built-in's own placeholders; a tree naming the host set
+      alone never imports the module, so it keeps registering once the package leaves
+      core.
+
+    A placeholder neither computes is left unrendered, and the agent naming it is not
+    registered (see :func:`_render_shipped_agent`): fail-closed. A builtin result that
+    is not a ``{"{NAME}": str}`` mapping is refused whole the same way.
+    """
+    root = app_root if app_root is not None else _app_resource_root(app_name)
+    values = host_placeholder_values(app_name, root)
+    outside_host_set = named - frozenset(HOST_PLACEHOLDERS)
+    shipped = _shipped_builtin_placeholder_values(app_name, outside_host_set)
+    if shipped is None:
+        return {}
+    values.update(shipped)
+    return values
+
+
+def _shipped_builtin_placeholder_values(
+    app_name: str, outside_host_set: frozenset[str] = frozenset()
+) -> dict[str, str] | None:
+    """A builtin's own ``agent_placeholders`` values: ``{}`` when it has none (or is not
+    a builtin), ``None`` when they are unusable.
+
+    For a released name, only the names in *outside_host_set*, and ``{}`` without an
+    import when that is empty.
     """
     import importlib
 
     from kiro_crew.apps import builtins
+    from kiro_crew.apps.execution import shipped_builtin_app_root
 
     package = app_name.replace("-", "_")
     if package not in builtins.BUILTIN_NAMES:
@@ -787,25 +818,36 @@ def _placeholder_values(app_name: str) -> dict[str, str]:
     # Looked for on disk first: a builtin with no placeholders is never imported here.
     if not (Path(builtins.__file__).parent / package / "agent_placeholders.py").is_file():
         return {}
+    # Released (adopted, or uninstalled after adoption): the agents register from the
+    # adopted tree, which the host set renders unless it names the built-in's own names.
+    released = shipped_builtin_app_root(app_name) is None
+    if released and not outside_host_set:
+        return {}
     # Imported lazily and defensively: this is a builtin's own module, and a
     # registration path must not fail because one app's package is unimportable.
     try:
         module = importlib.import_module(f"{builtins.__name__}.{package}.agent_placeholders")
         values = module.placeholder_values()
-    except Exception:  # pragma: no cover - defensive
+    except Exception:  # noqa: BLE001 - defensive: an unimportable package renders nothing
         logger.warning("App %s: cannot resolve placeholder values", app_name)
-        return {}
+        return None
     if not isinstance(values, dict) or not all(
         isinstance(k, str) and _TEMPLATE_PLACEHOLDER_RE.fullmatch(k) and isinstance(v, str)
         for k, v in values.items()
     ):
         logger.warning("App %s: placeholder values are malformed, none applied", app_name)
-        return {}
+        return None
+    if released:
+        return {k: v for k, v in values.items() if k in outside_host_set}
     return values
 
 
 def _render_shipped_agent(
-    app_name: str, agent_path: Path, io_failures: list[str] | None = None
+    app_name: str,
+    agent_path: Path,
+    io_failures: list[str] | None = None,
+    *,
+    app_root: Path | None = None,
 ) -> Path | None:
     """Render *agent_path*'s placeholders and return the gateway-written copy.
 
@@ -841,7 +883,8 @@ def _render_shipped_agent(
     if not _TEMPLATE_PLACEHOLDER_RE.search(template):
         return agent_path
 
-    values = _placeholder_values(app_name)
+    named = frozenset(_TEMPLATE_PLACEHOLDER_RE.findall(template))
+    values = _placeholder_values(app_name, app_root, named=named)
     rendered = template
     for placeholder, value in values.items():
         # `json.dumps` minus the surrounding quotes: the placeholders sit INSIDE JSON
@@ -950,7 +993,9 @@ def _register_agents(
             # itself, into a file under the data home. `None` means a placeholder could
             # not be resolved, so nothing is registered for this agent rather than
             # registering a config that names a literal `{ENGINE_ROOT}`.
-            resolved = _render_shipped_agent(app_name, agent_path, io_failures=io_failures)
+            resolved = _render_shipped_agent(
+                app_name, agent_path, io_failures=io_failures, app_root=app_root
+            )
             if resolved is None:
                 continue
             agent_path = resolved

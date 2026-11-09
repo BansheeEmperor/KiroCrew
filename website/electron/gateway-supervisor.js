@@ -46,7 +46,8 @@ const {
 const {
   gatewayWaitTimeoutMs,
   waitForGateway,
-  tailLines,
+  readLogTail,
+  rotateLaunchLog,
   isPortInUse,
 } = require("./gateway-wait");
 const { readBakedEdition } = require("./edition");
@@ -151,6 +152,9 @@ function createGatewaySupervisor({
   // prune that removed the bundled backend can have removed this app's own
   // files, and only the caller decides what to do about that.
   onStaleBundleRespawn = () => {},
+  // The active theme pack's splash art as a file: URL, "" for none
+  // (themeSplashUrl in theme-splash.js); every loading.html paint carries it.
+  currentThemeSplash = () => "",
   fsMod = defaultFs,
   osMod = defaultOs,
   pathMod = defaultPath,
@@ -498,6 +502,8 @@ function createGatewaySupervisor({
   function splashQuery(window, { reconnect = false, accent = "" } = {}) {
     const query = {};
     if (accent) query.accent = accent;
+    const splash = currentThemeSplash();
+    if (splash) query.splash = splash;
     if (reconnect) Object.assign(query, SPLASH_RECONNECT_QUERY);
     if (window === mainWindow()) Object.assign(query, SPLASH_PRIMARY_QUERY);
     return query;
@@ -817,9 +823,40 @@ function createGatewaySupervisor({
     // Write child stdout/stderr directly to a file descriptor. A JS pipe could
     // backpressure a long-running gateway; the descriptor also preserves Python
     // tracebacks which otherwise disappear on clean recipient machines.
+    //
+    // Windows is the exception: Node adds CREATE_NO_WINDOW to a windowsHide
+    // spawn only when no stdio entry inherits a descriptor, and without it the
+    // gateway gets a console of its own that can show and take the focus. There
+    // the child gets the log's path instead, and its entry point re-points its
+    // own stdout/stderr at that file (kiro_crew/desktop_stdio.py). Until it
+    // does, its stderr is a pipe this shell copies into the log: a pipe is not
+    // an inherited descriptor, and it carries the tracebacks of an interpreter
+    // that dies before the re-point (the incomplete-bundle check reads them).
+    // The re-point closes the pipe, so it never carries a running gateway.
+    // Bound gateway-launch.log's size before this fresh gateway opens its fd on
+    // it. The log only ever appends and has no cap, so a long-lived install
+    // grows it without limit; a size-gated one-generation rename keeps the file
+    // bounded. This sits in the fresh-spawn path, after resolveGatewayConflict
+    // has already returned "reuse" for a surviving gateway: a reused gateway is
+    // still writing to this file (off Windows through an inherited descriptor,
+    // on Windows through the path), so rotating under it would detach it from
+    // the log the dialogs read. Rotating only when we are about to spawn a new
+    // writer, before the fd below is opened, means no live writer holds the file.
+    rotateLaunchLog(gatewayLogPath(), { fs, log: glog });
+
     let childOut = "ignore";
-    try { childOut = fs.openSync(gatewayLogPath(), "a"); }
-    catch (error) { userWarn(`WARN could not open child log fd: ${error.message}`); }
+    let childErr = "ignore";
+    let childLogEnv = {};
+    const winLaunchLog = IS_WIN ? gatewayLogPath() : "";
+    if (IS_WIN) {
+      if (winLaunchLog) {
+        childErr = "pipe";
+        childLogEnv = { KIROCREW_DESKTOP_STDIO_LOG: winLaunchLog };
+      }
+    } else {
+      try { childOut = fs.openSync(gatewayLogPath(), "a"); }
+      catch (error) { userWarn(`WARN could not open child log fd: ${error.message}`); }
+    }
     glog(SPAWN_MARKER);
     gatewayStartFailure = null;
 
@@ -836,7 +873,7 @@ function createGatewaySupervisor({
     );
 
     const child = spawn(spawnBin, spawnArgs, {
-      stdio: ["ignore", childOut, childOut],
+      stdio: ["ignore", childOut, IS_WIN ? childErr : childOut],
       detached: false,
       windowsHide: true,
       env: buildGatewayEnvironment({
@@ -845,10 +882,12 @@ function createGatewaySupervisor({
         KIROCREW_PROJECT_DIR: IS_WIN
           ? resolveProjectDir()
           : path.resolve(dirname, ".."),
-        // Tells a signed-out enterprise gateway to exit with its refusal instead
+        // Tells a signed-out LTS gateway to exit with its refusal instead
         // of serving the browser sign-in screen, which this window cannot open
-        // yet (enterprise_signin_gateway.DESKTOP_GATEWAY_ENV).
+        // yet (lts_signin_gateway.DESKTOP_GATEWAY_ENV).
         KIROCREW_DESKTOP_GATEWAY: "1",
+        // Windows only: where the gateway sends its stdout/stderr (see above).
+        ...childLogEnv,
         // The kiro-cli staged into the app's resources at build time; spread
         // only when it shipped AND runs on this machine, so an unbundled build,
         // or a bundled copy this host cannot execute, keeps the user's own
@@ -881,6 +920,14 @@ function createGatewaySupervisor({
     }
     if (typeof childOut === "number") {
       try { fs.closeSync(childOut); } catch { /* ignore */ }
+    }
+    if (childErr === "pipe" && child.stderr) {
+      // Synchronous appends, so the text is on disk by the time the boot poll
+      // reads the log after an early exit.
+      child.stderr.on("data", (chunk) => {
+        try { fs.appendFileSync(winLaunchLog, chunk); } catch { /* best-effort */ }
+      });
+      child.stderr.on("error", () => { /* the child closed its end */ });
     }
 
     // Bind handlers to this child, not the mutable slot. Recovery can replace a
@@ -1276,9 +1323,9 @@ function createGatewaySupervisor({
       if (window.isDestroyed()) return;
       const failedToStart = error && error.kind === "failed";
       const launchLogPath = gatewayLogPath();
-      let logTail = "";
-      try { logTail = tailLines(fs.readFileSync(launchLogPath, "utf8"), 60); }
-      catch { /* no log yet */ }
+      // Bounded tail read, as in failure-dialog.js: only the file's last 256 KiB
+      // are read, however large the launch log has grown.
+      const logTail = readLogTail(launchLogPath, { fs, lines: 60 });
 
       // A pre-spawn integrity refusal is already authoritative. Otherwise only
       // a bundled current-attempt stdlib crash may be relabelled as installation;

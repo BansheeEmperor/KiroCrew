@@ -30,6 +30,7 @@ from kiro_crew.dashboard.refresh_tokens import (
     generate_refresh_token,
     refresh_cookie_name,
     refresh_token_boot,
+    refresh_token_owner_minted,
     refresh_token_peer_key,
     refresh_token_requires_peer,
     validate_refresh_token,
@@ -674,6 +675,9 @@ async def api_auth_refresh(request: web.Request) -> web.Response:
     _carried_claims: dict[str, str] = {}
     if carried_boot:
         _carried_claims["boot"] = carried_boot
+    carried_owner_mint = refresh_token_owner_minted(refresh_token)
+    if carried_owner_mint:
+        _carried_claims["owner_mint"] = "1"
     # The key the checks above proved this request satisfies. Taken from the
     # presented credential rather than re-derived from the resolved peer, for the
     # same reason ``carried_boot`` is: the rotated pair then says what the
@@ -692,6 +696,7 @@ async def api_auth_refresh(request: web.Request) -> web.Response:
         user_id,
         ttl_seconds=MAX_SESSION_TTL_SECS,
         register_nonce=False,
+        session=True,
         peer_key=bound_peer_key,
         extra=_carried_claims or None,
     )
@@ -702,6 +707,7 @@ async def api_auth_refresh(request: web.Request) -> web.Response:
         boot=carried_boot,
         require_peer=require_peer,
         peer_key=bound_peer_key,
+        owner_mint=carried_owner_mint,
     )
 
     public_payload = {
@@ -905,7 +911,9 @@ async def api_auth_logout(request: web.Request) -> web.Response:
             # rest of its TTL: exactly the replay this revocation exists to stop. The HMAC
             # and every claim were verified BEFORE that early return, so the chain id here
             # is authentic and revoking it cannot be driven by a forged token.
-            degraded = _get_state().degraded_reason()
+            # Decided from the validation's own answer, not a second read of the store: an
+            # unreadable file can read again in between, and that must not skip the revoke.
+            degraded = _reason.startswith("refresh state unavailable")
             if degraded and chain_id:
                 revocation_persisted = await asyncio.to_thread(
                     _get_state().revoke_chain,
@@ -932,8 +940,12 @@ async def api_auth_logout(request: web.Request) -> web.Response:
     # to_thread because revoke writes the denylist file (atomic-rename, 0600).
     access_cookie = request.cookies.get(f"mc_token_{cookie_port}", "")
     if access_cookie:
-        revoked = await asyncio.to_thread(revoke_access_cookie, access_cookie)
-        _audit(user_id or "", "access_cookie_revoked", "ok" if revoked else "noop")
+        try:
+            revoked = await asyncio.to_thread(revoke_access_cookie, access_cookie)
+            _audit(user_id or "", "access_cookie_revoked", "ok" if revoked else "noop")
+        except OSError:
+            revocation_persisted = False
+            _audit(user_id or "", "access_cookie_revoked", "not_persisted")
 
     # Always clear both cookies on the response, even when no refresh
     # cookie was present — the caller's intent is "log me out", and
@@ -951,7 +963,7 @@ async def api_auth_logout(request: web.Request) -> web.Response:
             {
                 "logged_out": False,
                 "error": "This session's cookies are cleared, but the revocation record "
-                "could not be stored, so the refresh token is not guaranteed dead after a "
+                "could not be stored, so this session is not guaranteed dead after a "
                 "gateway restart. Repair the gateway's storage, then log out again.",
                 "code": "refresh_state_unavailable",
             },

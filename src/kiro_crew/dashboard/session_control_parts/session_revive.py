@@ -25,7 +25,10 @@ from kiro_crew.dashboard.session_control_parts.delivery_containment import (
     _has_channel_mirror,
     _probe_channel_mirror_for_key,
 )
-from kiro_crew.dashboard.session_control_parts.session_status import _bounded_status_title
+from kiro_crew.dashboard.session_control_parts.session_status import (
+    _bounded_status_title,
+    _creation_parent,
+)
 from kiro_crew.dashboard.session_control_parts.session_tree import _slot_tree_parent
 from kiro_crew.dashboard.session_control_parts.target_authorization import (
     _check_caller_slot_fields,
@@ -286,20 +289,6 @@ def _rebind_in_background(slot: Any, meta: "Mapping[str, Any]") -> None:
     task.add_done_callback(_PENDING_REBINDS.discard)
 
 
-def _creation_parent(slot_key: str) -> str:
-    """*slot_key*'s creator from the crew log's CREATION records, or ``""``. No I/O.
-
-    Never the sidebar parent: an adoption or a handoff moves that, and it says nothing
-    about who made the session.
-    """
-    from kiro_crew.crew_log import emit as crew_log_emit
-    from kiro_crew.crew_log.session_tree_projection import creator_of
-
-    if not crew_log_emit.enabled():
-        return ""
-    return creator_of(slot_key)
-
-
 def _archived_target_refusal(
     slot_key: str,
     meta: "Mapping[str, Any]",
@@ -351,8 +340,8 @@ def _archived_target_refusal(
             return None
         if str(meta.get("created_by") or "") != caller_key:
             return "target session was created by another session", "not_creator"
-        # The metadata line is a file an agent's file tools can edit
-        # (``chat_persistence`` says so where it restores ``created_by``), so for a
+        # The metadata line is a file a sandboxed shell can write
+        # (``metadata_codec._read_created_by`` says so where it restores it), so for a
         # FENCED caller the claim above is only a claim: a caller that rewrote
         # ``created_by`` in an archived transcript would otherwise revive a session
         # it never made and then hold it. The ownership is therefore corroborated

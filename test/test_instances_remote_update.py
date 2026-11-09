@@ -200,6 +200,16 @@ class TestVersionsRoute:
             ("", False, "capability_unreachable"),
         ]
 
+    async def test_a_placeholder_zero_version_is_unknown_never_behind(self, monkeypatch):
+        _enable_instances(monkeypatch)
+        state, _ = _versions_state({"a": "0"})
+
+        data = await _body(await hi.api_instances_versions(_request(state)))
+
+        assert [(r["version"], r["behind"], r["error"]) for r in data["instances"]] == [
+            ("", False, "capability_malformed_reply"),
+        ]
+
     async def test_a_failed_read_carries_the_carriers_own_code(self, monkeypatch):
         _enable_instances(monkeypatch)
         state, _ = _versions_state({"a": "0.9.0"})
@@ -620,10 +630,34 @@ class TestUpdateJob:
         assert job["version_after"] == ""
         await mgr.shutdown()
 
+    async def test_an_unread_version_before_the_update_is_unverified(self, tmp_path, monkeypatch):
+        """With no version from before, any answer after proves no change."""
+        reg, mgr = _manager(tmp_path, versions=(None, "0.9.0"))
+        reg.add(name="Box", ssh_host="box-alias", instance_id="box")
+        _patch_runner(monkeypatch, _Runner((0, ""), (0, "")))
+
+        await mgr.start_remote_update("box")
+        job = await _finished(mgr, "box")
+
+        assert job["state"] == "unverified" and job["phase"] == "done"
+        assert (job["version_before"], job["version_after"]) == ("", "0.9.0")
+        await mgr.shutdown()
+
     async def test_a_peer_version_that_is_not_version_shaped_is_dropped(
         self, tmp_path, monkeypatch
     ):
         reg, mgr = _manager(tmp_path, versions=("0.9.0", "<script>alert(1)</script>"))
+        reg.add(name="Box", ssh_host="box-alias", instance_id="box")
+        _patch_runner(monkeypatch, _Runner((0, ""), (0, "")))
+
+        await mgr.start_remote_update("box")
+        job = await _finished(mgr, "box")
+
+        assert job["state"] == "unverified" and job["version_after"] == ""
+        await mgr.shutdown()
+
+    async def test_a_placeholder_zero_version_is_no_answer(self, tmp_path, monkeypatch):
+        reg, mgr = _manager(tmp_path, versions=("0.9.0", "0"))
         reg.add(name="Box", ssh_host="box-alias", instance_id="box")
         _patch_runner(monkeypatch, _Runner((0, ""), (0, "")))
 
@@ -832,6 +866,62 @@ class TestJobBookkeeping:
 def _dict(jobs, iid):
     job = jobs.get(iid)
     return job.to_dict() if job is not None else None
+
+
+_STOPPED_UNIT_REFUSAL = (
+    "❌ The kirocrew system service is installed (/etc/systemd/system/kirocrew.service) "
+    "but stopped; start it with your service manager. No gateway was started outside it.\n"
+)
+
+
+def _fake_ssh(monkeypatch, *answers):
+    """Fake only the ssh child, so the real runner builds the failure message."""
+    from kiro_crew.instances import token_mint as tm
+
+    queue = list(answers)
+
+    class _Proc:
+        def __init__(self, rc, out):
+            self.returncode = rc
+            self._out = out
+
+        async def communicate(self):
+            return (self._out.encode(), b"")
+
+    async def _spawn(*_a, **_k):
+        return _Proc(*queue.pop(0))
+
+    monkeypatch.setattr(tm.asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr(tm, "ssh_spawn_argv_env", lambda argv: (argv, {}))
+
+
+@pytest.mark.asyncio
+class TestRestartRefusalReachesTheCrewPage:
+    """A remote whose unit is stopped refuses `kirocrew restart` on STDOUT; the
+    crew page must show that hint, not a bare exit code."""
+
+    async def test_restart_remote_carries_the_start_hint(self, tmp_path, monkeypatch):
+        reg, mgr = _manager(tmp_path)
+        reg.add(name="Box", ssh_host="box-alias", instance_id="box")
+        _fake_ssh(monkeypatch, (1, _STOPPED_UNIT_REFUSAL))
+
+        result = await mgr.restart_remote("box")
+
+        assert result["ok"] is False
+        assert "start it with your service manager" in result["message"]
+        await mgr.shutdown()
+
+    async def test_update_then_restart_carries_the_start_hint(self, tmp_path, monkeypatch):
+        reg, mgr = _manager(tmp_path)
+        reg.add(name="Box", ssh_host="box-alias", instance_id="box")
+        _fake_ssh(monkeypatch, (0, ""), (1, _STOPPED_UNIT_REFUSAL))
+
+        await mgr.start_remote_update("box")
+        job = await _finished(mgr, "box")
+
+        assert job["state"] == "failed" and job["phase"] == "restarting"
+        assert "start it with your service manager" in job["error"]
+        await mgr.shutdown()
 
 
 class TestRunnerStdoutTail:

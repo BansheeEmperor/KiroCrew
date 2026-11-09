@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from kiro_crew.dashboard.chat_turn.recipient import (
         _MIRROR_THINKING,
         _deliver_cross_surface_user_message,
+        _mirror_echo_text,
         _prepare_mirror_msg,
         _prompt_typed_in_dashboard,
     )
@@ -253,6 +254,12 @@ async def _turn_dispatch_prep(turn: _ChatTurn) -> None:
 
 async def _turn_dispatch_gates(turn: _ChatTurn) -> _Flow | None:
     """Pass the dispatch gates from the session's first turn up to the stream's start."""
+    # Every gate below reads synchronously; the stored Ultra Mode pause is read
+    # (off the loop, once per data home) before any of them, so a turn right
+    # after a restart is still held by a crew paused before it.
+    from kiro_crew import crew_pause as _crew_pause
+
+    await _crew_pause.ensure_loaded()
     injected: list[str]
     _attachments = turn._attachments
     _context_is_new = turn._context_is_new
@@ -558,6 +565,9 @@ async def _turn_dispatch_gates(turn: _ChatTurn) -> _Flow | None:
                     session_key,
                     source="slack" if slot._turn_channel_origin else "dashboard",
                     on_bound=_owe_code_channel_turn_end,
+                    # What the person asked, without this runner's prepends: a
+                    # cancelled-turn preamble may quote an older prompt.
+                    prompt=str(turn._jev_route_text or ""),
                 )
             except Exception:
                 logger.debug("code channel turn-start hooks failed", exc_info=True)
@@ -579,7 +589,9 @@ async def _turn_dispatch_gates(turn: _ChatTurn) -> _Flow | None:
                     # or stray bracket is escaped. Redaction runs first.
                     await state.slack_client.post_message(
                         _mirror_chan,
-                        mirror_prompt_echo(_prepare_mirror_msg(_user_msg_for_mirror)),
+                        mirror_prompt_echo(
+                            _prepare_mirror_msg(await _mirror_echo_text(turn, _user_msg_for_mirror))
+                        ),
                         _mirror_post_ts,
                     )
                 # A separate placeholder, not the task stream's opening text:
@@ -604,7 +616,8 @@ async def _turn_dispatch_gates(turn: _ChatTurn) -> _Flow | None:
     # proactive channel (e.g. Telegram) so the remote conversation reads
     # coherently (question then reply), matching the Slack echo above.
     if not _slash_withholds_mirror and _prompt_typed_in_dashboard(turn):
-        await _deliver_cross_surface_user_message(state, session_key, _user_msg_for_mirror)
+        _echo = await _mirror_echo_text(turn, _user_msg_for_mirror)
+        await _deliver_cross_surface_user_message(state, session_key, _echo)
     # Past this point every echo this turn owes has been made (or the surfaces it
     # would go to were unlinked), so a recovery requeue of it owes none.
     turn._mirror_echo_posted = True
@@ -782,6 +795,34 @@ async def _turn_dispatch_gates(turn: _ChatTurn) -> _Flow | None:
             depth=_prompt_depth,
         )
         return _Flow.END
+    # Ultra Mode "Pause all" holds this session: whichever path reached here (a
+    # linked thread, Regenerate, Rewind, Edit & Resend, an API send), no turn
+    # starts until Resume all or the session's own Continue lifts the hold, both
+    # of which lift it before they dispatch. Read synchronously, beside the stop
+    # gate; only the refusal path awaits (it records the turn as owed).
+    from kiro_crew import crew_pause
+
+    if crew_pause.holds_slot(slot):
+        logger.info("Aborting dispatch for %s: its Ultra Mode crew is paused", session_key)
+        # Its prompt is already in the transcript: Resume all must continue it,
+        # whatever the pause's own Stop of this session answered.
+        try:
+            owed = await asyncio.to_thread(crew_pause.owe_turn, slot.key)
+        except Exception:
+            owed = True  # end it, as the hold says; Continue still reaches it
+            logger.warning("crew pause: could not record the turn owed to %s", slot.key)
+        if owed or crew_pause.holds_slot(slot) or _stop_pressed(turn):
+            crew_log_emit.on_turn_refused(
+                _crew_log_sid,
+                _crew_log_turn_no,
+                "crew_paused",
+                turn._crew_log_actor,
+                depth=_prompt_depth,
+            )
+            return _Flow.END
+        # Resume all lifted the hold before the obligation was written, so
+        # nothing would continue this turn: it runs now instead of ending.
+        logger.info("crew pause: lifted while %s waited at dispatch; running it", session_key)
     # The consume-seam supersession check ran at turn ENTRY, but the whole
     # preparation path (session acquisition, prompt assembly) is awaited
     # between there and this point. A correction the user queued during
@@ -876,6 +917,9 @@ async def _turn_dispatch_gates(turn: _ChatTurn) -> _Flow | None:
                 store=str(turn.memory_store or ""),
             )
         )
+    if not turn._agent_cancel_owed:
+        # A stopped agent-started turn opens only to send its cancel: not a turn.
+        slot._turns_started += 1
     crew_log_emit.on_turn_started(
         _crew_log_sid,
         _crew_log_turn_no,

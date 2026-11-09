@@ -117,7 +117,39 @@ def _spawn_fingerprint(server: McpServerInfo) -> tuple[str, ...] | None:
         args = tuple(str(a) for a in raw_args)
     except TypeError:
         args = (repr(raw_args),)
-    return (server.command, *args)
+    return (_launcher_key(server.command), *args)
+
+
+def _launcher_key(command: str) -> str:
+    """*command* as the program Windows starts, so its spellings share one key.
+
+    Windows ignores case and the ``PATHEXT`` suffix, and a bare name resolves to
+    a file on ``PATH``, so ``npx``, ``npx.cmd`` and ``C:\\nodejs\\NPX.CMD`` are
+    one launcher there (see :func:`_basenames_match`). The key keeps only the
+    folded basename. Two different files that share it are only probed one
+    after another, which is the cost this key exists to pay. POSIX keeps the
+    command as written: case and extension are part of a name there.
+    """
+    if not platform_compat.IS_WINDOWS:
+        return command
+    name = _basename_any(command).casefold()
+    stem, ext = ntpath.splitext(name)
+    return stem if ext and ext in _win_exec_suffixes() else name
+
+
+def _timed_out_locally(server: McpServerInfo) -> bool:
+    """Whether a stdio probe of *server* just failed on its handshake timeout.
+
+    ``probe_server`` sets the error to exactly ``"timeout"`` on that path and may
+    append the child's stderr on a following line, so only the first line is
+    compared. A remote server's timeout is a network answer, not a cold start.
+    """
+    return (
+        server.status == "error"
+        and not server.is_remote
+        and isinstance(server.error, str)
+        and server.error.partition("\n")[0] == "timeout"
+    )
 
 
 async def probe_all() -> list[McpServerInfo]:
@@ -216,6 +248,25 @@ async def probe_all() -> list[McpServerInfo]:
             out.append(servers[i])
         else:
             out.append(r)  # type: ignore[arg-type]
+    # A local probe that timed out gets one more try, alone. Right after a gateway
+    # start the first pass starts up to PROBE_MAX_CONCURRENCY interpreters at once
+    # on a host that is busy starting, so a server that answers in a few seconds
+    # alone can miss the timeout -- every Kiro Crew server timing out in the same
+    # second is that burst, not five slow servers. Run one at a time, the retry
+    # starts each server without that contention, and its verdict replaces the
+    # first one, so the burst adds no quarantine strike. A server that really
+    # hangs costs one more probe duration per pass until it is quarantined.
+    for i, s in enumerate(out):
+        if not _timed_out_locally(s):
+            continue
+        first_error = s.error
+        s.error = ""
+        try:
+            out[i] = await probe_server(s)
+        except Exception as exc:
+            # Same contract as the gather above: one server never aborts the pass.
+            s.status, s.error = "error", first_error
+            logger.warning("MCP probe retry failed [%s]: %s", s.name, _sanitize_probe_error(exc))
     for s in out:
         _note_denied_env(s)
     # Same order as ``list_servers`` reported, so the probe response and
@@ -239,7 +290,12 @@ def _note_denied_env(server: McpServerInfo) -> None:
     """
     if server.status != "error" or not server.error:
         return
-    dropped = denied_spec_env_keys(server.env or {})
+    # A non-map env was refused before any spawn, so nothing was dropped from it,
+    # and its own error already says what is wrong. Iterating it here would also
+    # raise on a scalar and fail the whole probe response for every server.
+    if not isinstance(server.env, dict):
+        return
+    dropped = denied_spec_env_keys(server.env)
     if not dropped:
         return
     server.error = (
@@ -806,7 +862,12 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         managed_tool_names_for_policy,
     )
     from kiro_crew.mcp_discovery_probe import (  # noqa: F401
+        _ENV_NOT_A_MAP_ERROR,
         _MAX_BANNER_LINES,
+        _STDOUT_LINE_HELD_CHARS,
+        _STDOUT_TAIL_LINE_CHARS,
+        _STDOUT_TAIL_LINES,
+        _STDOUT_WITHHELD,
         _probe_on_private_loop,
         _read_stdio_jsonrpc_response,
         _redact_temp_refusal_text,
@@ -852,6 +913,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _needs_authorization,
         _probe_remote,
         _read_jsonrpc_response,
+        _record_grant_presence,
         _redirect_error,
         _runtime_grant_present,
     )
@@ -908,11 +970,17 @@ if TYPE_CHECKING:  # names it serves from outside the family, from their homes
         hash_command,
         hash_effective_env,
     )
+    from kiro_crew.mcp_gateway.read_limits import (  # noqa: F401
+        resolve_read_buffer_limit,
+    )
     from kiro_crew.mcp_gateway.secret_uri import (  # noqa: F401
         remote_header_secret_ref_error,
     )
     from kiro_crew.mcp_grant import (  # noqa: F401
         grant_observed,
+    )
+    from kiro_crew.mcp_grant_kas import (  # noqa: F401
+        kas_grant_observed,
     )
     from kiro_crew.mcp_provenance import (  # noqa: F401
         WITHHELD_KEY,

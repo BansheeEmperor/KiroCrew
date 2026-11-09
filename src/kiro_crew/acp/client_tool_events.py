@@ -137,12 +137,16 @@ def _extract_text_chunk(self: AcpClient, msg: JsonRpcMessage) -> tuple[str | Non
         text = content.get("text")
         content_type = content.get("type", "text")
         is_thinking = content_type in ("thinking", "reasoning")
+        # Every reader of model text comes through here, so the batch guard's
+        # seen-token set is fed here once (``acp.batch_guard``).
+        batch_guard.note_text(getattr(self, "_batch_window", None), text)
         return text, is_thinking
     if kind == UPDATE_AGENT_THOUGHT_CHUNK:
         content = update.get("content", {})
         if not isinstance(content, dict):
             return None, True
         text = content.get("text")
+        batch_guard.note_text(getattr(self, "_batch_window", None), text)
         return text, True
     return None, False
 
@@ -209,13 +213,18 @@ async def _maybe_audit_unasked_tool_call(self: AcpClient, tool_result_event: "Ac
     status, so every tool call of an ``auto`` session has an SEL record. A call that
     did ask is skipped, because the consumer that answered it owns its record.
 
-    Scope: only a session whose seeded mode is ``auto``, and never an
+    Scope: only a session whose seeded mode is ``auto`` and that runs in it (not
+    one pinned to ``default`` on the exclusion path), and never an
     ``audit_source`` client (``_maybe_audit_tool_call`` already records each of its
     calls). ``_sel_settled_tool_calls`` holds this turn's asked or recorded ids, so a
     call gets one row. Best-effort and bounded like ``_maybe_audit_tool_call``: an
     SEL failure or hang is logged and never breaks dispatch.
     """
     if getattr(self, "_permission_mode", None) != CC_PERMISSION_MODE_AUTO:
+        return
+    # A session that left a foreign settings file out runs pinned to ``default``
+    # whatever it requested, so no classifier approved its unasked calls.
+    if self._claude_session_excludes_local():
         return
     if getattr(self, "_audit_source", None):
         return
@@ -786,8 +795,16 @@ def _extract_tool_call_update(self: AcpClient, msg: JsonRpcMessage) -> AcpEvent 
         status=update.get("status"),
         scope=getattr(self, "_session_id", "") or "",
     )
+    # The result may come in an update before an outputless terminal one: it is
+    # learned from every update, and only a terminal status ends the call.
     if update.get("status") in TERMINAL_TOOL_STATUSES:
-        batch_guard.note_settled(getattr(self, "_batch_window", None), tool_use_id)
+        batch_guard.note_settled(
+            getattr(self, "_batch_window", None), tool_use_id, batch_guard.update_text(update)
+        )
+    else:
+        batch_guard.note_printed(
+            getattr(self, "_batch_window", None), tool_use_id, batch_guard.update_text(update)
+        )
 
     output_parts: list[str] = []
 
@@ -1029,7 +1046,9 @@ async def _read_new_tool_results(self: AcpClient) -> list[AcpEvent]:
     results = await asyncio.to_thread(self._read_new_tool_results_sync)
     if results:
         for event in results:
-            batch_guard.note_settled(getattr(self, "_batch_window", None), event.tool_call_id or "")
+            batch_guard.note_settled(
+                getattr(self, "_batch_window", None), event.tool_call_id or "", event.tool_output
+            )
         self._active_tool_calls.difference_update(event.tool_call_id or "" for event in results)
         self._tool_dispatched = self._active_tool_calls.possibly_open
         self._stale_eligible = not self._active_tool_calls.possibly_open

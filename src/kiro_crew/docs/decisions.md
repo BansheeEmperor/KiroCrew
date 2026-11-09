@@ -82,7 +82,7 @@ After setting the provider and sampling values, enable the switch only if the da
 
 Cloudflare's Clef decision model on Workers AI answers the same questions in the same format as Jev, so it works as the Decisions provider. Cloudflare wraps its answer in a `result` object, and Kiro Crew reads either shape. A failure reply carries no `answers` and is refused like any other unusable answer, and nothing from it is logged.
 
-Set `provider` in `config.json` by hand (the Decision model picker only offers Jev and local models), using your own Cloudflare account id:
+Set `provider` in `config.json` by hand (the Decision model picker only offers Jev and local models), using your own Cloudflare account id. On Linux, where Kiro Crew's sandbox protects `config.json`, an edit made outside the dashboard does not take effect on its own: Settings > Security shows the changed keys, and you choose **Apply** to start using it or **Discard** to put back the version Kiro Crew last saved. The same goes for every hand edit in this page.
 
 ```json
 {
@@ -104,7 +104,17 @@ Set `provider` in `config.json` by hand (the Decision model picker only offers J
 
 ## Using a model on Amazon SageMaker
 
-A System One model you host yourself on an Amazon SageMaker real-time endpoint can answer decisions. The endpoint's container must accept the same JSON body Jev does (`/v1/systemone`) on SageMaker's `/invocations` route and answer with the same JSON. This is off unless you set it. Set `provider` in `config.json` by hand:
+A System One model you host yourself on an Amazon SageMaker real-time endpoint can answer decisions. The endpoint's container must accept the same JSON body Jev does (`/v1/systemone`) on SageMaker's `/invocations` route and answer with the same JSON. This is off unless you set it.
+
+The easy way is the Decisions card. Under **Decision model**, choose **Your SageMaker endpoint** and type three things:
+
+- **Endpoint name**, as SageMaker shows it: letters, digits and hyphens, up to 63 characters.
+- **AWS region**, such as `us-west-2`.
+- **AWS profile**, optional: a profile name from your AWS config files. Leave it empty to use the default AWS credentials. A name your AWS config files do not have is refused.
+
+**Test connection** sends the endpoint one short fixed question, with no message of yours in it, and shows how long the answer took or why there was none. **Use this model** saves it. Kiro Crew builds the `sagemaker://` address itself from the three fields, so the card cannot be used to send decisions anywhere but a SageMaker endpoint. Only the dashboard owner can do either, and both are written to the audit log. Choosing the endpoint, or changing any of the three fields, stops sending until you turn the Decisions switch off and on again. If `boto3` is missing, the card says so and shows the install command.
+
+You can also set `provider` in `config.json` by hand (on Linux, apply the edit in Settings > Security, as above). The card then shows the endpoint selected with its three parts:
 
 ```json
 {

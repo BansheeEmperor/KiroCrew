@@ -49,8 +49,16 @@ def _read_rss_pages(pid: int, proc_root: Path | None = None) -> int:
         return 0
 
 
-def _build_child_map(proc_root: Path | None = None) -> dict[int, list[int]]:
+def _build_child_map(
+    proc_root: Path | None = None, *, session_members: bool = False
+) -> dict[int, list[int]]:
     """Parent-PID -> direct-children map from one pass over ``/proc/<pid>/stat``.
+
+    ``session_members=True`` is the RSS ceiling's map: it also hangs each process
+    under its session leader, so a job a timed-out shell command left running
+    (reparented to init, still in the runtime's session) is counted in that
+    runtime's tree (``platform_compat.proc_child_map``). Measurement only; the
+    kill paths call this without it.
 
     ``platform_compat.proc_child_map``, with "cannot list ``/proc``" (which it
     logs) and "not Linux" both answered as an empty map: the RSS watchdog then
@@ -59,7 +67,7 @@ def _build_child_map(proc_root: Path | None = None) -> dict[int, list[int]]:
     validates every parent->child edge. *proc_root* overrides the ``/proc``
     mount (test seam only).
     """
-    child_map = platform_compat.proc_child_map(proc_root=proc_root)
+    child_map = platform_compat.proc_child_map(proc_root=proc_root, session_members=session_members)
     return {} if child_map is None else child_map
 
 
@@ -145,30 +153,19 @@ def get_session_rss_mb(
 ) -> int:
     """Total RSS (MiB) of *pid* plus its descendant tree, via ``/proc``.
 
-    Single-tree convenience: builds the parent->child map with one
-    ``/proc/*/stat`` scan (see ``_build_child_map``) and delegates to
-    ``_rss_mb_from_tree``. To measure MANY trees in one sweep, build the map
-    once with ``_build_child_map()`` and call ``_rss_mb_from_tree()`` per tree so
-    ``/proc`` is scanned only once, not once per tree.
+    Single-tree convenience over ``_build_child_map`` + ``_rss_mb_from_tree``; to
+    measure many trees, build the map once and call ``_rss_mb_from_tree()`` per tree
+    so ``/proc`` is scanned once.
 
-    Any PID in *exclude_pids* is skipped along with the entire subtree beneath
-    it — a defensive barrier so a caller can exclude a shared sub-tree (e.g. a
-    pooled backend). Resident pages are summed and converted to MiB once at the
-    end, so the reading is not biased downward by per-PID truncation.
+    A PID in *exclude_pids* is skipped with its whole subtree (e.g. a pooled
+    backend). Pages are converted to MiB once at the end, so per-PID truncation does
+    not bias the reading down. *proc_root* is a test seam for the ``/proc`` mount.
 
-    *proc_root* overrides the ``/proc`` mount (test seam only).
-
-    Linux reads ``/proc``. Windows has neither ``/proc`` nor a safe parent->child
-    walk (see ``_build_child_map``), so it delegates to
-    ``platform_compat.proc_rss_tree_mb_for_pid``, which sums only
-    lineage-validated descendants; without that the ceiling measured every tree
-    as 0 MiB there and no session was ever recycled. macOS has no ``/proc``
-    either; it sums footprints over libproc (``_off_linux_tree_mb``). Any other
-    host returns 0 and logs one warning that the ceiling cannot measure.
-
-    *exclude_pids* is honoured on the ``/proc`` and macOS routes. The Windows
-    route derives its own validated descendant set, so a caller that needs a
-    subtree barrier there must exclude the pid before calling.
+    Windows has no ``/proc`` or safe parent->child walk, so it uses
+    ``platform_compat.proc_rss_tree_mb_for_pid`` (lineage-validated descendants
+    only; a 0 MiB reading would never recycle a session). macOS sums libproc
+    footprints (``_off_linux_tree_mb``). Other hosts return 0 and warn once.
+    *exclude_pids* is not honoured on Windows: exclude the pid before calling.
     """
     if platform_compat.IS_WINDOWS and proc_root is None:
         tree_mb = platform_compat.proc_rss_tree_mb_for_pid(pid)

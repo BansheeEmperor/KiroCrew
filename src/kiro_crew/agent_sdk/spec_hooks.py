@@ -73,6 +73,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from kiro_crew.agent_sdk.backend_mcp_ability import ability_for
 from kiro_crew.agent_sdk.capabilities import capabilities_of
 from kiro_crew.hooks import (
+    _HOOK_STREAM_CAP_BYTES,
     HOOK_EVENT_AGENT_SPAWN,
     HOOK_EVENT_POST_TOOL_USE,
     HOOK_EVENT_PRE_TOOL_USE,
@@ -297,6 +298,145 @@ def spec_hook_tool_names(tool_id: str) -> tuple[str, ...] | None:
     return kas_tool_match_names(tool_id)
 
 
+#: The hook store's event names, as kiro-cli writes them in ``hook_event_name``.
+_HOOK_EVENT_TO_OBJECT_EVENT = {v: k for k, v in _OBJECT_EVENT_TO_HOOK_EVENT.items()}
+
+#: Every kiro-cli built-in a call can be named by: the row keys of
+#: ``KAS_TOOL_IDS_BY_KIRO_TOOL`` and ``harness_tool_names.HARNESS_TOOL_TABLES``, and
+#: every tool a kiro-cli tag selects (``SPEC_HOOK_TOOL_TAGS``; ``code`` reaches a
+#: call as KAS's own id, outside every row), as
+#: kiro-cli's V2 engine names it on a hook's stdin: ``(tool_name, tool_tags)`` from
+#: ``BuiltInToolName``'s display name and ``category_tags`` plus ``@builtin``
+#: (``agent/src/agent/tools/mod.rs``, ``agent_config/parse.rs`` ``tags``).
+KIRO_CLI_BUILTIN_HOOK_NAMES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "execute_bash": ("shell", ("shell", "@builtin")),
+    "fs_read": ("read", ("read", "@builtin")),
+    "fs_write": ("write", ("write", "@builtin")),
+    "grep": ("grep", ("read", "@builtin")),
+    "glob": ("glob", ("read", "@builtin")),
+    "web_fetch": ("web_fetch", ("web", "@builtin")),
+    "web_search": ("web_search", ("web", "@builtin")),
+    "use_subagent": ("subagent", ("subagent", "@builtin")),
+    "code": ("code", ("read", "write", "@builtin")),
+}
+
+
+def _explicit_mcp_name(name: str) -> str | None:
+    """*name* when it is an ``@server/tool`` form; else ``None``.
+
+    Only the ``@builtin/<name>`` kind names are not MCP: a server whose own name
+    starts with ``builtin`` (``@builtin__docs/delete_file``) is one.
+    """
+    if name.startswith("@") and not name.startswith("@builtin/"):
+        server, sep, tool = name[1:].partition("/")
+        return name if sep and server and tool else None
+    return None
+
+
+def _fused_mcp_name(name: str) -> str | None:
+    """A ``mcp__server__tool`` *name* split at its first ``__``; else ``None``.
+
+    A guess: a server whose own name holds ``__`` splits wrongly, so this is read
+    only when no ``@server/tool`` form names the call.
+    """
+    if name.lower().startswith("mcp__"):
+        server, sep, tool = name[5:].partition("__")
+        return f"@{server}/{tool}" if sep and server and tool else None
+    return None
+
+
+def _kas_write_id(tool_names: Sequence[str]) -> str:
+    """The KAS id of a call whose kiro-cli name is ``fs_write``.
+
+    The first name is the kiro-cli row; a KAS id other than ``fs_write`` in that row
+    (``str_replace``, ``fs_append``, ``delete_file``) follows it. A call none
+    follows is ``fs_write`` itself, or a harness's own write tool.
+    """
+    # circular import: see spec_hook_tool_names.
+    from kiro_crew.acp.kas_permissions import KAS_TOOL_IDS_BY_KIRO_TOOL
+
+    row = KAS_TOOL_IDS_BY_KIRO_TOOL.get("fs_write") or ()
+    return next((n for n in tool_names[1:] if n in row and n != "fs_write"), "fs_write")
+
+
+def _kiro_cli_write_input(tool_input: dict, kas_id: str) -> dict:
+    """*tool_input* of a write call, plus the keys kiro-cli's ``write`` states.
+
+    kiro-cli V2's ``write`` input is tagged by ``command``
+    (``agent/src/agent/tools/fs_write.rs``): ``create`` with ``path`` and
+    ``content``, ``strReplace`` with ``path``, ``oldStr``, ``newStr`` and
+    ``replaceAll``. KAS's ``fs_write`` states ``path`` and ``text``, and its
+    ``str_replace`` ``path``, ``oldStr``, ``newStr`` and ``replace_all``
+    (``tools/default/fs-write.ts``, ``str-replace.ts``). So a content or path guard
+    written for kiro-cli finds its keys. Only those two map: KAS's ``fs_append``
+    also states ``path`` and ``text``, and calling it ``create`` would tell a hook
+    the fragment is the whole file, so it, like ``delete_file``, keeps its input
+    as it is. KAS's own keys stay, and a key the input already has is never
+    overwritten.
+    """
+    out = dict(tool_input)
+    if kas_id == "str_replace" and "oldStr" in tool_input and "newStr" in tool_input:
+        out.setdefault("command", "strReplace")
+        if "replace_all" in tool_input:
+            out.setdefault("replaceAll", tool_input["replace_all"])
+    elif kas_id == "fs_write" and "text" in tool_input:
+        out.setdefault("command", "create")
+        out.setdefault("content", tool_input["text"])
+    return out
+
+
+def kiro_cli_hook_payload(payload: dict, event: str, tool_names: Sequence[str] | None) -> dict:
+    """*payload* as kiro-cli writes an agent spec hook's stdin.
+
+    Crew runs on kiro-cli's V2 engine (its ACP client allowlist pins ``kirocrew``
+    there), and V2 sends every spec hook, object or array form, the same shape
+    (``agent/src/agent/task_executor/mod.rs`` ``run_command_hook``): a camelCase
+    ``hook_event_name``, the tool's full name (``shell``, ``read``, ``write``, or
+    ``@server/tool``) with its ``tool_tags``, and a Stop's ``assistant_response``.
+    A spec hook reads those here too, so a script that branches on them takes the
+    branch it takes on kiro-cli. Crew's own keys stay, so a script reading them
+    still works.
+
+    *tool_names* are the names the hook's matcher met (``extra_hooks_tool_names``);
+    without them the tool fields are left as they are. The FIRST name decides what
+    the call is, because every table puts the call's own reading first: a native
+    tool's kiro-cli row name (``fs_write`` for opencode's ``apply_patch`` and for
+    goose's ``developer`` write alike), an MCP split's ``@server/tool``, or KAS's
+    bare id. A first name in :data:`KIRO_CLI_BUILTIN_HOOK_NAMES` is that built-in.
+    Any other call is an MCP tool when any name is one: an ``@server/tool`` form
+    (built from the trusted server, so it is exact) wins over a fused
+    ``mcp__server__tool`` name, which is split only when no such form exists. With
+    neither, the call keeps its first name with no tags. The kind names a matcher
+    meets (``@builtin``, ``@server``) never decide it.
+    """
+    out = dict(payload)
+    out["hook_event_name"] = _HOOK_EVENT_TO_OBJECT_EVENT.get(event, event)
+    if event == HOOK_EVENT_STOP:
+        out["assistant_response"] = payload.get("assistant_text", "")
+    if not tool_names:
+        return out
+    first = tool_names[0]
+    builtin = KIRO_CLI_BUILTIN_HOOK_NAMES.get(first)
+    if builtin is not None:
+        out["tool_name"], tags = builtin
+        out["tool_tags"] = list(tags)
+        if first == "fs_write" and isinstance(payload.get("tool_input"), dict):
+            out["tool_input"] = _kiro_cli_write_input(
+                payload["tool_input"], _kas_write_id(tool_names)
+            )
+        return out
+    mcp = next((full for n in tool_names if (full := _explicit_mcp_name(n))), None) or next(
+        (full for n in tool_names if (full := _fused_mcp_name(n))), None
+    )
+    if mcp is not None:
+        out["tool_name"] = mcp
+        out["tool_tags"] = [mcp, f"@{mcp[1:].split('/', 1)[0]}", "@mcp"]
+        return out
+    out["tool_name"] = first
+    out["tool_tags"] = []
+    return out
+
+
 def envelope_named_tool_id(tool_id: str) -> bool:
     """Whether *tool_id* is a call on a harness whose ids come only from Crew's gate envelope.
 
@@ -517,7 +657,9 @@ def overlong_spec_hook_commands(
     return _overlong_commands(_agent_spec(agent_id, project_dir, session_key))
 
 
-def _hook(agent_id: str, event: str, index: int, entry: dict, timeout: int) -> ScriptHook | None:
+def _hook(
+    agent_id: str, event: str, index: int, entry: dict, timeout: int, max_output_size: int = 0
+) -> ScriptHook | None:
     command = entry.get("command")
     if isinstance(command, str) and len(command) > _MAX_COMMAND_LEN:
         _reject(
@@ -561,7 +703,20 @@ def _hook(agent_id: str, event: str, index: int, entry: dict, timeout: int) -> S
         matcher=matcher if isinstance(matcher, str) else "",
         command=command,
         timeout=timeout,
+        max_output_size=max_output_size,
     )
+
+
+def _output_limit(value: object) -> int:
+    """An object-form entry's ``max_output_size`` in bytes, or ``0`` for none.
+
+    kiro-cli reads a positive byte count. Any other value, a bool included, leaves
+    only the stream cap, and a larger count is clamped to that cap, which bounds
+    every hook's output anyway.
+    """
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return min(value, _HOOK_STREAM_CAP_BYTES)
+    return 0
 
 
 def _from_object_form(agent_id: str, hooks: dict, past_cap: list[str]) -> list[ScriptHook]:
@@ -584,9 +739,29 @@ def _from_object_form(agent_id: str, hooks: dict, past_cap: list[str]) -> list[S
                 if isinstance(timeout_ms, (int, float)) and not isinstance(timeout_ms, bool)
                 else _normalize_hook_timeout(None)
             )
-            hook = _hook(agent_id, event, index, entry, timeout)
-            if hook is not None:
-                out.append(hook)
+            hook = _hook(
+                agent_id, event, index, entry, timeout, _output_limit(entry.get("max_output_size"))
+            )
+            if hook is None:
+                continue
+            cache_ttl = entry.get("cache_ttl_seconds")
+            if (
+                isinstance(cache_ttl, (int, float))
+                and not isinstance(cache_ttl, bool)
+                and cache_ttl > 0
+            ):
+                # Named, not honoured: honouring it needs a per-session result
+                # cache, and without one the hook still runs correctly, only more
+                # often. The conversion is cached by content, so an unchanged spec
+                # is named once. Worded for every caller: the notice for a backend
+                # where spec hooks run nowhere reads this conversion too.
+                logger.warning(
+                    "agent %r: spec hook on %s sets cache_ttl_seconds, which Crew does "
+                    "not honour; where Crew runs the hook, it runs on every event",
+                    agent_id,
+                    _diagnostic(key),
+                )
+            out.append(hook)
     return out
 
 
@@ -1055,17 +1230,22 @@ def kas_spec_load_error(agents_dir: Path, agent_id: str) -> str | None:
     # circular import: kas_agents imports this module at load time.
     from kiro_crew.acp.kas_agents import (
         KasAgentTranslationError,
+        KasPromptFileUnreadable,
         load_agent_spec,
         resolve_prompt,
     )
+    from kiro_crew.acp.kas_prompt import spec_prompt
 
     try:
         spec = load_agent_spec(agents_dir, agent_id)
-        prompt = spec.get("prompt")
+        prompt = spec_prompt(spec)
         # A blank or absent prompt takes resolve_prompt's constant fallback and
         # cannot fail; skipping it avoids that function's warning per probe.
         if not (prompt is None or (isinstance(prompt, str) and not prompt.strip())):
             resolve_prompt(spec, agent_id=agent_id, agents_dir=agents_dir)
+    except KasPromptFileUnreadable:
+        # KAS runs the agent on its default prompt (``build_kas_custom_agents``).
+        return None
     except KasAgentTranslationError as exc:
         return str(exc)
     return None
@@ -1277,7 +1457,7 @@ def observer_spec_hooks(hooks: list[ScriptHook]) -> list[ScriptHook]:
 
 
 class TurnSpecHooks(NamedTuple):
-    """What a subagent or task-runner turn needs to gate its permission requests."""
+    """What a subagent, task-runner, cron or channel turn needs to gate its permission requests."""
 
     #: The agent spec's own hooks, as script hooks.
     hooks: list[ScriptHook]
@@ -1292,9 +1472,41 @@ class TurnSpecHooks(NamedTuple):
     #: False for a backend that runs the spec's hooks itself. The Hooks page's
     #: hooks gate a permission request either way.
     gated: bool
+    #: The spec keys nothing carries to this backend, for :func:`spec_keys_notice`.
+    lost: tuple[str, ...] = ()
 
 
 _NOT_GATED = TurnSpecHooks([], None, False, False)
+
+
+def spec_keys_notice(agent: str, keys: list[str]) -> str:
+    """The session-start notice for spec keys this backend never receives.
+
+    A remote MCP server's ``oauth`` block (``mcpServers.<name>.oauth``) gets one
+    more sentence, because what it costs is sign-in, not a setting. So does a
+    refused ``permissions`` block, because it is what keeps the agent's granted
+    shell and file tools asking.
+    """
+    from kiro_crew.mcp_oauth_projection import oauth_servers_in
+
+    notice = (
+        f"ℹ️ Agent {agent} sets {' and '.join(keys)}, which this backend does not "
+        "receive, so they have no effect in this session."
+    )
+    servers = oauth_servers_in(keys)
+    if servers:
+        noun = "server" if len(servers) == 1 else "servers"
+        notice += (
+            f" Sign-in to MCP {noun} {', '.join(servers)} will not work on this "
+            "backend. The kiro-cli backend supports it."
+        )
+    if "permissions" in keys:
+        notice += (
+            " A permissions block is not sent at all when it names a policies bundle "
+            "or is malformed or too large. With a policies bundle, the agent's shell "
+            "and file tools also ask for approval even where allowedTools grants them."
+        )
+    return notice
 
 
 def session_agent(provider: object, agent_id: str) -> str:
@@ -1349,12 +1561,19 @@ async def turn_spec_hooks(provider: object, agent_id: str) -> TurnSpecHooks:
         return TurnSpecHooks([], work_dir, True, True)
     # A crewmate's worker fires its session's merged spec, as the chat turn does.
     session_key = provider_session_key(provider)
+    # The keys the session runs without, read as the chat turn reads them.
+    from kiro_crew.agent_sdk.backends import ACP_BACKEND_KAS
+    from kiro_crew.agent_sdk.kas_engine import keeps_mcp_oauth
+
+    on_kas = capabilities_of(provider).backend == ACP_BACKEND_KAS
     try:
-        hooks, _lost, _unconfirmable = await asyncio.to_thread(
+        hooks, lost, _unconfirmable = await asyncio.to_thread(
             functools.partial(
                 crew_fired_spec_hooks,
                 agent_id,
                 spec_project_dir(provider),
+                translates_tools_settings=on_kas,
+                discards_mcp_oauth=on_kas and not keeps_mcp_oauth(provider),
                 session_key=session_key,
             )
         )
@@ -1373,7 +1592,7 @@ async def turn_spec_hooks(provider: object, agent_id: str) -> TurnSpecHooks:
         hooks = await asyncio.to_thread(merge_user_hook_files, provider, hooks)
     except Exception:  # noqa: BLE001 - a hook-file read must never fail the turn
         logger.debug("user hook files could not be merged for this turn", exc_info=True)
-    return TurnSpecHooks(hooks, work_dir, False, True)
+    return TurnSpecHooks(hooks, work_dir, False, True, tuple(lost))
 
 
 async def _observer_turn_spec_hooks(provider: object, agent_id: str) -> TurnSpecHooks:

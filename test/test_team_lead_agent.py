@@ -133,11 +133,13 @@ class TestTheLeadReportsToItsParent:
         assert "unless a conductor" in prompt
 
     def test_the_spec_can_reach_both_worker_verbs(self, installed):
-        """The server is mounted whole, so ``work_report`` is served; ``work_brief`` is
-        also auto-approved, ``work_report`` prompts like a nested conductor's."""
+        """The server is mounted whole, so ``work_report`` is served; ``work_brief`` and
+        ``work_report`` are both auto-approved, as for a nested conductor
+        (rfc-conductor-own-child-verbs.md, section 5.5)."""
         assert _reachable(installed, "kirocrew-work", "work_report")
         assert _reachable(installed, "kirocrew-work", "work_brief")
         assert "@kirocrew-work/work_brief" in installed["allowedTools"]
+        assert "@kirocrew-work/work_report" in installed["allowedTools"]
 
 
 class TestTheLeadCanDispatch:
@@ -266,10 +268,13 @@ class TestTheLeadCanDispatch:
         assert "`team-lead` skill" in prompt
         assert "`goal-conductor`" in prompt
         assert "session_create" in prompt
-        assert len(prompt.splitlines()) < 40
-        # Nothing copied from the conductor charter.
+        from kiro_crew.agent_parts.spec_prompts import _ASK_ONLY_WHEN_NEEDED_RULE
+
+        shared = _ASK_ONLY_WHEN_NEEDED_RULE.splitlines()
+        assert len(prompt.splitlines()) - len(shared) < 40
+        # Nothing copied from the conductor charter; the one shared rule is named, not copied.
         for line in agent._CONDUCTOR_SYSTEM_PROMPT.splitlines():
-            if len(line) > 60:
+            if len(line) > 60 and line not in shared:
                 assert line not in prompt, line
 
 
@@ -418,3 +423,15 @@ def test_a_failed_research_install_holds_the_ceiling_instead_of_syncing(
         "a failed research rewrite must mark the ceiling held so a tightened ceiling "
         "is retried, not recorded as synced over the stale grant list"
     )
+
+
+def test_both_conductor_charters_carry_the_ask_only_when_needed_rule() -> None:
+    """Ultra Mode runs on the team lead, a goal on the conductor: both agent prompts
+    (not session context, which ranks below the skill) say when to stop and ask."""
+    from kiro_crew.agent_parts.spec_prompts import _ASK_ONLY_WHEN_NEEDED_RULE
+
+    rule = _ASK_ONLY_WHEN_NEEDED_RULE.strip()
+    assert rule.startswith("**Ask only when you must.**")
+    assert "A milestone report is a statement" in rule
+    for prompt in (agent._CONDUCTOR_SYSTEM_PROMPT, agent._TEAM_LEAD_SYSTEM_PROMPT):
+        assert rule in prompt

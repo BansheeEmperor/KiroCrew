@@ -44,7 +44,10 @@ from kiro_crew.instances.ssh_tunnel_manager import SshTunnelManager
 
 pytestmark = pytest.mark.xdist_group(name="tree_scan_ssh_tunnel_manager_bindings")
 
-SHARED_BINDINGS_CHECKS = ("the_field_scan_counts_every_read_and_write_shape",)
+SHARED_BINDINGS_CHECKS = (
+    "the_field_scan_counts_every_read_and_write_shape",
+    "the_class_only_scan_can_fail",
+)
 
 _PACKAGE = "kiro_crew.instances"
 
@@ -124,6 +127,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "_resolve_transport": ("function", False, "e04704ab9320", "ssh_tunnel_manager_transport"),
     "_restart_when_idle": ("function", True, "2cefb15d094d", "ssh_tunnel_manager_remote_ops"),
     "_retire_chained": ("function", True, "c4e68ce7224d", "ssh_tunnel_manager_tokens"),
+    "_retry_recovery": ("function", False, "76aac80c9a77", "ssh_tunnel_manager_self_heal"),
     "_run_remote_subcommand": ("function", True, "c89d1a190190", "ssh_tunnel_manager_remote_ops"),
     "_schedule_chained_retirement": (
         "function",
@@ -150,7 +154,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "peer_capability": ("function", True, "4fd9c60dcb9f", "ssh_tunnel_manager_peer"),
     "peer_version": ("function", True, "ca2073978776", "ssh_tunnel_manager_peer"),
     "proxy_request": ("function", False, "185d7a847cc1", "ssh_tunnel_manager_peer"),
-    "reconfigure": ("function", True, "c50b534715b6", "ssh_tunnel_manager_lifecycle"),
+    "reconfigure": ("function", True, "9ebe2566e860", "ssh_tunnel_manager_lifecycle"),
     "refresh_token": ("function", True, "427800bb96d3", "ssh_tunnel_manager_tokens"),
     "remote_update_job": ("function", False, "0f4ffeaa2f07", "ssh_tunnel_manager_remote_ops"),
     "restart_remote": ("function", True, "eda7a3c85e67", "ssh_tunnel_manager_remote_ops"),
@@ -324,11 +328,6 @@ def _class_only_constructs(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[s
         if isinstance(spelled, str) and spelled.startswith("__") and not spelled.endswith("__"):
             found.append(spelled)
     return found
-
-
-def test_the_class_only_scan_can_fail() -> None:
-    tree = ast.parse("def f(self):\n    super().g()\n    return __class__, self.__hidden\n")
-    assert sorted(_class_only_constructs(tree.body[0])) == ["__class__", "__hidden", "super()"]
 
 
 @pytest.mark.parametrize("owner", stm._OWNERS)

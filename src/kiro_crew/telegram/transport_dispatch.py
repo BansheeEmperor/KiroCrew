@@ -54,13 +54,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast  # noqa: F401
 from kiro_crew import runtime_death  # noqa: F401
 from kiro_crew.agent_discovery import AgentInfo, list_agents  # noqa: F401
 from kiro_crew.agent_sdk.drivers.acp_vocab import is_user_worded_failure
-from kiro_crew.agent_switch_command import ChannelAgentPicks
+from kiro_crew.agent_switch_command import ChannelAgentPicks, LiveDefaultAgent
 from kiro_crew.config import live
 from kiro_crew.config.loader import ACTIVATION_MENTION, ACTIVATION_OFF  # noqa: F401
 from kiro_crew.config.sections import _clamp_pct
 from kiro_crew.constants import DENY_CAUSE_APPROVAL_TIMEOUT  # noqa: F401
 from kiro_crew.context import session_store_for_turn  # noqa: F401
 from kiro_crew.executors import run_in_embed_pool  # noqa: F401
+from kiro_crew.executors import EmbedAdmissionTimeout
 from kiro_crew.history import mint_row_mid  # noqa: F401
 from kiro_crew.hooks import TOOL_AUTO_APPROVE, TOOL_DENY, hook_gate_kwargs  # noqa: F401
 from kiro_crew.memory_stores import UnknownMemoryStore
@@ -93,7 +94,6 @@ from kiro_crew.messaging.dispatch import (  # noqa: F401
     delivery_is_muted,
     driver_turn_landed,
     open_turn_crew_log,
-    predecessor_sid,
     rearm_reinjection,
     requested_model_sid,
     rollback_skill_bodies,
@@ -241,12 +241,6 @@ from kiro_crew.messaging.queue_receipt import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-# Canonical kiro-cli agent fallback so Telegram sessions load kirocrew-core
-# (spawn_run etc.) instead of kiro-cli's bare built-in default when neither an
-# explicit override nor agent.default_agent is configured. Mirrors the Slack
-# path's _DEFAULT_KIROCREW_AGENT.
-_DEFAULT_KIROCREW_AGENT = "kirocrew"
-
 #: A pressed option is valid only while this chat still targets the session that
 #: rendered it. One constant serves both the pre-busy and post-rotation checks.
 _STALE_OPTIONS_REFUSAL = (
@@ -296,7 +290,8 @@ _FAILURE_REASON_MAX_CHARS = 500
 def _user_safe_failure_reason(exc: BaseException) -> str | None:
     """A bounded, user-safe reason for a failed turn, or None for the generic text.
 
-    A private-memory refusal or a backend failure Kiro Crew worded for a person
+    A private-memory refusal, a memory pool still busy past the build's admission
+    bound, or a backend failure Kiro Crew worded for a person
     (``is_user_worded_failure``) yields a reason: its message is already
     user-facing and actionable (e.g. names the models the account does
     include), and the generic "please try again" placeholder would be actively
@@ -307,7 +302,8 @@ def _user_safe_failure_reason(exc: BaseException) -> str | None:
     The text is untrusted output: credentials/exfil URLs and local filesystem
     paths are redacted, newlines are collapsed, and the length is hard-capped.
     """
-    if not isinstance(exc, UnknownMemoryStore) and not is_user_worded_failure(exc):
+    memory_refusal = isinstance(exc, (UnknownMemoryStore, EmbedAdmissionTimeout))
+    if not memory_refusal and not is_user_worded_failure(exc):
         return None
     try:
         text = redact_local_paths(redact(str(exc)))[0]
@@ -385,7 +381,8 @@ class TelegramDispatcher:
         # 0 until startup resolves, which makes the reply route inert rather than
         # over-permissive.
         self.bot_id: int = 0
-        self._conv = ConversationState(seed_fn=self._seed_gen)
+        self._default_agent = LiveDefaultAgent()
+        self._conv = ConversationState(seed_fn=self._seed_gen, bucket_fn=self._resolve_agent)
         # Published so a peer channel sharing this queue can wake this drain. Under
         # ``dm_scope = "unified"`` a Telegram DM and a Discord DM to the same agent
         # resolve to ONE session key and therefore one queue, and a drain can only
@@ -912,8 +909,13 @@ class TelegramDispatcher:
             )
             return
 
+        # The agent is read with the key it is a segment of, before any wait: a
+        # /new during fair admission repins the route, and the turn must still run
+        # the agent its frozen key names.
+        turn_agent: str | None = None
         if resumed_key is None:
             session_key = self._rotated_session_key(route)
+            turn_agent = self._resolve_agent(route)
         if origin_tag and session_provenance_tag(session_key) != origin_tag:
             await self._reply(chat_id, _STALE_OPTIONS_REFUSAL, thread=reply_thread)
             return
@@ -958,6 +960,7 @@ class TelegramDispatcher:
                 reply_thread=reply_thread,
                 interpret_commands=interpret_commands,
                 drain=False,
+                agent=turn_agent,
             ),
             refused=_refused,
         )
@@ -1265,9 +1268,11 @@ class TelegramDispatcher:
         # Deny-by-default (callbacks bypass transport.receive, so re-check here).
         return bool(user_id) and bool(self._allowed) and user_id in self._allowed
 
-    def _configured_agent(self) -> str:
-        """The agent a conversation uses when the user has picked none."""
-        return self.agent or self.cfg.agent.default_agent or _DEFAULT_KIROCREW_AGENT
+    def _configured_agent(self, route: tuple[str, str] | None = None) -> str:
+        """The agent *route*'s current conversation uses when the user has picked none."""
+        return self.agent or self._default_agent.for_route(
+            self._conv, route, self.cfg, self._live_cfg
+        )
 
     def _resolve_agent(self, route: tuple[str, str] | None = None) -> str:
         """The kiro-cli agent for *route*: an explicit /agent pick, else the default.
@@ -1278,7 +1283,7 @@ class TelegramDispatcher:
         spec decides which MCP servers and skills that kiro-cli process loaded at
         spawn, so there is nothing to swap.
         """
-        return self._agent_picks.resolve(route, self._configured_agent())
+        return self._agent_picks.resolve(route, self._configured_agent(route))
 
     def _route_key(
         self,

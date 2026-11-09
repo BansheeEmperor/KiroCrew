@@ -1,21 +1,8 @@
 """Coverage tests for :mod:`kiro_crew.cli_commands` subcommand dispatch.
 
-Each handler in ``cli_commands`` is a plain ``argparse.Namespace`` consumer, so
-these tests call the handlers DIRECTLY (never through a subprocess) and assert
-on the routed side effects: which collaborator was called, what was printed, and
-which exit code was raised. Everything that would touch the network, the real
-data home, or a live gateway is mocked -- the module's HTTP paths are exercised
-by patching ``kiro_crew.cli_commands._gateway_send``, and every filesystem write lands in
-``tmp_path``.
-
-Follows the style already established by ``test_cli.py`` (``argparse.Namespace``
-+ ``patch("kiro_crew.cli_commands.<name>")``) and ``test_workspace_crud_cli.py``
-(config fixtures written into ``tmp_path``).
-
-The handlers are split by topic across sibling files: agent, workspace, security
-and policy in ``test_cli_commands_coverage_agent_security.py``; learn, memory,
-artifact, pod, telemetry and eval in ``test_cli_commands_coverage_memory_eval.py``.
-The fakes more than one of them uses live in ``cli_commands_coverage_helpers.py``.
+Handlers are called directly with an ``argparse.Namespace``. HTTP goes through a patched
+``kiro_crew.cli_commands._gateway_send`` and every write lands in ``tmp_path``.
+Sibling ``test_cli_commands_coverage_*.py`` files share ``cli_commands_coverage_helpers.py``.
 """
 
 from __future__ import annotations
@@ -35,7 +22,9 @@ import pytest
 from cli_commands_coverage_helpers import _FakeResponse, _http_error, _ns
 
 from kiro_crew import cli_commands as cc
+from kiro_crew.apps.hook_reconcile import POLL_INTERVAL_SECS as HOOK_POLL_SECS
 from kiro_crew.cron import CronSchedule
+from kiro_crew.cron_service.schedule import _TIMER_POLL_SECS as CRON_POLL_SECS
 
 
 class _IncompleteResponse(_FakeResponse):
@@ -649,6 +638,7 @@ class TestAppCli:
             ) as local_register,
             patch("kiro_crew.cli_commands._register_app_crons_to_scheduler"),
             patch("kiro_crew.cli_commands._warn_hooks_need_restart"),
+            patch("kiro_crew.cli_commands._app_declares_backend", return_value=True),
         ):
             cc._handle_app(_ns(app_action="enable", name="demo"))
 
@@ -660,7 +650,24 @@ class TestAppCli:
         assert "✅ Recorded demo as enabled." in out
         assert "No running gateway was reached" in out
         assert "next gateway start" in out
-        assert "apply it live from the dashboard" in out
+        assert "picks up the app's crons and hooks within a minute" in out
+        assert "restart the gateway to start it now" in out
+
+    def test_file_only_message_skips_the_restart_for_an_app_without_a_backend(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An app with no backend process has nothing a restart would start."""
+        with patch("kiro_crew.cli_commands._app_declares_backend", return_value=False):
+            cc._print_file_only_app_result("demo", enabled=True)
+
+        out = capsys.readouterr().out
+        assert "picks up the app's crons and hooks within a minute." in out
+        assert "restart" not in out
+        assert "backend process" not in out
+
+    def test_file_only_message_minute_covers_both_gateway_polls(self) -> None:
+        """Both gateway polls behind the message's "within a minute" run at least once a minute."""
+        assert max(CRON_POLL_SECS, HOOK_POLL_SECS) <= 60
 
     def test_missing_local_secret_keeps_enable_file_only_behavior(
         self, capsys: pytest.CaptureFixture[str]
@@ -1161,15 +1168,13 @@ class TestAppCli:
         out = capsys.readouterr().out
         assert "✅ Recorded demo as disabled." in out
         assert "No running gateway was reached" in out
+        assert "drops the app's crons and hooks within a minute" in out
 
     def test_disable_flips_the_flag_before_deregistering(self) -> None:
         """Order is a security control, not cosmetics.
 
-        A running gateway is a DIFFERENT process: it watches this app's backend and
-        re-registers its MCP servers and agents on a health recovery, gated on the
-        enabled flag it reads from installed.json. Deregistering first leaves a window
-        where that flag still says enabled and the resources are already gone — a
-        recovery landing there puts them back for the app being disabled.
+        A running gateway re-registers the app on a health recovery if installed.json
+        still says enabled, so deregistering first opens a window that restores it.
         """
         order: list[str] = []
         with (
@@ -1319,6 +1324,20 @@ class TestAppCli:
         )
         out = capsys.readouterr().out
         assert "Scaffolded app" in out and "npm install" in out and "app install" in out
+
+    def test_init_ui_steps_are_one_command_per_line(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Windows PowerShell 5.1 rejects `&&`, so no printed step chains.
+        with patch("kiro_crew.cli_commands.scaffold_app", return_value=tmp_path / "a"):
+            cc._handle_app(
+                _ns(app_action="init", name="a", dir=str(tmp_path), backend=False, ui=True)
+            )
+        out = capsys.readouterr().out
+        lines = [line.strip() for line in out.splitlines()]
+        assert "&&" not in out
+        assert f"cd {tmp_path / 'a'}/ui" in lines
+        assert "npm install" in lines and "npm run build" in lines
 
     def test_init_without_ui_skips_npm_hint(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -1479,12 +1498,9 @@ class TestCleanupAppCrons:
 class TestDevConfirmFlagNoAbbreviation:
     """The dev subparser must reject flag abbreviations.
 
-    The builtin agent deny rule for `--confirm-out-of-install-root` matches
-    the flag's LITERAL text, but argparse's default `allow_abbrev=True` would
-    accept `--confirm` (or `--c`) as the same flag — an agent shell could then
-    supply the operator attestation in a spelling the rule never sees. The
-    `dev` subparser is built with `allow_abbrev=False`, so only the exact
-    flag parses and the substring rule stays sufficient.
+    The deny rule for `--confirm-out-of-install-root` matches the LITERAL flag, so an
+    accepted abbreviation like `--confirm` would let an agent supply the attestation
+    unseen.
     """
 
     def test_abbreviated_confirm_flag_is_rejected(self, capsys) -> None:

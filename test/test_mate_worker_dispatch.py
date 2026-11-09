@@ -167,8 +167,8 @@ def test_the_conductor_hands_off_to_its_worker(crewmate, named, kind):
 
 
 def test_a_conductor_slot_with_no_record_opens_no_worker(crewmate, tmp_path):
-    """A slot from before records names its crewmate by slot agent only; the
-    worker it would open has no crewmate and runs on the shared store."""
+    """A slot from before records names its crewmate by slot agent only, which
+    is not an identity: it hands off to no worker."""
     from kiro_crew.execution_context import clear_session_execution, read_session_execution
     from kiro_crew.history import ConversationLog
 
@@ -186,11 +186,14 @@ def test_a_conductor_slot_with_no_record_opens_no_worker(crewmate, tmp_path):
     ConversationLog()._path(key).unlink()  # the transcript that holds the record
     caller.memory_store = ""
     assert read_session_execution(key) is None
+    assert not sc_conducts(caller)
 
     with pytest.raises(sc.SessionControlError) as refused:
         _create(state, caller)
 
-    assert refused.value.code == "conductor_record_missing"
+    # Not a conductor, so its unnamed child is the slot agent's own member
+    # session, whose private store a member DM may not bind on its own.
+    assert refused.value.code == "memory_delegation_denied"
     assert set(state._slots) == before  # nothing was allocated
 
 
@@ -215,7 +218,7 @@ def sc_conducts(slot):
     from kiro_crew.dashboard.session_control_parts.session_create import _conducts_for_a_worker
     from kiro_crew.execution_context import read_session_execution
 
-    return _conducts_for_a_worker(slot, read_session_execution(slot_history_key(slot)))
+    return _conducts_for_a_worker(read_session_execution(slot_history_key(slot)))
 
 
 # ── the worker runs on its crewmate's backend, with its kit, or not at all ──
@@ -376,6 +379,32 @@ def test_a_worker_that_lands_on_kiro_cli_is_refused(
 
     assert refused.value.code == "capability_harness_unsupported"
     assert "(kiro)" in str(refused.value) and "kas" in str(refused.value)
+    assert set(state._slots) == before  # nothing was allocated
+
+
+def test_a_worker_its_pin_cannot_carry_is_refused_naming_the_pin(
+    crewmate, tmp_path, no_known_workers
+):
+    """The pin outranks ``agent.member_acp_backend``, so a hand-off its ``kiro`` pin
+    put on the kiro-cli v2 launch is refused naming the pin, never the setting that
+    cannot move it. (A pin to a harness Bots cannot run on, such as deepseek, runs
+    on KAS instead and is not refused.)"""
+    _set_backends(tmp_path, default="kiro", member="kas")
+    path = tmp_path / "config.json"
+    config = json.loads(path.read_text(encoding="utf-8"))
+    config["agents"]["pixel"]["acp_backend"] = "kiro"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    loader._invalidate_config_cache()
+    state, caller, _execution = crewmate
+    before = set(state._slots)
+
+    with pytest.raises(sc.SessionControlError) as refused:
+        _create(state, caller)
+
+    assert refused.value.code == "capability_harness_unsupported"
+    assert "(kiro)" in str(refused.value)
+    assert "pixel is pinned to" in str(refused.value)
+    assert "agent.member_acp_backend" not in str(refused.value)
     assert set(state._slots) == before  # nothing was allocated
 
 

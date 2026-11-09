@@ -27,7 +27,10 @@ This writes a zip to `~/.kiro/crew/diagnostics/` holding the gateway logs (the
 current run and up to four earlier ones, `gateway.log.prev` and `logs/gateway-boots/`) and
 crash reports, `versions.txt` and `manifest.json`. Every text file in it passes
 through the credential redaction first, and the command prints how many secrets it
-removed. It then prints a GitHub new-issue link on the bug-report form; drag the
+removed. Home-directory paths are shortened to `~`, and this machine's current
+host name is replaced with `<host>`. A name the machine had before, or another
+spelling of it, can remain, so look through the zip before you attach it.
+It then prints a GitHub new-issue link on the bug-report form; drag the
 zip into that issue. The link fills in the version and the release channel from
 the build's own release record. When the build cannot prove its channel, the
 channel field reads `Not sure` and no `channel:` label is attached, so a human
@@ -125,8 +128,9 @@ shell's environment to the service. Put it where the gateway reads it at boot:
 
 ```bash
 P=~/.kiro/crew/.env
-touch "$P" && chmod 600 "$P"
-printf '%s\n' "KIRO_API_KEY=$KIRO_API_KEY" >> "$P"
+# echo ends a last line that has no newline; && stops if chmod fails
+touch "$P" && chmod 600 "$P" && echo >> "$P" &&
+  printf '%s\n' "KIRO_API_KEY=$KIRO_API_KEY" >> "$P"
 kirocrew restart           # or restart however you run the gateway
 ```
 
@@ -143,6 +147,50 @@ service will not inherit.
 
 Releases before 0.3.0 filtered `KIRO_API_KEY` out of the probe entirely, so no
 placement works on those; use `kiro-cli login` or upgrade.
+
+### A service-started gateway lacks AWS container credentials, region or the ssh-agent
+
+A gateway started by `kirocrew service install` does not inherit the installing
+shell's environment either. On a host whose AWS credentials come from a container
+endpoint (`AWS_CONTAINER_CREDENTIALS_FULL_URI` or
+`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, with
+`AWS_CONTAINER_AUTHORIZATION_TOKEN` or `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`),
+whose region comes from `AWS_REGION` or `AWS_DEFAULT_REGION`, or whose ssh-agent
+listens at a fixed `SSH_AUTH_SOCK` path, MCP servers, cron scripts and agent
+sessions then fail to reach AWS or to use git over ssh under the service, while
+the same setup works from a gateway started in a shell.
+
+`kirocrew service install` and `kirocrew doctor` name the variables your shell
+sets that the service lacks, and print the commands to fix it. Add those names to
+`~/.kiro/crew/.env`, which the gateway reads at boot, for example:
+
+```bash
+P=~/.kiro/crew/.env
+# echo ends a last line that has no newline; && stops if chmod fails
+touch "$P" && chmod 600 "$P" && echo >> "$P" &&
+  printf '%s\n' "AWS_REGION=$AWS_REGION" "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$P"
+kirocrew restart           # or the restart command the warning prints
+```
+
+Do not put them in the systemd unit or in `/etc/kirocrew/kirocrew.env`: both are
+readable by any local user, and `AWS_CONTAINER_AUTHORIZATION_TOKEN` is a bearer
+credential. At each start the gateway log names each of them as a key that is not
+a recognised credential; it still reaches the processes the gateway starts.
+
+A copied value does not follow later changes on the host:
+
+- When the host sets `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, copy that and not
+  the token. The AWS SDKs read the file in preference to the token, so a rotated
+  token still reaches them; the warning leaves the token out in that case.
+- Copy `SSH_AUTH_SOCK` only when the agent socket has a fixed path. Agent sessions
+  find a socket at `/tmp/ssh-*/agent.*`, `/run/user/<uid>/ssh-agent.socket` or
+  `/run/user/<uid>/keyring/ssh` themselves, so the warning does not name one
+  there. On macOS the warning
+  does not name `SSH_AUTH_SOCK`, because sessions find launchd's agent socket
+  themselves and its path changes at each boot.
+
+MCP servers that Kiro Crew's shared MCP gateway runs for every session do not
+receive `SSH_AUTH_SOCK` wherever it is set: it is removed from their environment.
 
 ### Agent config missing or stale
 
@@ -190,8 +238,9 @@ systemd at all, use `./dev-backend.sh` from the root of a Kiro Crew source
 checkout; it is a repository script and is not installed with the package.
 
 If doctor reports `session bus: not applicable (no systemd per-user manager on
-this host)`, the host's systemd ships without `user@.service` — Enterprise Linux
-7 derivatives such as RHEL 7, CentOS 7 and Amazon Linux 2 do. There is no
+this host)`, the host's systemd ships without `user@.service` — Enterprise
+Linux 7 derivatives such as RHEL 7, CentOS 7 and Amazon Linux 2 do — or an
+administrator masked it (`systemctl unmask` reverses that). There is no
 per-user manager for linger to start, so `loginctl enable-linger` cannot help.
 Run a worktree gateway with `./dev-backend.sh` from a source checkout, or have an
 administrator hand-install a `user@$(id -u).service` unit as described under
@@ -207,17 +256,27 @@ features do not depend on the pod service manager.
 
 ### MCP tools not working
 
+Start at **Customize → Connections → MCP Servers**
+(`/capabilities?tab=mcp&view=mcp-servers`): it shows whether each server is on
+and answering, and it is where a server is added or turned on. Kiro Crew
+rebuilds `~/.kiro/agents/kirocrew.json` from your MCP sources on every gateway
+start, so do not add a server by editing that file. A server whose program is
+not found on this computer is dropped at the rebuild; the gateway log names it
+(`Dropping MCP server ...: command not found`).
+
 `kirocrew doctor` auto-appends missing `tools` entries for managed servers and
 rewrites the file. It may also repair `allowedTools` for always-on servers, but
 it deliberately does not blanket-auto-approve `kirocrew-computer` or other
 opt-in servers. It cannot auto-add a missing `mcpServers` entry, because the
 command path is install-specific. If tools still fail:
 
-1. Check `~/.kiro/agents/kirocrew.json` for `kirocrew-core` and
+1. Read (do not edit) `~/.kiro/agents/kirocrew.json` for `kirocrew-core` and
    `kirocrew-cron` under `mcpServers`, plus `kirocrew-computer` only when
    Computer Use is enabled and supported; check for matching `@`-prefixed
    entries under `tools`
-2. Check `~/.kiro/settings/mcp.json` for globally configured servers
+2. Check that your own server is listed and on under **Customize →
+   Connections → MCP Servers**, which also lists the servers in
+   `~/.kiro/settings/mcp.json`
 3. Re-run `kirocrew setup --agent-only`
 
 The doctor also runs a live handshake probe against each managed server and
@@ -451,7 +510,11 @@ Every agent process gets a directory under `~/.kiro/crew/scratch/` for its
 temp files and its `$KIROCREW_SCRATCH` work products (clones, build logs,
 screenshots). A directory is reclaimed automatically once every process
 recorded in its `.owner` file has exited and nothing in it has been touched for
-an hour, so short-lived sessions clean up on their own.
+an hour, so short-lived sessions clean up on their own. On Linux it is also kept
+while any other running process still uses it as its temp directory, as its
+working directory or through an open file, and the gateway log names it and
+that process in a WARNING line on every hourly sweep that keeps it:
+`agent-scratch: keeping '<name>': its owners are dead, but live pid <pid> still uses it`.
 
 A directory that holds a git repository (a clone, a workspace of checkouts, a
 bare repository) is never deleted this way, because nothing outside the agent
@@ -604,6 +667,59 @@ the workspace root that an older build left without a marker. The gateway only
 reclaims marked directories, so these stay; above 1000 the row becomes a warning
 and prints the manual move to do with the gateway stopped. Doctor itself deletes
 nothing.
+
+### Kiro Crew files belong to another account
+
+`kirocrew doctor`, the gateway log, Settings and the New Bot dialog say that some
+files in your data home (`~/.kiro/crew` unless you set `KIROCREW_HOME`) belong to
+another account, usually `root`, so Kiro Crew can't read them. When the notice
+says the files "can't be used by this account" instead, they are already yours
+but their permissions keep you out: skip to step 6.
+
+This almost always means Kiro Crew was started as root once, for example with
+`sudo kirocrew ...`. `sudo` keeps your `HOME`, so that run wrote root-owned files
+into your own data home. Kiro Crew now refuses such a run, but it does not change
+the owner of files back by itself: doing that as root inside a folder an agent can
+write is not safe to automate.
+
+To fix it yourself:
+
+1. Stop running Kiro Crew as root. Start it as your normal account.
+2. Stop Kiro Crew and every agent first, so nothing writes into the folder while
+   you change it: `kirocrew stop`, then quit the desktop app if you use it, and
+   check that no `kirocrew` or `kiro-cli` process is still running.
+3. Find the folder to fix: use the folder the notice names (`kirocrew doctor`
+   prints it too). Below it is written `<folder>`; put that path in its place.
+   Use that real folder, not a link to it.
+4. Check for files that have a second hard link. An agent could have linked a
+   system file into the folder earlier, and stopping the agent does not remove
+   that link:
+
+   ```bash
+   sudo find -P <folder> -xdev -type f -links +1
+   ```
+
+   It only lists files, and it runs as root so it can look inside folders the
+   earlier root run left unreadable to you. This must print nothing. If it prints
+   anything, stop here and do not run the next step.
+5. Give the folder back to your account. This is your own action, run in your own
+   terminal, as root, with Kiro Crew and every agent stopped:
+
+   ```bash
+   sudo find -P <folder> -xdev ! -user "$(id -un)" \( -type d -o -links 1 \) -execdir chown -h "$(id -un)" {} \;
+   ```
+
+   It changes only folders and single-link files on that folder's own disk that
+   another account owns, and it never follows a link out of the folder. Do not run
+   it while an agent is running: anything that can write the folder during the
+   change can point it at files outside the folder.
+6. Give your account read and write access to its own files again. Run this as
+   your normal account, without `sudo`; it can only change files you own:
+
+   ```bash
+   chmod -R u+rwX <folder>
+   ```
+7. Run `kirocrew doctor` again. The data home owner check should now pass.
 
 ## Log Levels
 

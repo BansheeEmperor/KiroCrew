@@ -149,8 +149,30 @@ _SELF_AUTH_WEBHOOK_METHODS = frozenset({"POST"})
 #: under another method stays on the ordinary token gate.
 UPDATE_REVALIDATE_PATH = "/api/update/revalidate"
 
+#: The inbound agent webhook's read half: the caller that started a run reads how
+#: it ended. Its handler (api_hooks_agent_status) checks the same webhook bearer
+#: the POST does and answers only for that source's own runs. GET only; HEAD and
+#: every other method stay behind the ordinary gate.
+AGENT_HOOK_STATUS_PATH = "/api/hooks/agent/status"
+
+#: A vendor's OAuth redirect back to a DCR Connection sign-in on a gateway with a
+#: public HTTPS URL (``connections.crew_oauth_dcr.gateway_callback``). The browser
+#: arrives from the vendor with no Crew credential; the handler admits only a
+#: pending sign-in's ``state`` (constant-time, single use, 600 s) and answers a
+#: fixed page. GET only.
+CREW_OAUTH_CALLBACK_PATH = "/api/connections/oauth/callback"
+
+#: The relay viewer's access token mint for the desktop app's main process, which
+#: holds the local secret and no dashboard token. Its handler (api_relay_viewer_token)
+#: admits only loopback or the same-user unix socket, the X-Local-Secret and a
+#: verified host process, the /api/token/local admission. POST only.
+RELAY_VIEWER_TOKEN_PATH = "/api/relay-viewer/token"
+
 _BYPASS_EXACT_METHODS: dict[str, frozenset[str]] = {
     AGENT_HOOK_PATH: _SELF_AUTH_WEBHOOK_METHODS,
+    AGENT_HOOK_STATUS_PATH: frozenset({"GET"}),
+    CREW_OAUTH_CALLBACK_PATH: frozenset({"GET"}),
+    RELAY_VIEWER_TOKEN_PATH: frozenset({"POST"}),
     TEAMS_WEBHOOK_PATH: _SELF_AUTH_WEBHOOK_METHODS,
     UPDATE_REVALIDATE_PATH: _SELF_AUTH_WEBHOOK_METHODS,
 }

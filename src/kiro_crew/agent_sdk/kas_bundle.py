@@ -104,6 +104,7 @@ __all__ = [
     "installed_engine_label",
     "kas_bundle_route",
     "kas_route",
+    "kas_spawn_takes_bundle",
     "last_kas_route",
     "pinned_version",
     "require_loadable_host",
@@ -116,7 +117,7 @@ __all__ = [
 #: remedy names only Crew's own sign-in; the relay route's remedy
 #: (``host_auth._KAS_REMEDY``) names both because that spawn can draw on either.
 KAS_BUNDLE_SIGN_IN_REMEDY = (
-    "Sign in from Settings → Agent Harness → Kiro sign-in, then start a new chat. "
+    "Sign in from Settings → Agent Harness → Kiro sign-in, then send your message again. "
     "kiro-cli is not used on this route."
 )
 
@@ -225,11 +226,20 @@ def kas_bundle_route() -> bool:
 
     try:
         agent = KiroCrewConfig.load().agent
-        return agent.acp_backend == ACP_BACKEND_KAS and (
-            bool(agent.kas_bundle) or bool(kas_route().bundle)
-        )
+        return agent.acp_backend == ACP_BACKEND_KAS and kas_spawn_takes_bundle(agent)
     except Exception:
         return False
+
+
+def kas_spawn_takes_bundle(agent: Any) -> bool:
+    """The route half of :func:`kas_bundle_route`, over a loaded ``agent`` section.
+
+    ``agent.kas_bundle`` on, or the automatic switch (:func:`kas_route`). No backend
+    half, for readers that ask about KAS whatever ``agent.acp_backend`` is. The flag
+    is read off the caller's section first, so a switch that is on answers without
+    resolving kiro-cli. Blocking, as :func:`kas_route` is.
+    """
+    return bool(getattr(agent, "kas_bundle", False)) or bool(kas_route().bundle)
 
 
 def kas_route() -> Any:

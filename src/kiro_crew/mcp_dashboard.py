@@ -518,7 +518,7 @@ def _tag_tools() -> tuple[Tool, ...]:
                 "each a slot key, a 'dashboard:<slot>' session key, or an exact "
                 "unique title. chat_folder_tree lists each group's pinned sessions "
                 "first, in the order the sidebar draws them, so read it first to "
-                "pick the anchor. Pinned sessions the person never reordered follow "
+                "pick the anchor. Pinned sessions with no stored position follow "
                 "in most-recent-activity order, the sidebar's default sort. This "
                 "call stores a position for EVERY pinned session, so ones that had "
                 "none keep that most-recent-activity order from then on, even for a "
@@ -853,13 +853,17 @@ def _list_tools() -> list[dict[str, Any]]:
 
     Reaching this process at all means an agent spec referenced this server, so
     the assignment already happened; there is nothing left to gate here. The one
-    conditional part is the ``crew`` argument on the five session tools, which is
-    advertised only while ``work_ledger.remote_dispatch`` is on.
+    conditional parts are the ``crew`` argument on the five session tools, which is
+    advertised only while ``work_ledger.remote_dispatch`` is on, and ``backend`` on
+    ``session_create`` / ``work_dispatch``, only while the ``session_harness``
+    feature preview is on.
     """
     from kiro_crew.mcp_session_crew import with_crew_schema
     from kiro_crew.remote_dispatch import remote_dispatch_enabled
+    from kiro_crew.session_harness_preview import session_harness_enabled, with_backend_schema
 
-    return with_crew_schema(TABLE.list(), remote_dispatch_enabled())
+    tools = with_crew_schema(TABLE.list(), remote_dispatch_enabled())
+    return with_backend_schema(tools, session_harness_enabled())
 
 
 def _validate_args(name: str, args: dict[str, Any]) -> dict[str, Any]:

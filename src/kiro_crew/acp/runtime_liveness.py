@@ -1,7 +1,8 @@
 """Whether this runtime is alive, busy, dead or due to recycle.
 
 The exit watch, the stderr drain and its latches, death attribution and its summary, reap
-tracking, the session occupancy checks and the age and RSS staleness checks.
+tracking, the session occupancy checks and the age, handle-count and RSS staleness
+checks.
 
 Each function here whose first parameter is ``self`` is an ``AcpRuntime`` method: the class
 binds it by name, so it reads and writes the runtime's own state on the instance, and a patch
@@ -16,7 +17,8 @@ Instance fields written: ``_dead``, ``_death_expected``, ``_death_label``,
 
 Instance fields read: ``_first_session_ready``, ``_last_activity``, ``_max_age_secs``,
 ``_max_rss_depth``, ``_max_rss_mb``, ``_pid``, ``_process``, ``_session_inits_in_flight``,
-``_session_queues``, ``_spawn_monotonic``, ``_spawn_start_token``, ``_stderr_task``,
+``_session_queues``, ``_spawn_monotonic``, ``_spawn_start_token``, ``_start_collectors``,
+``_stderr_task``, ``_subagent_roster_overflow``, ``_subagent_sessions``,
 ``_turn_active_sessions``, ``recording_allowed``.
 """
 
@@ -58,7 +60,7 @@ logger = logging.getLogger("kiro_crew.acp.runtime")
 # LAST non-empty stderr line the drain captured, truncated to this many
 # characters -- roughly one card line. The 20-line ring itself is unchanged.
 _STDERR_REASON_TAIL_CHARS = 200
-# The one stderr signature that names a host fault rather than a kiro-cli
+# A stderr signature that names a host fault rather than a kiro-cli
 # fault: every sandboxed spawn fails with it once the runtime tmpfs the
 # launcher stages mount sources on runs out of space or inodes. Point the
 # operator at the doctor check that measures that filesystem.
@@ -66,6 +68,15 @@ _ENOSPC_MARKER = "no space left on device"
 _ENOSPC_HINT = (
     "the runtime tmp filesystem is out of space or inodes; run `kirocrew doctor` "
     "(Runtime tmpfs section)"
+)
+# The other host fault: EAGAIN as libc words it. A child that unwraps a refused
+# thread or process spawn (kiro-cli's thread pool does) dies on it, usually under
+# a task limit: `ulimit -u`, or a cgroup pids.max the doctor's Task ceilings rows
+# print (Linux only).
+_EAGAIN_MARKER = "resource temporarily unavailable"
+_EAGAIN_HINT = (
+    "EAGAIN, usually a task limit refusing a new thread or process: check `ulimit -u`; "
+    "on Linux `kirocrew doctor` (Task ceilings section) shows the cgroup ceilings"
 )
 
 
@@ -88,17 +99,18 @@ def _proven_death_cause(tail: str) -> tuple[str, str] | None:
     describes a death, and an unexplained one is reported as the exit status it
     is, with the tail kept for whoever asks the log for it.
 
-    Both signatures are matched per LINE by their own helpers and searched over
-    the WHOLE retained tail rather than only its last line, because which line a
-    child printed last is a race with its own flushing and says nothing about
-    which line matters.
+    Every signature is matched per LINE and searched over the WHOLE retained
+    tail rather than only its last line, because which line a child printed last
+    is a race with its own flushing and says nothing about which line matters.
     """
     throttled = registration_throttle_line(tail)
     if throttled:
         return throttled, ""
-    for line in tail.splitlines():
-        if _ENOSPC_MARKER in line.lower():
-            return line.strip(), _ENOSPC_HINT
+    lines = tail.splitlines()
+    for marker, hint in ((_ENOSPC_MARKER, _ENOSPC_HINT), (_EAGAIN_MARKER, _EAGAIN_HINT)):
+        for line in lines:
+            if marker in line.lower():
+                return line.strip(), hint
     return None
 
 
@@ -138,6 +150,11 @@ _DEFAULT_MAX_RSS_MB = 500.0  # 500 MiB
 # CPU-only for young runtimes and only pays the offloaded RSS probe once a
 # runtime has lived long enough to plausibly have ballooned.
 _RSS_PROBE_MIN_AGE_SECS = 300.0  # 5 minutes
+
+# Windows HANDLE ceiling for a runtime's root process (see _is_stale()). A healthy
+# kiro-cli holds about 600; its per-directory handle leak reaches 900,000 with a
+# working set small enough for the RSS probe to miss it.
+_MAX_HANDLES = 50_000
 
 
 def is_alive(self: AcpRuntime) -> bool:
@@ -200,7 +217,7 @@ def _stale_by_age(self: AcpRuntime) -> bool:
 
 
 async def _is_stale(self: AcpRuntime) -> str | None:
-    """Return the recycle reason ('age' or 'rss'), or None if not stale.
+    """Return the recycle reason ('age', 'handles' or 'rss'), or None if not stale.
 
     Distinct from is_alive(): a runtime can be perfectly healthy (process
     running, protocol responsive) yet still be "stale" — e.g. the
@@ -226,6 +243,10 @@ async def _is_stale(self: AcpRuntime) -> str | None:
     young runtimes. The lock IS deliberately held across the probe for older
     runtimes, busy or idle; the age gate bounds how often that happens, and a
     runtime that answers "stale" is displaced rather than re-probed.
+
+    'handles' is Windows only: the root's kernel HANDLE count past _MAX_HANDLES.
+    One query-only syscall, so it runs on the loop; elsewhere the probe answers
+    None and the check is skipped.
     """
     if self._pid is None:
         return None
@@ -237,6 +258,12 @@ async def _is_stale(self: AcpRuntime) -> str | None:
         if age < _RSS_PROBE_MIN_AGE_SECS:
             # Too young to have grown — skip the offloaded RSS probe.
             return None
+
+    handles = platform_compat.proc_handle_count_for_pid(
+        self._pid  # pid-owner-ok: the runtime reads its own root
+    )
+    if handles is not None and handles > _MAX_HANDLES:
+        return "handles"
 
     rss_mb = await asyncio.get_running_loop().run_in_executor(
         subprocess_executor(),
@@ -262,6 +289,28 @@ async def _is_stale(self: AcpRuntime) -> str | None:
         return "rss"
 
     return None
+
+
+def session_tenancy(self: AcpRuntime, session_id: str) -> int | None:
+    """Registered-session count only when *session_id* is a proven tenant.
+
+    Process cleanup needs a positive exclusivity statement. A session whose
+    ``session/new`` or ``session/load`` is still running may already have
+    spawned children before its queue is registered. A timed-out start collector
+    represents the same window after its caller left. A native backend subagent
+    runs in the harness's own process tree with no queue here, so an announced
+    roster entry, or a roster longer than the cap, is a tenant the count cannot
+    see. A session unregistered before the host answered its teardown may still
+    own processes there too. Each makes the answer unreadable, as does a handle
+    whose session is absent from the registry.
+    """
+    if self._session_inits_in_flight or self._start_collectors or self._unconfirmed_teardowns:
+        return None
+    if self._subagent_sessions or self._subagent_roster_overflow:
+        return None
+    if session_id not in self._session_queues:
+        return None
+    return len(self._session_queues)
 
 
 def has_active_sessions(self: AcpRuntime) -> bool:
@@ -771,9 +820,11 @@ async def _retire_tracking_after_exit(self: AcpRuntime) -> None:
     removes the session line only when its recorded start token is the one
     read at THIS spawn, and the bare root line only when the number is dead
     at the moment of a probe taken under the bare file's own lock -- a live
-    holder of the number keeps its line. The root's own lines only: a
+    holder of the number keeps its line. On POSIX, the root's own lines only: a
     descendant that outlived the root is reparented and still running, and
-    its own ``kiro_pids.txt`` line is what the sweep reaps it by.
+    its own ``kiro_pids.txt`` line is what the sweep reaps it by. On Windows a
+    descendant has no such line, so the confirmed exit drains the root's
+    exact-handle tree and its job instead, which also retires the root's lines.
 
     Offloaded to a thread because the untrack takes the file locks the sweep
     contends for, and this runs on the event loop.
@@ -810,6 +861,28 @@ async def _retire_tracking_after_exit(self: AcpRuntime) -> None:
     # "killed" without naming who killed would defeat the attribution the
     # kill path's own docstring requires.
     self._note_reaped(process.returncode, after_kill=False)
+    if platform_compat.IS_WINDOWS:
+        # A Windows descendant gets no registry line of its own, so the sweep
+        # cannot reap what the root left running. Drain the tree the way
+        # ``_kill_inner`` does; the drain retires the root's tracking under its
+        # pin, and a drain it cannot confirm keeps the pins for the sweep.
+        try:
+            await platform_compat.terminate_windows_asyncio_tree(process)
+        except platform_compat.WindowsTreeDrainPending as exc:
+            logger.warning(
+                "AcpRuntime Windows tree for exited PID %s did not finish one bounded "
+                "drain pass (%d member(s) pending cleanup); the cleanup sweep keeps "
+                "reaping it",
+                pid,
+                exc.pending,
+            )
+        except (OSError, asyncio.TimeoutError):
+            logger.warning(
+                "AcpRuntime Windows tree cleanup incomplete for exited PID %s",
+                pid,
+                exc_info=True,
+            )
+        return
     if platform_compat.pid_exists(pid):
         return
     try:

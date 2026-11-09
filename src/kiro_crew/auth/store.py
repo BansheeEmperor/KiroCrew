@@ -92,6 +92,7 @@ class KasToken:
     # IdC refresh needs the dynamically-registered client credentials.
     client_id: str | None = None
     client_secret: str | None = None
+    client_secret_expires_at: int | None = None  # RegisterClient's, epoch seconds
     token_endpoint: str | None = None  # external_idp refresh
     extra: dict = field(default_factory=dict)
 
@@ -475,7 +476,7 @@ class TokenStore:
     def refresh_rejected_strict(self, identity: str) -> datetime | None:
         """Like :meth:`refresh_rejected`, but a marker it cannot read RAISES.
 
-        For a fail-closed reader (the enterprise gate): only a marker that is not
+        For a fail-closed reader (the LTS gate): only a marker that is not
         there is "not refused". A marker that exists but cannot be parsed still
         records a refusal, so it answers now.
         """

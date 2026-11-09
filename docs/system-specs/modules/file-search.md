@@ -17,6 +17,24 @@ File search backs the `@`-mention picker in the dashboard chat composer. A user 
 
 Results cover both **files** and **directories**. A file is an attachment whose content reaches the agent. A directory is a **path reference only**: the agent receives the path and explores it with its own glob/grep/read tools. No directory listing or recursive content is inlined.
 
+**Same-named rows disambiguate by their shortest distinguishing parent.** Search
+matches basenames, so one result set can hold several rows with the same name,
+and each row's path sub-line cuts at the END — right for a unique name, where
+the cut eats the shared prefix. For a same-named group the cut lands inside
+their common parent chain and the rows read identical down to size and age.
+`disambiguatedPaths` in `website/src/components/FilePickerMenu.tsx` gives every
+row of such a group the shortest trailing path that tells it apart, computed by
+`buildFileLabels` (`website/src/utils/fileTokens.ts`, the rule the attachment
+chips use, with the same Windows-separator handling as the preview strip),
+head-anchored with an ellipsis
+(`…/core/src/README.md`), so the distinguishing segment is the first thing
+after the cut and survives the menu's narrowest width; rows whose name is
+unique in the set keep the full path. Each row's tail is unique among the
+group's displayed tails by construction, and the full path stays on the row's
+tooltip. With `pathTail` (`ChatEmbed`) rows show their folder cut from the
+start instead, and this rule does not apply.
+`website/src/test/FilePickerMenu.sameName.test.tsx` pins the rule.
+
 ## API
 
 ### `GET /api/file-search`
@@ -194,8 +212,9 @@ each flag closes a divergence: `--fixed-strings` (both python passes match
 unconditionally), `--no-ignore` (`os.walk` cannot honour ignore files),
 `--max-filesize` and `--max-count 1` to match the fallback's own ceilings, and
 `--no-config`, because `RIPGREP_CONFIG_PATH` can carry `--pre=<binary>` and the
-child inherits this process's environment. Document containers are excluded with
-`--iglob`, not `--glob`: the document pass claims a file by
+child inherits this process's environment. Both text engines number lines as
+ripgrep does, by `\n` alone, and a preview drops its trailing `\r`. Document containers
+are excluded with `--iglob`, not `--glob`: the document pass claims a file by
 `splitext(name)[1].lower()`, so a case-sensitive exclusion leaves `REPORT.DOCX` in
 ripgrep's pass and the file is reported twice. Directory skips stay
 case-sensitive, matching the walk's own exact-name screen — extensions are folded
@@ -338,6 +357,12 @@ The recorded tokens are persisted per slot beside the staged files
 (`chatFileTokenDrafts`, sessionStorage), so a chip restored after a reload
 keeps them and behaves like one picked in the current page.
 Uploaded/dropped files have no token and keep a state-only remove.
+A split pane's composer gets the same pick and chip remove from the
+`Composer` root's Mention atom (`chat-core/composer/mention.ts`): the pane
+hands the root its staged-file list, the atom keeps each pick's token per slot
+in memory, and the pane's send resolves `@rel/` tokens against the pane's
+project. The pane keeps no alias drafts across a reload and runs no hand-edit
+reconciliation; those stay with the main chat's composer.
 
 A file chip is kept in step with its mention text in both directions
 (`website/src/pages/chat/page/composerFileMentions.ts`). The file tree's "Add to
@@ -407,7 +432,7 @@ shows literally — the same trade-off inline file mentions make.
 | `website/src/pages/chat/FileBrowserRail.tsx` | Files tab: Name/Content toggle, result rows, status row |
 | `website/src/api/fileGrep.ts` | `/api/file-grep` client and result types |
 | `src/kiro_crew/dashboard/file_index.py` | `FileIndex`, `FileIndexRegistry` |
-| `website/src/components/FilePickerMenu.tsx` | Picker UI, `kind` propagation, trailing-slash insertion, `pathMode`, `pathTail` (rows show their root-relative folder cut from the start, so same-named results stay distinguishable in a narrow menu; `ChatEmbed` opts in, the dashboard keeps the full path cut at the end) |
+| `website/src/components/FilePickerMenu.tsx` | Picker UI, `kind` propagation, trailing-slash insertion, `pathMode`, `pathTail` (rows show their root-relative folder cut from the start, so same-named results stay distinguishable in a narrow menu; `ChatEmbed` and a split pane's composer opt in), and, without `pathTail` (the main chat), same-name path disambiguation (`disambiguatedPaths`, over `buildFileLabels`) |
 | `website/src/components/composerTokens.ts` | Caret-relative `@` / `$` / `./` token matchers and the shared token replace |
 | `website/src/components/ChatInput.tsx` | Composer wiring: mounts the trigger pickers and the preview strip |
 | `website/src/chat-core/composer/pickers.ts` | Which trigger picker the text at the caret opens (`@` / `$` / `./` / `/`), one rule for the textarea and the Lexical editor; store-free, shared by `ChatInput` and `ChatEmbed` |
@@ -419,6 +444,7 @@ shows literally — the same trade-off inline file mentions make.
 | `website/src/utils/fileTokens.ts` | Attachment-marker owner: file AND dir token parse/serialize/resolve |
 | `website/src/utils/chatFileTokenDrafts.ts` | Per-slot persistence of file-chip aliases beside the staged-file drafts |
 | `website/src/chat-core/composer/outgoingTurn.ts` | Send and steer serialization: `[attached_dir N]` + `meta.dirs` on a send, `@rel/` kept on the text-only steer |
+| `website/src/chat-core/composer/mention.ts` | The Mention atom: a split pane's `@` file pick and file-chip remove through the `Composer` root, and `stripPickedToken`, shared with `ChatEmbed` |
 | `website/src/pages/ChatPage.tsx` | The host that composes the owners below |
 | `website/src/pages/chat/page/composerSend.ts` | Sends the outgoing turn (`buildOutgoingTurn`, `sendTurn`) |
 | `website/src/pages/chat/page/composerStaging.ts` | Staged-resource state; folder chips derived from `@rel/` tokens (`useStagedFolderRefs`) |
@@ -443,10 +469,12 @@ shows literally — the same trade-off inline file mentions make.
 | `test/test_file_index.py` | Index build, refresh, registry refcounting |
 | `test/test_file_search_dirs.py` | Directory results, `kinds` filter, independent scan budgets, dirs-visited ceiling, symlink security |
 | `website/src/test/FilePickerMenu.dirs.test.tsx` | Folder rows, selection payloads, trailing slash |
+| `website/src/test/FilePickerMenu.sameName.test.tsx` | Same-named rows: shortest distinguishing parent, head-anchored cut, separator awareness, unique-named rows unchanged |
 | `website/src/test/ChatInput.dirStripHeight.test.tsx` | Preview-strip height compensation for a folders-only strip |
 | `website/src/test/fileTokens.dirs.test.ts` | Token parse/serialize/resolve units, label widening, lossless spaced paths |
 | `website/src/chat-core/composer/outgoingTurn.test.ts` | Send and steer serialization at the turn: `[attached_dir N]` + `meta.dirs[N-1]` resolved against the project on a send, `@rel/` kept on a steer |
 | `website/src/test/ChatPage.dirStaging.test.tsx` | Token-derived staging, per-slot draft survival, remove parity, send serialization + `meta.dirs` |
+| `website/src/test/ChatPane.composerParity.test.tsx` | A split pane's `@` menu: a picked file's chip remove strips its token, rows cut from the start, a picked folder sent against the pane's project |
 | `website/src/test/ChatPage.chipUndo.test.tsx` | File-chip remove then undo/redo: attachment restored and sent, removed again, duplicate-token, prefix-sibling, old-project-alias, after-reload and post-send cases |
 | `website/src/test/chatFileTokenDrafts.test.ts` | Alias-draft roundtrip and corruption guard |
 | `website/src/test/renderUserContent.dirs.test.tsx` | Bubble chips: fresh, replay, mixed file+dir, paste-adjacent |

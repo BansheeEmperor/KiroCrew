@@ -66,6 +66,7 @@ from kiro_crew.dashboard.handlers import get_update_info
 from kiro_crew.dashboard.token_auth import LINK_WINDOW_SECS, MAX_SESSION_TTL_SECS, parse_duration
 from kiro_crew.executors import subprocess_executor
 from kiro_crew.hooks import safe_read_file
+from kiro_crew.http_proxy import resolve_proxy
 from kiro_crew.mcp_discovery import list_servers
 from kiro_crew.messaging.commands import note_user_stop
 from kiro_crew.messaging.dispatch import admit_inbound_callback
@@ -842,7 +843,7 @@ async def _route_message(
             )
             return
         # The channel itself: channels.posture.slack.allowed_channel_ids. In an
-        # enterprise build no channel is admitted until the policy names the list.
+        # LTS build no channel is admitted until the policy names the list.
         # A pure ``!stop`` stays exempt for the reason above.
         from kiro_crew.slack.channel_policy import channel_refusal
 
@@ -924,7 +925,18 @@ async def _route_message(
     # Observe mode: record history from authorized users only, so non-owner
     # messages cannot influence LLM context.
     if activation == ACTIVATION_OBSERVE:
-        if should_record_observe_history(orch.channel_history, _user_authorized):
+        # A Slack @mention arrives as a ``message`` event (is_mention False) AND
+        # an ``app_mention`` event (is_mention True) with the same ``msg_ts``,
+        # and socket mode can redeliver an envelope. Both reach this observe
+        # push, which runs above the ``msg_ts`` turn-dedup further down, so
+        # without a guard one message is recorded twice. Dedup the push under
+        # its OWN ``observe:`` key, never the bare ``msg_ts``: the ``message``
+        # event returns at the thread-follow gate below before reaching the
+        # turn-dedup (so it never marks the bare ts), and marking the bare ts
+        # here would wrongly drop the paired ``app_mention`` turn.
+        if should_record_observe_history(
+            orch.channel_history, _user_authorized
+        ) and not seen.check_and_add(f"observe:{msg_ts}"):
             assert orch.channel_history is not None  # narrowed by helper
             orch.channel_history.push(channel, sender_id, text, thread_ts=thread_ts, msg_ts=msg_ts)
         if not is_mention and not _thread_follow_admits(
@@ -1769,4 +1781,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
     from kiro_crew.slack.format import count_forwarded_files  # noqa: F401
     from kiro_crew.slack.format import forwarded_files_from_slack  # noqa: F401
     from kiro_crew.cron import job_zone_name  # noqa: F401
+    from kiro_crew.slack.code_channels.commands import (  # noqa: F401
+        handle_slash as code_channel_slash,
+    )
 # isort: on

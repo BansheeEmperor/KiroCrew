@@ -397,6 +397,15 @@ class TestBuildRefusalRecoveryPrompt:
         assert "continue the task where you left off" not in out
         assert "Do NOT repeat" in out
 
+    def test_answered_finished_task_leads_with_the_outcome_not_the_block(self):
+        """The continuation's reply becomes the user's last message, so a finished
+        task opens with what was done; a reply that only notes the block buries the
+        summary the user needs."""
+        out = build_refusal_recovery_prompt([("bash", "reason")], answered=True)
+        finished = out[out.index("Only if the task IS finished") :]
+        assert "reply with one short line noting the block" not in out
+        assert finished.index("outcome of the work") < finished.index("noting the block")
+
     def test_unanswered_turn_keeps_the_continuation_body(self):
         out = build_refusal_recovery_prompt([("bash", "reason")], answered=False)
         assert "ended the turn early" in out
@@ -745,6 +754,29 @@ class TestPreToolUseHookBlockRecovery:
         ]
         assert blocked, "expected a hook_blocked audit record"
         assert all(secret not in c.get("tool_name", "") for c in blocked), blocked
+
+
+class TestPreToolUseFiresOncePerCall:
+    """A call the gate passed to the approval card had its PreToolUse fire there."""
+
+    @pytest.mark.asyncio
+    async def test_a_gated_call_approved_on_the_card_fires_once(self, tmp_path) -> None:
+        hook_store = _make_hook_store()
+        state, client = _make_state(
+            tmp_path, context_builder=_context_builder(), hook_store=hook_store
+        )
+        slot = _make_slot()
+
+        await _drive_hook_blocked_turn(state, client, slot, approve_prompt=True)
+
+        pre_fires = [
+            call
+            for call in hook_store.fire.await_args_list
+            if call.args[0] == HOOK_EVENT_PRE_TOOL_USE
+        ]
+        assert len(pre_fires) == 1, pre_fires
+        client.approve_tool.assert_called_once()
+        client.reject_tool.assert_not_called()
 
 
 # ── Deny-row title redaction (all permission paths) ──

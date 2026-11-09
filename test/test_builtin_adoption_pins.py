@@ -143,50 +143,50 @@ _SHIPPED_PINS = [
     {
         "name": "personal-shopper",
         "repository": "https://github.com/KiroCrewCaptain/kirocrew-app-personal-shopper",
-        "commit": "5ee04d9924519b2a1df19e43715b3127c4c400ef",
-        "version": "0.1.0",
-        "treeSha256": "586797aa4a619094065f0b0f1360a17df89e3fcf68b19b1a3a1f53489dfe989f",
-        "archiveSha256": "5b06ef841a9dd5c38240ff72b1c1178233ccb9c4f7a7a52fbe8be5075590ce2d",
+        "commit": "2de66b467755be0104ec6b23884815c5213db409",
+        "version": "0.1.2",
+        "treeSha256": "b77353e2e427c43191de6d42f45308b6b88b0a97a877395deead6e2e1c38e63b",
+        "archiveSha256": "aaa144450e1cf6b4b3f882717aabfb1b7de6ce717d9de9636f5bc57a62884498",
         "minAppSdkLevel": 1,
         "legacyNav": {"route": "/personal-shopper", "icon": "ShoppingBag"},
     },
     {
         "name": "papyrus",
         "repository": "https://github.com/KiroCrewCaptain/kirocrew-app-papyrus",
-        "commit": "54b741668eab5735106e6c594051559946bf1564",
-        "version": "0.2.0",
-        "treeSha256": "25b23686114f723bd2bc4687e4c8bf62156595398ac0578ef8bb1f92bed219ba",
-        "archiveSha256": "97e02c5e0ac7f4dcbc38c7033d2af2c6a6bd17159440ea3bbb5437b323ba0ae0",
+        "commit": "36e0bc725796e37240fc854eaf905948ab1c4c7a",
+        "version": "0.2.2",
+        "treeSha256": "86a7e60af8e5b6947fe9d4cc062d35a61908feac17a0cebbbc9cea48d79917ba",
+        "archiveSha256": "022184b4062cf639f0380aa339322fdd7be90a4dfc7228bb6701c5958dd533a6",
         "minAppSdkLevel": 1,
         "legacyNav": {"route": "/papyrus", "icon": "ScrollText"},
     },
     {
         "name": "file-explorer",
         "repository": "https://github.com/KiroCrewCaptain/kirocrew-app-file-explorer",
-        "commit": "222feef8439e5ccaca030a213a897665950bc04a",
-        "version": "1.0.0",
-        "treeSha256": "f4539d744d8996180679bc309b4ded4ad94ca4041bc0a394c6fd53454a522d4c",
-        "archiveSha256": "8f7dba46f67b3d748fea89fed29b09a45be77ad684d903fa40b5395ff7d4db0d",
+        "commit": "9ccc81e91d2b86b5d5cde214c0bfdf3a71a570aa",
+        "version": "1.0.2",
+        "treeSha256": "93e6e4b74fecccc7a6eb57f769b186ca866f86dee5af85b55c75a7b8b4535396",
+        "archiveSha256": "f1cee8aacf8b35ca806182fb5b7d31b2824feb942d4eb397cb9b93dc4c454111",
         "minAppSdkLevel": 1,
         "legacyNav": {"route": "/file-explorer", "icon": "FolderTree"},
     },
     {
         "name": "design-critique",
         "repository": "https://github.com/KiroCrewCaptain/kirocrew-app-design-critique",
-        "commit": "a2de30a069e7db8f3d25d18b29413326b5cba3e3",
-        "version": "1.0.0",
-        "treeSha256": "7f410d940b958b453ed8ce999168943a8435ea750d15b2289fa4ccb9df7d4214",
-        "archiveSha256": "bc1d97360b65b93b6f9ba747f93fa51b6c864d7f7daa2b1528caa1cf9e01aa79",
+        "commit": "092451a698caad5708379bca5437c58d5cf6f1d9",
+        "version": "1.0.3",
+        "treeSha256": "c1314f219392fe4c3d82a3ee48da44af82a7bf6665193621a06c564b17eb0bc7",
+        "archiveSha256": "a373e0137f23375fca5ad85cdbd8279b956696df9e66803c2f125220c9d20e98",
         "minAppSdkLevel": 1,
         "legacyNav": {"route": "/design-critique", "icon": "PencilRuler"},
     },
     {
         "name": "pptx-maker",
         "repository": "https://github.com/KiroCrewCaptain/kirocrew-app-pptx-maker",
-        "commit": "8fa8a4218b4165f4f2a9ada9171a1b9c79830b9c",
-        "version": "0.3.0",
-        "treeSha256": "7df3b138971f71b6b87efa0a02c26dce74f519513729678dbd4e94af1b118ec8",
-        "archiveSha256": "56aa865df10d1ac594970bccebd0c8369f3f6bf8a4a27b5acfa813c6bd9117db",
+        "commit": "a622dc0eff74ffe2e927871f07400e7ab21ee5da",
+        "version": "0.3.3",
+        "treeSha256": "bcb5c102fb50df1541d5dab1fb59d186b291479e5b90a890edf681832d0fb976",
+        "archiveSha256": "c9c9525a76c7852613661f7e6016c137e0d7a548069f97abf841515ff56c4677",
         "minAppSdkLevel": 1,
         "legacyNav": {"route": "/pptx-maker", "icon": "Presentation"},
     },
@@ -224,6 +224,7 @@ _ADOPTION_MODULES = (
     "apps/builtin_adoption_checks.py",
     "apps/builtin_adoption_fetch.py",
     "apps/builtin_adoption_markers.py",
+    "apps/builtin_adoption_mcp.py",
     "apps/builtin_adoption_pins.py",
     "apps/builtin_adoption_state.py",
     "apps/manager_adopt.py",
@@ -346,3 +347,135 @@ def test_the_pin_tool_checks_out_without_the_operators_git_config(tmp_path, monk
     from kiro_crew.apps.builtin_adoption_fetch import adoption_tree_digest
 
     assert adoption_tree_digest(checkout) == adoption_tree_digest(tree)
+
+
+# --------------------------------------------------------------------------- #
+# scripts/adoption_pin.py: minAppSdkLevel comes from the seams the tree uses
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("manifest", "files", "uses"),
+    [
+        ({}, {}, {}),
+        ({"agentTools": {}}, {}, {"app.json agentTools": 2}),
+        (
+            {"permissions": {"agentTurns": True, "workerAutoApprove": True}},
+            {},
+            {"app.json permissions.agentTurns": 2, "app.json permissions.workerAutoApprove": 2},
+        ),
+        ({"permissions": {"agentTurns": "true"}}, {}, {}),
+        ({"credentialMasks": ["data/token.json"]}, {}, {"app.json credentialMasks": 3}),
+        ({}, {"backend/routes.py": "def f(ctx):\n    return ctx.turns.run\n"}, {"ctx.turns": 2}),
+        ({}, {"backend/_host.py": "x = _bound_ctx().lifecycle\n"}, {"ctx.lifecycle": 2}),
+        (
+            {},
+            {"backend/_host.py": "def f(self):\n    return self._ctx.untrusted\n"},
+            {"ctx.untrusted": 2},
+        ),
+        (
+            {},
+            {
+                "backend/_host.py": "def f(bound):\n    return getattr(bound(), 'auto_approve', None)\n"
+            },
+            {"ctx.auto_approve": 2},
+        ),
+        (
+            {},
+            {
+                "backend/_host.py": "def f(app_context):\n    return hasattr(app_context, 'lifecycle')\n"
+            },
+            {"ctx.lifecycle": 2},
+        ),
+        ({}, {"backend/_host.py": "def f(ctx:\n    ctx.lifecycle\n"}, {"ctx.lifecycle": 2}),
+        ({}, {"backend/manifest.py": "def f(manifest):\n    return manifest.lifecycle\n"}, {}),
+        ({}, {"tests/fakehost.py": "ctx.turns = None\n"}, {}),
+        ({}, {"backend/test_seams.py": "ctx.turns = None\n"}, {}),
+        ({}, {"conftest.py": "ctx.untrusted = None\n"}, {}),
+    ],
+)
+def test_the_pin_tool_finds_every_seam_above_level_one(
+    monkeypatch, tmp_path, manifest, files, uses
+):
+    from builtin_adoption_helpers import repository_manifest, write_tree
+
+    tree = write_tree(tmp_path / "tree", repository_manifest(**manifest), files)
+    assert _pin_tool(monkeypatch)._seam_level_uses(tree) == uses
+
+
+def test_the_pin_tool_never_lets_a_level_fall_below_what_the_tree_uses(monkeypatch):
+    tool = _pin_tool(monkeypatch)
+    uses = {"ctx.turns": 2, "app.json credentialMasks": 3}
+    assert tool._sdk_level_refusal(NAME, 1, {}) is None
+    assert tool._sdk_level_refusal(NAME, 3, uses) is None
+    for level in (1, 2):
+        refusal = tool._sdk_level_refusal(NAME, level, uses)
+        assert refusal is not None and "--min-sdk-level 3" in refusal
+        assert "app.json credentialMasks" in refusal
+    assert "ctx.turns" in tool._sdk_level_refusal(NAME, 1, uses)
+    assert "ctx.turns" not in tool._sdk_level_refusal(NAME, 2, uses)
+
+
+def _measure_tree(monkeypatch, tmp_path, tool, files, level):
+    """``_measure`` end to end on a local tree, with the network and the E-checks stubbed."""
+    import hashlib
+    import shutil
+
+    from builtin_adoption_helpers import make_archive, repository_manifest, write_tree
+
+    tree = write_tree(tmp_path / "tree", repository_manifest(), files)
+    archive = make_archive(tree, COMMIT)
+
+    def fake_download(_url, dest):
+        dest.write_bytes(archive)
+        return hashlib.sha256(archive).hexdigest()
+
+    monkeypatch.setattr(tool, "_clone", lambda _r, _c, dest: shutil.copytree(tree, dest))
+    monkeypatch.setattr(tool, "_download", fake_download)
+    monkeypatch.setattr(tool, "_shipped", lambda _name: (tree, repository_manifest()))
+    monkeypatch.setattr(tool, "pinned_tree_refusal", lambda *_args, **_kwargs: None)
+    work = tmp_path / "work"
+    work.mkdir()
+    pin = _parse([_row(minAppSdkLevel=level)])[NAME]
+    return tool._measure(pin, work)
+
+
+def test_the_pin_tool_refuses_level_one_for_a_tree_that_uses_level_two(monkeypatch, tmp_path):
+    tool = _pin_tool(monkeypatch)
+    files = {"backend/_host.py": "def f(ctx):\n    return getattr(ctx, 'lifecycle', None)\n"}
+    with pytest.raises(SystemExit, match="--min-sdk-level 2"):
+        _measure_tree(monkeypatch, tmp_path / "a", tool, files, 1)
+    row = _measure_tree(monkeypatch, tmp_path / "b", tool, files, 2)
+    assert row["minAppSdkLevel"] == 2
+
+
+def test_the_pin_tool_keeps_level_one_for_a_tree_without_newer_seams(monkeypatch, tmp_path):
+    tool = _pin_tool(monkeypatch)
+    assert _measure_tree(monkeypatch, tmp_path, tool, {}, 1)["minAppSdkLevel"] == 1
+
+
+@pytest.mark.parametrize("level", [0, 99])
+def test_the_pin_tool_refuses_a_level_this_build_cannot_run_before_any_git_call(monkeypatch, level):
+    tool = _pin_tool(monkeypatch)
+    cloned = []
+    monkeypatch.setattr(tool, "_clone", lambda *args: cloned.append(args))
+    with pytest.raises(SystemExit, match="--min-sdk-level"):
+        tool._compute(REPOSITORY, COMMIT, level)
+    assert cloned == []
+
+
+def test_the_pin_tool_passes_the_flag_through_to_the_row(monkeypatch):
+    tool = _pin_tool(monkeypatch)
+    levels = []
+
+    def fake_clone(_repository, _commit, dest):
+        dest.mkdir()
+        (dest / "app.json").write_text(
+            json.dumps({"name": NAME, "version": "1.2.3"}), encoding="utf-8"
+        )
+
+    monkeypatch.setattr(tool, "_clone", fake_clone)
+    monkeypatch.setattr(tool, "_measure", lambda pin, _work: levels.append(pin.min_app_sdk_level))
+    assert tool.main(["compute", REPOSITORY, COMMIT]) == 0
+    assert tool.main(["compute", REPOSITORY, COMMIT, "--min-sdk-level", "2"]) == 0
+    assert levels == [1, 2]

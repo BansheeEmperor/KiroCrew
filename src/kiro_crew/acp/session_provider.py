@@ -167,6 +167,9 @@ class AcpSessionProvider(LLMProvider):
         # be re-bound after a daemon respawn and the session would stay
         # identity-less for the rest of its life.
         self._session_key: str = session_key
+        # The notice naming kiro-cli's chat.defaultModel, which this KAS session
+        # did not start on (``kas_cli_settings.default_model_notice``); "" otherwise.
+        self.kas_default_model_notice: str = ""
         self._channel_id: str | None = channel_id
         # Set by a dashboard MCP write on a re-injecting host; applied at the
         # next turn boundary (``apply_pending_mcp_reinjection``).
@@ -333,9 +336,9 @@ class AcpSessionProvider(LLMProvider):
     async def new_conversation(self) -> None:
         """Reset to a fresh conversation on the SAME warm runtime (kiro path).
 
-        The cheap clean-slate reuse primitive a warm worker pool relies on, and
-        the only one: ``AcpClient`` has none, so a backend on its own client is
-        reset by kill and respawn. Create a brand-new ``session/new``
+        The cheap clean-slate reuse primitive a warm worker pool relies on for a
+        backend on the shared runtime; a backend on its own ``AcpClient`` has
+        ``AcpClient.new_conversation`` instead. Create a brand-new ``session/new``
         on the *already-running* kiro-cli process (paying only session/new + the
         MCP-init drain), then destroy the old session so its context/transcript
         and MCP children are freed on the shared process. This SKIPS the expensive
@@ -506,6 +509,12 @@ class AcpSessionProvider(LLMProvider):
         return value if isinstance(value, str) else ""
 
     @property
+    def kas_telemetry_notice(self) -> str:
+        """See ``AcpSessionHandle.kas_telemetry_notice``."""
+        value = getattr(self._handle, "kas_telemetry_notice", "")
+        return value if isinstance(value, str) else ""
+
+    @property
     def kas_withheld_credentials_notice(self) -> str:
         """See ``AcpSessionHandle.kas_withheld_credentials_notice``."""
         value = getattr(self._handle, "kas_withheld_credentials_notice", "")
@@ -515,6 +524,11 @@ class AcpSessionProvider(LLMProvider):
     def work_scratch_dir(self) -> Path | None:
         """The session tree's ``$KIROCREW_SCRATCH`` directory (see ``AcpRuntime.work_scratch_dir``)."""
         return self._runtime.work_scratch_dir
+
+    def flush_native_child_text(self) -> list:
+        """See AcpSessionHandle.flush_native_child_text (a turn cut short)."""
+        flush = getattr(self._handle, "flush_native_child_text", None)
+        return list(flush()) if callable(flush) else []
 
     @property
     def child_fidelity_aware(self) -> bool:
@@ -730,8 +744,14 @@ class AcpSessionProvider(LLMProvider):
         *,
         allow_image: bool = True,
         sign_in_ask: str = "",
+        prompt_gate: Callable[[], None] | None = None,
     ) -> AsyncIterator[LLMEvent]:
-        """Send a prompt and yield LLMEvent objects until the turn completes."""
+        """Send a prompt and yield LLMEvent objects until the turn completes.
+
+        ``prompt_gate`` goes to the handle, which has it called under the write
+        lock, right before the prompt is written; whatever it raises ends the
+        turn with nothing sent.
+        """
         # Re-establish this session's gateway claim before the turn can call a
         # tool. The shared identity publisher does the same at every surface that
         # drives a USER turn, and this is the boundary the sessions it cannot see
@@ -766,6 +786,8 @@ class AcpSessionProvider(LLMProvider):
         stale_compaction.sync_provider_compaction_delivery(self, self.essential_delivery)
         if sign_in_ask:
             send = functools.partial(send, sign_in_ask=sign_in_ask)
+        if prompt_gate is not None:
+            send = functools.partial(send, prompt_gate=prompt_gate)
         if not allow_image:
             send = functools.partial(send, allow_image=False)
         if timeout is not None:
@@ -859,6 +881,14 @@ class AcpSessionProvider(LLMProvider):
         if discard is None:
             return False
         return await self._guarded(discard()) is True
+
+    async def kas_command_call(self, command: str, params: dict[str, Any]) -> dict[str, Any] | None:
+        """Forward to the session handle: one of KAS's ``/context``, ``/knowledge``
+        or ``/code`` verbs for this session, or None when it cannot be sent."""
+        call = getattr(self._handle, "kas_command_call", None)
+        if call is None:
+            return None
+        return await self._guarded(call(command, params))
 
     async def steer(self, message: str) -> bool:
         """Forward a mid-turn steer to the session handle (kiro _session/steer).
@@ -1072,9 +1102,16 @@ class AcpSessionProvider(LLMProvider):
         """The handle's batch-guard refusal reason for *request_id*, taken once."""
         return self._handle.take_batch_refusal(request_id)
 
-    async def reject_tool(self, request_id: str | int) -> None:
-        """Reject a pending tool permission request."""
-        await self._guarded(self._handle.reject_tool(request_id))
+    async def reject_tool(self, request_id: str | int, reason: str = "") -> None:
+        """Reject a pending tool permission request.
+
+        *reason* is what the person typed with the rejection, passed on only when
+        given (see ``AcpSessionHandle.reject_tool``).
+        """
+        if reason:
+            await self._guarded(self._handle.reject_tool(request_id, reason=reason))
+        else:
+            await self._guarded(self._handle.reject_tool(request_id))
 
     async def cancel(self, *, wait_ack_timeout: float = 0.0) -> CancelOutcome:
         """Cancel the current turn."""

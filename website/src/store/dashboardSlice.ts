@@ -1,4 +1,4 @@
-import { safeSetItem } from '../utils/safeStorage'
+import { savePrefExplicitly } from '../lib/uiPrefs'
 import { newerTs } from '../lib/slotReadRelay'
 import { jsonEqual } from '../utils/structuralEqual'
 import { slotSurfaceKey } from './slotIdentity'
@@ -13,39 +13,17 @@ import type { SessionColorMode, PaletteName, DefaultColorSetting, IntensityName 
 import { isChatPageSurface } from '../utils/channelOrigin'
 import { slotListHoldTest } from '../utils/slotListHold'
 import { crewModeEnabled, mateSessionsHidden } from '../lib/crewMode'
+import { closeWatchReducer, isCloseWatchAction, type CloseWatchState } from './dashboard/closeWatch'
 import { MANUAL_UNREAD, _relayUnreadToParent, clearSharedUnreadIfCovered, crewMemberKeys, drainUnreadKeys, dropQueuedSharedUnreadCoveredBy, hasUnreadRelayHold, heldOrphanTest, persistManualSentinels, persistSharedUnread, queueSharedUnread, readCovers, relayUnreadCount, relayUnreadIfHolding, relayedUnreadKeys, restoreUnreadBadges, restoreUnreadSince, retireSharedUnreadIfUnchanged, sharedUnreadWatermark } from './dashboard/unread'
+import type { CloseHold } from './dashboard/closeHold'
 export { selectLiveMateThreads, selectPersonSlots } from './personSlots'
-
-/** A close tombstone entry (see `applySlots`). */
-interface CloseHold {
-  /** The `deleteSlot` attempt that owns this hold. A stale attempt's lifecycle
-   *  actions (a `rejected` trailing a slow peer navigation) must not touch a
-   *  newer attempt's hold on the same key. */
-  requestId: string
-  /** Deadline while the DELETE is in flight; `null` once the server has answered. */
-  inFlightUntil: number | null
-  /** This attempt received 404 because another close popped the key; wait for
-   *  that close's durable removal or rollback signal. */
-  awaitingOutcome?: true
-  /** Straggler lists an awaiting or confirmed hold still survives. The same
-   *  counter carries across a durable `removed` outcome. */
-  graceFrames: number
-  /** `fetchSlots` requests that were already in flight when the server
-   *  confirmed the close. Their replies may predate the pop, so the hold
-   *  outlives them however many frames arrive first. */
-  awaitingFetches: string[]
-  /** Wall-clock deadline for the confirmed phase. `chatSlots()` carries no
-   *  deadline either, so an `awaitingFetches` entry that never settles would
-   *  otherwise pin the tombstone until a reload. Set at confirmation. */
-  confirmedUntil: number | null
-}
 
 /** The two user-owned mute flags on a slot. */
 export type MuteFlag = 'mutes_opened' | 'muted'
 /** The `slotMuteFlagError` key for one flag on one slot. */
 export const muteFlagErrorKey = (flag: MuteFlag, slotKey: string) => `${flag}:${slotKey}`
 
-export interface DashboardState {
+export interface DashboardState extends CloseWatchState {
   status: StatusData | null
   /** The ad-hoc auto-approve duration this tab last saved in Settings, or
    *  undefined when it has saved none. Applied over every status write: the
@@ -92,6 +70,9 @@ export interface DashboardState {
    *  History rewrites may trust this immediately; slot-list visibility still
    *  follows `closingSlots` and its straggler budget. */
   durablyRemoved: Record<string, true>
+  /** Per key, how many close holds reached the confirmed phase. Outlives the
+   *  hold, so a close's late callback can tell a newer close was confirmed. */
+  closeConfirmations: Record<string, number>
   /** `fetchSlots` requests currently in flight, by thunk requestId — read by
    *  a confirmed close to know which replies could still predate its pop. */
   slotFetchesInFlight: string[]
@@ -222,10 +203,6 @@ export interface DashboardState {
 
 const safeGet = (key: string, fallback: string) => { try { return localStorage.getItem(key) ?? fallback } catch { return fallback } }
 export { MANUAL_UNREAD, restoreUnreadBadges, restoreUnreadSince } from './dashboard/unread'
-const safeSet = (key: string, value: string) => {
-  try { safeSetItem(key, value) } catch { /* QuotaExceededError / SecurityError */ }
-  if (key === 'mc-unread-slots') _relayUnreadToParent(value)
-}
 
 const initialState: DashboardState = {
   status: null,
@@ -242,6 +219,7 @@ const initialState: DashboardState = {
   slotMuteFlagError: {},
   closingSlots: {},
   durablyRemoved: {},
+  closeConfirmations: {},
   slotFetchesInFlight: [],
   staleSlotFetches: {},
   slotWriteSeq: 0,
@@ -472,6 +450,9 @@ const reconcileSlots = (
  *  the rest of the reply still applies. */
 /** Wall-clock cap on the in-flight hold; well past any healthy close, short of a reload. */
 const CLOSE_IN_FLIGHT_MAX_MS = 30_000
+/** `deleteSlot`'s argument (`DeleteSlotArg` in chatSlice), restated for the type-string matchers. */
+type DeleteSlotArgShape = string | { key: string }
+const deleteSlotArgKey = (arg: DeleteSlotArgShape): string => (typeof arg === 'string' ? arg : arg.key)
 /** Wall-clock cap on the confirmed hold: however many straggler lists or
  *  unsettled pre-confirmation fetches remain, the row is shown again past this
  *  if the server still lists it. A pre-pop reply cannot legitimately trail the
@@ -532,6 +513,11 @@ const confirmHold = (state: DashboardState, key: string, requestId: string): voi
   hold.inFlightUntil = null
   hold.awaitingFetches = [...(state.slotFetchesInFlight ?? [])]
   hold.confirmedUntil = Date.now() + CLOSE_CONFIRMED_MAX_MS
+  countCloseConfirmation(state, key)
+}
+const countCloseConfirmation = (state: DashboardState, key: string): void => {
+  if (!state.closeConfirmations) state.closeConfirmations = {}
+  state.closeConfirmations[key] = (state.closeConfirmations[key] ?? 0) + 1
 }
 /** Arm a tombstone directly in its confirmed phase for a removal the server
  *  already acknowledged. Pre-removal fetches remain paired with the hold so
@@ -546,6 +532,7 @@ const armConfirmedHold = (state: DashboardState, key: string): void => {
     awaitingFetches: [...(state.slotFetchesInFlight ?? [])],
     confirmedUntil: Date.now() + CLOSE_CONFIRMED_MAX_MS,
   }
+  countCloseConfirmation(state, key)
 }
 /** A `fetchSlots` request settled: no confirmed hold need wait for it any more.
  *  Runs AFTER that reply's own `applySlots`, so the reply itself is still held. */
@@ -1249,6 +1236,7 @@ const dashboardSlice = createSlice({
         hold.inFlightUntil = null
         hold.awaitingFetches = [...(state.slotFetchesInFlight ?? [])]
         hold.confirmedUntil = Date.now() + CLOSE_CONFIRMED_MAX_MS
+        countCloseConfirmation(state, key)
         delete hold.awaitingOutcome
       }
     },
@@ -1632,19 +1620,19 @@ const dashboardSlice = createSlice({
     },
     setSessionDefaultColor(state, action: PayloadAction<DefaultColorSetting>) {
       state.sessionDefaultColor = action.payload
-      safeSet('mc-session-default-color', JSON.stringify(action.payload))
+      savePrefExplicitly('mc-session-default-color', JSON.stringify(action.payload))
     },
     setSessionColorsMode(state, action: PayloadAction<SessionColorMode>) {
       state.sessionColorsMode = action.payload
-      safeSet('mc-session-colors-mode', action.payload)
+      savePrefExplicitly('mc-session-colors-mode', action.payload)
     },
     setSessionColorsPalette(state, action: PayloadAction<PaletteName>) {
       state.sessionColorsPalette = action.payload
-      safeSet('mc-session-colors-palette', action.payload)
+      savePrefExplicitly('mc-session-colors-palette', action.payload)
     },
     setSessionColorsIntensity(state, action: PayloadAction<IntensityName>) {
       state.sessionColorsIntensity = action.payload
-      safeSet('mc-session-colors-intensity', action.payload)
+      savePrefExplicitly('mc-session-colors-intensity', action.payload)
     },
     setEnabledAppIds(state, action: PayloadAction<string[]>) {
       state.enabledAppIds = action.payload
@@ -1847,17 +1835,18 @@ const dashboardSlice = createSlice({
       // BEFORE the thunk body's `removeSlotOptimistic`, so the hold is armed by
       // the time the row leaves the list and no frame can slip between the two.
       .addMatcher(
-        (action): action is { type: string; meta: { arg: string; requestId: string } } => action.type === 'chat/deleteSlot/pending',
+        (action): action is { type: string; meta: { arg: DeleteSlotArgShape; requestId: string } } => action.type === 'chat/deleteSlot/pending',
         (state, action) => {
+          const key = deleteSlotArgKey(action.meta.arg)
           // The key is server-minted, but it is still a dynamic property name on
           // a plain record: refuse the prototype keys the way every other
           // per-slot map here does, rather than let Immer throw inside `pending`
           // and leave the DELETE undispatched.
-          if (isUnsafeKey(action.meta.arg)) return
+          if (isUnsafeKey(key)) return
           if (!state.closingSlots) state.closingSlots = {}
           // A retry on the same key takes over the hold; the earlier attempt's
           // later lifecycle actions no longer match and are ignored.
-          state.closingSlots[action.meta.arg] = {
+          state.closingSlots[key] = {
             requestId: action.meta.requestId,
             inFlightUntil: Date.now() + CLOSE_IN_FLIGHT_MAX_MS,
             graceFrames: CLOSE_CONFIRMED_GRACE_FRAMES,
@@ -1877,7 +1866,7 @@ const dashboardSlice = createSlice({
         },
       )
       .addMatcher(
-        (action): action is { type: string; meta: { arg: string; requestId: string } } => action.type === 'chat/deleteSlot/rejected',
+        (action): action is { type: string; meta: { arg: DeleteSlotArgShape; requestId: string } } => action.type === 'chat/deleteSlot/rejected',
         (state, action) => {
           // Belt and braces: the thunk releases the hold itself before its
           // recovery refetch (see `releaseCloseHold`), because `rejected` only
@@ -1885,9 +1874,10 @@ const dashboardSlice = createSlice({
           // reply can land first. This covers a rejection that never reached
           // that catch (a thrown `switchSlot` peer selection, a test harness).
           // Owner-checked: this `rejected` can trail a same-key retry's `pending`.
-          releaseHold(state, action.meta.arg, action.meta.requestId)
+          releaseHold(state, deleteSlotArgKey(action.meta.arg), action.meta.requestId)
         },
       )
+      .addMatcher(isCloseWatchAction, closeWatchReducer)
   },
 })
 

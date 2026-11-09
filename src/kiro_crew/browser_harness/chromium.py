@@ -12,6 +12,14 @@ Sources, in order: Google's own Chrome for Testing bucket, then Playwright's CDN
 which mirrors it and is the only host of the ``linux-arm64`` build. Both are HTTPS;
 neither publishes a digest, so the archive is trusted the way the old Playwright
 download was. The version pin is what makes a bump a reviewed change.
+
+Two builds of that version exist. The full one (``chrome``) is what every host
+gets, except a Linux host whose libcups is too old for it (:mod:`.libcups`:
+Amazon Linux 2), where it cannot even start. That host gets the same version's
+``chrome-headless-shell`` instead, which does not link libcups, in a version
+directory of its own. :func:`wanted_build` decides; :func:`chromium_state` and
+:func:`download_chromium` follow its answer, so the executable the supervisor
+launches does too.
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ import logging
 import os
 import platform as _platform
 import shutil
+import ssl
 import stat
 import sys
 import tempfile
@@ -28,6 +37,9 @@ import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+from kiro_crew import _ssl_compat
+from kiro_crew.browser_harness import libcups
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +58,19 @@ INSTALLATION_MARKER = "INSTALLATION_COMPLETE"
 #: Chrome for Testing's platform keys.
 CFT_PLATFORMS: tuple[str, ...] = ("linux64", "linux-arm64", "mac-arm64", "mac-x64", "win64")
 
-#: Download hosts, tried in order. ``{version}`` and ``{platform}`` are filled in.
+#: The two Chrome for Testing builds, by the name each archive and its top
+#: directory carry (``<build>-<platform>.zip`` extracting to ``<build>-<platform>/``).
+BUILD_FULL = "chrome"
+BUILD_HEADLESS_SHELL = "chrome-headless-shell"
+
+#: Suffix of the headless shell's version directory, beside the full build's.
+_HEADLESS_SHELL_DIR_SUFFIX = "-headless-shell"
+
+#: Download hosts, tried in order. ``{version}``, ``{platform}`` and ``{build}`` are
+#: filled in.
 DOWNLOAD_URLS: tuple[str, ...] = (
-    "https://storage.googleapis.com/chrome-for-testing-public/{version}/{platform}/chrome-{platform}.zip",
-    "https://cdn.playwright.dev/builds/cft/{version}/{platform}/chrome-{platform}.zip",
+    "https://storage.googleapis.com/chrome-for-testing-public/{version}/{platform}/{build}-{platform}.zip",
+    "https://cdn.playwright.dev/builds/cft/{version}/{platform}/{build}-{platform}.zip",
 )
 
 #: Executable inside the extracted ``chrome-<platform>`` directory, per platform.
@@ -64,6 +85,13 @@ _EXECUTABLES: dict[str, tuple[str, ...]] = {
     ),
     "mac-x64": ("Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"),
     "win64": ("chrome.exe",),
+}
+
+#: The same for ``chrome-headless-shell-<platform>``. Linux only: no other platform
+#: is ever given the headless shell.
+_HEADLESS_SHELL_EXECUTABLES: dict[str, tuple[str, ...]] = {
+    "linux64": ("chrome-headless-shell",),
+    "linux-arm64": ("chrome-headless-shell",),
 }
 
 #: Stages reported to the progress callback during a download.
@@ -101,11 +129,13 @@ class ChromiumState:
     platform: str | None
     present: bool
     executable: Path | None
+    build: str = BUILD_FULL
 
     def as_dict(self) -> dict[str, object]:
         return {
             "version": self.version,
             "platform": self.platform,
+            "build": self.build,
             "present": self.present,
             "executable": str(self.executable) if self.executable else None,
         }
@@ -135,31 +165,55 @@ def chromium_root(prefix: Path) -> Path:
     return prefix / CHROMIUM_DIR_NAME
 
 
-def version_dir(prefix: Path, version: str = CHROMIUM_VERSION) -> Path:
-    return chromium_root(prefix) / version
+def wanted_build(platform: str | None) -> str:
+    """The build this host runs: the headless shell where libcups cannot load the full one.
+
+    Reads the filesystem only (:func:`.libcups.too_old_for_chrome`), so it is safe on
+    the status path.
+    """
+    if platform in _HEADLESS_SHELL_EXECUTABLES and libcups.too_old_for_chrome():
+        return BUILD_HEADLESS_SHELL
+    return BUILD_FULL
+
+
+def version_dir(prefix: Path, version: str = CHROMIUM_VERSION, build: str = BUILD_FULL) -> Path:
+    suffix = _HEADLESS_SHELL_DIR_SUFFIX if build == BUILD_HEADLESS_SHELL else ""
+    return chromium_root(prefix) / f"{version}{suffix}"
 
 
 def executable_path(
-    prefix: Path, platform: str | None, version: str = CHROMIUM_VERSION
+    prefix: Path,
+    platform: str | None,
+    version: str = CHROMIUM_VERSION,
+    build: str = BUILD_FULL,
 ) -> Path | None:
-    """Where the pinned build's binary sits, whether or not it is downloaded yet."""
-    parts = _EXECUTABLES.get(platform or "")
+    """Where *build*'s binary sits, whether or not it is downloaded yet."""
+    table = _HEADLESS_SHELL_EXECUTABLES if build == BUILD_HEADLESS_SHELL else _EXECUTABLES
+    parts = table.get(platform or "")
     if parts is None:
         return None
-    return version_dir(prefix, version) / f"chrome-{platform}" / Path(*parts)
+    return version_dir(prefix, version, build) / f"{build}-{platform}" / Path(*parts)
 
 
-def chromium_state(prefix: Path, platform: str | None = None) -> ChromiumState:
-    """Passive filesystem evidence for the pinned version: nothing is launched."""
+def chromium_state(
+    prefix: Path, platform: str | None = None, *, build: str | None = None
+) -> ChromiumState:
+    """Passive filesystem evidence for the pinned version: nothing is launched.
+
+    Only the build this host runs counts (*build*, default :func:`wanted_build`): on
+    a host that wants the headless shell, a full build left on disk reads as absent.
+    """
     key = platform if platform is not None else cft_platform()
-    exe = executable_path(prefix, key)
+    build = build if build is not None else wanted_build(key)
+    exe = executable_path(prefix, key, build=build)
     present = False
     if exe is not None:
         try:
-            present = exe.is_file() and (version_dir(prefix) / INSTALLATION_MARKER).is_file()
+            marker = version_dir(prefix, build=build) / INSTALLATION_MARKER
+            present = exe.is_file() and marker.is_file()
         except OSError:
             present = False
-    return ChromiumState(CHROMIUM_VERSION, key, present, exe if present else None)
+    return ChromiumState(CHROMIUM_VERSION, key, present, exe if present else None, build)
 
 
 def download_chromium(
@@ -185,10 +239,11 @@ def download_chromium(
     key = platform if platform is not None else cft_platform()
     if key is None:
         raise ChromiumDownloadError("no Chrome for Testing build exists for this platform")
-    target = version_dir(prefix)
+    build = wanted_build(key)
+    target = version_dir(prefix, build=build)
     root = chromium_root(prefix)
     _sweep_previous(root, target)
-    current = chromium_state(prefix, key)
+    current = chromium_state(prefix, key, build=build)
     if current.present and not refresh:
         return current
     root.mkdir(parents=True, exist_ok=True)
@@ -198,8 +253,9 @@ def download_chromium(
     ) as tmp:
         archive = Path(tmp) / "chrome.zip"
         errors: list[str] = []
+        certificate_failed = False
         for template in urls:
-            url = template.format(version=CHROMIUM_VERSION, platform=key)
+            url = template.format(version=CHROMIUM_VERSION, platform=key, build=build)
             notify(STAGE_DOWNLOADING, url)
             try:
                 _fetch(url, archive, opener, should_stop)
@@ -208,13 +264,18 @@ def download_chromium(
                 raise
             except Exception as exc:  # noqa: BLE001 - the next source is tried
                 errors.append(f"{url}: {exc}")
+                certificate_failed = certificate_failed or _is_certificate_failure(exc)
                 archive.unlink(missing_ok=True)
         else:
-            raise ChromiumDownloadError("; ".join(errors) or "no download source configured")
+            message = "; ".join(errors) or "no download source configured"
+            note = _ssl_compat.system_trust_note() if certificate_failed else None
+            if note:
+                message = f"{message} ({note})"
+            raise ChromiumDownloadError(message)
         notify(STAGE_EXTRACTING, str(target))
         staging = Path(tmp) / "extract"
         _extract(archive, staging)
-        exe = executable_path(prefix, key)
+        exe = executable_path(prefix, key, build=build)
         if exe is None or not (staging / exe.relative_to(target)).is_file():
             raise ChromiumDownloadError(f"archive did not contain {exe}")
         aside = _swap_in(staging, target, root)
@@ -223,9 +284,11 @@ def download_chromium(
         # The new copy is whole and marked: the old one goes, best effort. A file
         # something still holds open is left for the next install's sweep.
         shutil.rmtree(aside.parent, ignore_errors=True)
-    state = chromium_state(prefix, key)
+    state = chromium_state(prefix, key, build=build)
     if not state.present:
-        raise ChromiumDownloadError(f"archive did not contain {executable_path(prefix, key)}")
+        raise ChromiumDownloadError(
+            f"archive did not contain {executable_path(prefix, key, build=build)}"
+        )
     return state
 
 
@@ -315,9 +378,31 @@ def _fetch(
 def _default_opener(url: str, timeout: float) -> object:
     if not url.startswith("https://"):
         raise ChromiumDownloadError(f"refusing a non-HTTPS download: {url}")
+    # An explicit context, so the CAs this download trusts come from the platform
+    # trust store whether or not the startup prelude managed to patch ``ssl``.
+    context = _ssl_compat.system_trust_context()
     # The scheme is checked to be https just above, so no file:// URL reaches here.
     # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-    return urllib.request.urlopen(url, timeout=timeout)  # noqa: S310 - https pinned above
+    return urllib.request.urlopen(
+        url, timeout=timeout, context=context
+    )  # noqa: S310 - https pinned above
+
+
+def _is_certificate_failure(exc: BaseException) -> bool:
+    """Whether *exc*, or what it wraps (urllib's ``URLError.reason``), is a failed certificate check."""
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        for linked in (getattr(current, "reason", None), current.__cause__, current.__context__):
+            if isinstance(linked, BaseException):
+                stack.append(linked)
+    return False
 
 
 def _extract(archive: Path, dest: Path) -> None:

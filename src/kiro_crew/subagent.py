@@ -227,6 +227,7 @@ from kiro_crew.subagent_manager.monitoring import (  # noqa: F401 - resolved by 
     tombstone_recovery_action,
 )
 from kiro_crew.subagent_manager.run import _PendingDepthEmit, _PendingDepthRetry
+from kiro_crew.subagent_mcp_roster import session_mcp_roster_gb
 from kiro_crew.subagent_parts import admission_surface as _admission_surface
 from kiro_crew.subagent_parts import agent_policy as _agent_policy
 from kiro_crew.subagent_parts import cancellation_surface as _cancellation_surface
@@ -291,6 +292,7 @@ from kiro_crew.subagent_parts.delivery import (  # noqa: F401
     NOT_DELIVERY_STATE,
     PARKS_WHEN_SET,
     PARKS_WHEN_UNSET,
+    HostSpawnDecision,
     SpawnApprovalCallback,
     SpawnApprovalUnreachable,
     SubagentEventCallback,
@@ -439,7 +441,10 @@ from kiro_crew.subagent_parts.start_pricing import (  # noqa: F401
     _spawn_memory_floor_and_cost,
     _startup_memory_reserve_gb,
 )
-from kiro_crew.subagent_parts.terminal_surface import write_refusal_tombstone  # noqa: F401
+from kiro_crew.subagent_parts.terminal_surface import (  # noqa: F401
+    write_queued_stop_tombstone,
+    write_refusal_tombstone,
+)
 from kiro_crew.subagent_persistence import (  # noqa: F401 - read_tombstone resolved by run_lifecycle.py via bind_component_globals
     DISMISSAL_FAILED,
     _agent_dir,
@@ -623,6 +628,7 @@ _COMPONENT_GLOBAL_BINDINGS = (
     cap_buckets,
     learned_settled_for,
     read_learned_costs_checked,
+    session_mcp_roster_gb,
     Any,
     CONTEXT_GROUP_LESSONS,
     CONTEXT_GROUP_MEMORY,

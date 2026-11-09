@@ -291,10 +291,16 @@ swallowed. On a FIRST install the new tree is still removed rather than left in
 place, so no source marker survives to make `is_installed()` short-circuit the retry.
 
 `backend/provision.py` resolves `uv`, fetches and verifies the engine tree
-(`backend/engine_source.py`), runs `uv sync`, reinstalls the engine's skill package
-**editable** (a normal install drops its sibling data dirs, so bundled styles and
-templates would silently vanish), stages this app's prompt files into the
+(`backend/engine_source.py`), runs `uv sync --frozen`, reinstalls the engine's skill
+package **editable** (a normal install drops its sibling data dirs, so bundled styles
+and templates would silently vanish), stages this app's prompt files into the
 install dir, and renders the agent templates against the resolved engine paths.
+
+**Nothing re-resolves the engine's own `uv.lock`.** A plain `uv sync` or `uv run`
+re-resolves a lock uv judges stale and can pick an `mcp` major the engine cannot
+import (2.x has no `FastMCP`), so provisioning syncs with `--frozen` and the agents
+start the server with `uv run --frozen`. Pinned by
+`test_pptx_maker_provision.py::TestEnsureVenv::test_no_uv_call_can_re_resolve_the_engine_lock`.
 
 Prompt staging repairs owner directory permissions on the existing copy before
 forced removal, then normalizes the fresh copy's directories to owner rwx.
@@ -385,8 +391,9 @@ matches, and redirects may change host (`/archive/` 302s to
 `codeload.github.com`) but never leave https. That digest is the trust
 anchor; the commit is the locator and `ENGINE_TAG` is display-only (it never
 appears in the URL, so it cannot influence which bytes arrive). Bumping the
-engine means bumping all three together — bumping the commit alone fails
-verification on every host, which is the intended failure mode.
+engine means bumping all three together, plus `ENGINE_LOCK_SHA256` (below);
+bumping the commit alone fails verification on every host, which is the intended
+failure mode.
 
 This is viable because a GitHub `/archive/` tarball is byte-stable for a fixed
 commit sha; the digest was confirmed by downloading the artifact four times and
@@ -432,6 +439,14 @@ presence is the "this is the vetted tree" signal; no `.git` directory is consult
 the current pin, so bumping either makes an existing install re-fetch instead of
 silently keeping an older engine, and a tree left behind by an older git-based
 install (no marker) correctly reads as "not installed".
+
+It also requires the tree's `mcp-local/uv.lock` to hash to `ENGINE_LOCK_SHA256`,
+the lock inside the pinned archive. Every `uv` call installs that lock as-is, so a
+lock rewritten after install (#29225: a `uv run` without `--frozen` moves `mcp` to
+2.x, which the server cannot import) would be reinstalled by every provision. Such a
+tree reads as not installed instead: the banner offers provisioning again, and that
+run re-fetches the tree and rebuilds its venv with `uv sync --frozen`. Pinned by
+`test_pptx_maker_engine_source.py::TestInstallEngine::test_a_pinned_tree_with_a_rewritten_lock_is_fetched_again`.
 
 `engine.engine_tag()` reads that marker instead of shelling out to `git
 describe` — cheap enough for the status endpoints that call it on every poll, and

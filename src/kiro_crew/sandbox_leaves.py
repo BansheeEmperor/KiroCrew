@@ -15,7 +15,7 @@ from kiro_crew.identity_stores import AUTH_SQLITE_DB, AUTH_SQLITE_SIDECAR_SUFFIX
 
 #: The cache leaf, mirroring ``policy_distribution.CACHE_DIR_LEAF``; spelled here so
 #: this module needs no import from the governance engine.  Pinned equal by
-#: ``test_governance_distribution``.
+#: ``test_governance_distribution_cache_trust``.
 _POLICY_CACHE_LEAF = "policy_cache"
 #: Gateway-only runtime subtree that holds authenticated macOS decoder images.
 #: The gateway opens these outside the agent sandbox; every sandbox mode must
@@ -672,6 +672,10 @@ _CREW_READONLY_LEAVES: tuple[str, ...] = (
     # and environment a later server start runs, so it is sealed. Pre-created and
     # no-follow for the ``pi-gate`` reasons above.
     "kas-mcp-launch",
+    # Crew-owned Connection bridge snapshots (``kas_env_shim.BRIDGE_LEAF``): a slug,
+    # the gateway port and a per-bridge token, no vendor credential. Sealed for the
+    # ``kas-mcp-launch`` reason: a write would choose what a later bridge connects as.
+    "crew-oauth-bridge",
     # The app dev-mode AUTHORIZATION record (operator grants binding each dev
     # app to its resolved ui root — see apps/dev_mode.py). Sealing it makes
     # "operator, not agent" kernel-enforced: a sandboxed process cannot mint,
@@ -681,6 +685,24 @@ _CREW_READONLY_LEAVES: tuple[str, ...] = (
     # gateway ensures the file exists at startup (see apply_dev_mode's
     # reconcile) because the Linux launcher can only seal an EXISTING target.
     "apps/.dev-grants.json",
+    # Host-exec authorization grants (``apps/host_exec_grants.py``). A top-level
+    # directory holding one marker per app whose ENABLED state authorizes running
+    # code OUTSIDE the agent sandbox -- today only Dev Fleet, whose "pod" execs
+    # worktree code on the host. The pod gate reads a grant here, NEVER the
+    # ``apps/<name>/installed.json`` enablement record: that record is read at the
+    # host-exec decision but sits under the agent-writable, renamable ``apps/<name>``
+    # directory, so a sandboxed shell can rename the directory aside and plant a
+    # forged ``enabled: true`` at the original path (on the namespace launcher the
+    # read-only bind moves with the renamed parent, so the recreated path is
+    # writable). Sealing the record would not hold -- a mask covers the leaf, not its
+    # renamable ancestor. This directory does: as a DIRECT crew-home child it is the
+    # pattern that cannot be renamed around (``aws-control-staging`` above), and only
+    # the unsandboxed gateway writes it, on an owner-authenticated enable. READ-ONLY,
+    # not hidden: an in-sandbox reader (the pod gate runs in the gateway, but a script
+    # cron may check) learns only which app is host-exec-enabled, no secret. Generic
+    # name so core carries no app id (the app set lives in ``host_exec_grants``). A
+    # TOP-LEVEL leaf, pre-created in ``sandbox_precreate`` so the seal has a target.
+    "host-exec-grants",
     # The settings-seed provenance record (``acp.seed_provenance``), an
     # AUTHORIZATION record on the same footing as the dev-mode grants above: an
     # entry in it is what lets Crew OVERWRITE and then DELETE
@@ -1008,6 +1030,13 @@ _CREW_CHILD_READABLE_LEAVES: tuple[str, ...] = (
     # The empty directory a launch copy's kiro-cli starts in. It holds nothing, so a
     # foreign child that reads it learns nothing.
     "app-agent-launch",
+    # Crew-owned Connection bridge snapshots. The bridge every bridged harness's child
+    # starts must read its own; each holds a slug, a port and a per-bridge token, no
+    # vendor credential and no other server's env (those stay in ``kas-mcp-launch``).
+    # A token read from another session's file is useful only with that bridge's pid
+    # pin and an approval Crew's gate minted for that session, tool and arguments.
+    # Read-gate fenced, so the agent's own file tools still cannot open it.
+    "crew-oauth-bridge",
     # The KAS engine bundle a sandboxed KAS process must read and execute. The only
     # entry here the read gate also fences, so the only one whose exclusion changes
     # what an enforced child can open; the rest are already outside the mask. (The
@@ -1017,6 +1046,7 @@ _CREW_CHILD_READABLE_LEAVES: tuple[str, ...] = (
     # Authorization and lineage records an in-sandbox reader resolves. Read-only
     # sealed for the same reason: a forged entry decides a later grant.
     "apps/.dev-grants.json",
+    "host-exec-grants",
     "seed-provenance",
     "settings_seeds.json",
     "config-provenance",

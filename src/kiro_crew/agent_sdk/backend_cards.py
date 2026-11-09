@@ -378,6 +378,11 @@ OPERATOR_LINES: Tuple[_LineSpec, ...] = (
 #: DEFECT rather than an absent feature, and a card that listed defect classes in
 #: front of someone choosing a harness would be worse than one line shorter.
 OFF_CARD_SETS: Mapping[str, str] = {
+    "ACP_BACKENDS_CREW_OAUTH_BRIDGE": (
+        "which harness reaches a Crew-held Connection through the gateway bridge. It is "
+        "behind the crew_oauth preview, and the Connections page states which sign-in "
+        "each card uses, so a harness card line would repeat it"
+    ),
     "ACP_BACKENDS_DIRECT_CLIENT_CHILD_CALLS_MARKED": (
         "whether a deny-rule refusal on the direct client may become an override "
         "card. A non-member keeps today's refusal, which the person already meets "
@@ -453,6 +458,14 @@ OFF_CARD_SETS: Mapping[str, str] = {
         "command with no context, or hands one of its own commands to the model as "
         "text, which is a defect"
     ),
+    "ACP_BACKENDS_NATIVE_WORKFLOWS": (
+        "whether workflows run on the harness's own engine instead of Crew's. "
+        "Workflows run on every harness either way, and while the native route is "
+        "behind a developer opt-in, someone choosing a harness cannot yet act on "
+        "the difference. A wrong membership sends workflow calls to an engine "
+        "that does not serve them, which is a defect. It earns a card line when "
+        "the opt-in becomes a default"
+    ),
     "ACP_BACKENDS_LOCAL_CLEAR": (
         "whether the dashboard answers /clear itself or hands it to the harness. "
         "/clear drops the conversation on every harness either way, so a reader "
@@ -527,6 +540,12 @@ OFF_CARD_SETS: Mapping[str, str] = {
     "ACP_BACKENDS_SESSION_EVICTION": (
         "whether the teardown verb Crew sends disposes a session on the shared process. "
         "Invisible when right, a memory leak when wrong, which is a defect"
+    ),
+    "ACP_BACKENDS_CLIENT_NEW_CONVERSATION": (
+        "whether a reused workflow worker or a consolidation pass starts its fresh "
+        "conversation on the live process or by kill and respawn. Both give the same "
+        "empty conversation, so a reader choosing a harness loses nothing; a wrong "
+        "membership leaves an old session resident, which is a defect"
     ),
     "ACP_BACKENDS_MEMBER_TOOL_LIMITS": (
         "whether a saved member spec's per-tool tool switch-off is honoured. A "

@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Search, BookOpen, Network, FolderSync, HelpCircle, FileText, X, Copy, Settings } from 'lucide-react'
-import { Btn, SearchInput, Badge, EmptyState, ContentSkeleton } from '../../components/ui'
+import { Btn, Input, SearchInput, Badge, EmptyState, ContentSkeleton } from '../../components/ui'
 import Clickable from '../../components/Clickable'
 import Modal from '../../components/Modal'
 import SimpleSelect from '../../components/SimpleSelect'
 import ErrorNotice from '../../components/ErrorNotice'
 import { errMessage } from '../../utils/thunkError'
 import { knowledgeApi } from './api'
+import { usePagerFocus } from '../../hooks/usePagerFocus'
 import { useCopy, ITEM_TYPES, STATUSES, DEFAULT_STATUS_FILTER, ONBOARDING, FALLBACK_SUPPORTED_FORMATS, formatSupportedFormats } from './helpers'
 import DetailView from './DetailView'
 import SourcesList from './SourcesList'
@@ -17,6 +18,7 @@ import { EmbeddingStatus } from './EmbeddingStatus'
 import { SettingsTab } from './SettingsTab'
 import { useIngestionJobs } from './useIngestionJobs'
 import type { KnowledgeItem, Entity, Source, NamespaceInfo, IngestionJob } from './types'
+import { displaySyncStatus } from './knowledgeUtils'
 import { fmtNumber } from '../../i18n/format'
 import { itemTypeLabel } from './helpers'
 
@@ -254,11 +256,18 @@ export default function KnowledgePage({ embedded = false }: { embedded?: boolean
   const [typeFilter, setTypeFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState(DEFAULT_STATUS_FILTER)
   const [page, setPage] = useState(1)
+  const pager = usePagerFocus()
+  const { pressedPrev, pressedNext } = pager
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selectedEntity, setSelectedEntity] = useState<string | null>(null)
   const ingestion = useIngestionJobs()
   const [showHelp, setShowHelp] = useState(false)
   const [namespaceFilter, setNamespaceFilter] = useState('')
+  // '' keeps the default order; 'newest' / 'oldest' order by the day an item
+  // was added. The two days bound that same added day, inclusive.
+  const [sortOrder, setSortOrder] = useState('')
+  const [addedFrom, setAddedFrom] = useState('')
+  const [addedTo, setAddedTo] = useState('')
   const [uploadNamespace, setUploadNamespace] = useState('default')
   const [showAutocomplete, setShowAutocomplete] = useState(false)
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
@@ -275,17 +284,22 @@ export default function KnowledgePage({ embedded = false }: { embedded?: boolean
   const limit = query ? 20 : MAX_PAGE_SIZE
   // Source-first list: when nothing is searched the top level renders one row
   // per source and each row pages within itself, so the item-level query below
-  // is only used for flat search results.
-  const sourceFirst = !query
+  // is only used for flat results. A date order or range is flat too: it reads
+  // across sources, newest or oldest first.
+  const dateView = !!(sortOrder || addedFrom || addedTo)
+  const sourceFirst = !query && !dateView
 
   const { data: itemsData, isLoading: itemsLoading, error: itemsError } = useQuery({
-    queryKey: ['knowledge-items', { page, query, typeFilter, statusFilter, namespaceFilter, limit }],
+    queryKey: ['knowledge-items', { page, query, typeFilter, statusFilter, namespaceFilter, sortOrder, addedFrom, addedTo, limit }],
     queryFn: () => {
       const params = new URLSearchParams({ page: String(page), limit: String(limit) })
       if (query) params.set('q', query)
       if (typeFilter) params.set('type', typeFilter)
       if (statusFilter) params.set('status', statusFilter)
       if (namespaceFilter) params.set('namespace', namespaceFilter)
+      if (sortOrder) params.set('sort', sortOrder)
+      if (addedFrom) params.set('added_from', addedFrom)
+      if (addedTo) params.set('added_to', addedTo)
       return knowledgeApi<{ items: KnowledgeItem[]; total: number }>(`/items?${params}`)
     },
     enabled: !sourceFirst,
@@ -350,7 +364,7 @@ export default function KnowledgePage({ embedded = false }: { embedded?: boolean
     queryFn: () => knowledgeApi<Source[]>('/sources'),
     refetchInterval: (query) => {
       const data = query.state.data
-      if (data?.some(s => s.sync_status === 'syncing' || s.sync_status === 'active')) return 5000
+      if (data?.some(s => displaySyncStatus(s) === 'syncing' || s.sync_status === 'active')) return 5000
       return false
     },
   })
@@ -358,7 +372,7 @@ export default function KnowledgePage({ embedded = false }: { embedded?: boolean
   // Invalidate items when any source finishes scanning
   const wasSyncingRef = useRef(false)
   useEffect(() => {
-    const isSyncing = sources.some(s => s.sync_status === 'syncing' || s.sync_status === 'active')
+    const isSyncing = sources.some(s => displaySyncStatus(s) === 'syncing' || s.sync_status === 'active')
     if (wasSyncingRef.current && !isSyncing) {
       queryClient.invalidateQueries({ queryKey: ['knowledge-items'] })
       queryClient.invalidateQueries({ queryKey: ['knowledge-stats'] })
@@ -490,10 +504,10 @@ export default function KnowledgePage({ embedded = false }: { embedded?: boolean
         // claims the arrows for itself (preventDefault before this window
         // listener sees the event), so the same press never also turns a page.
         if (e.defaultPrevented) return
-        if (!sourceFirst && !selectedId && page < Math.ceil(total / limit)) { setPage(p => p + 1); e.preventDefault() }
+        if (!sourceFirst && !selectedId && page < Math.ceil(total / limit)) { setPage(p => p + 1); pressedNext(); e.preventDefault() }
       } else if (e.key === 'ArrowLeft' && !e.altKey && !e.ctrlKey) {
         if (e.defaultPrevented) return
-        if (!sourceFirst && !selectedId && page > 1) { setPage(p => p - 1); e.preventDefault() }
+        if (!sourceFirst && !selectedId && page > 1) { setPage(p => p - 1); pressedPrev(); e.preventDefault() }
       } else if (e.key === 'a' && (e.ctrlKey || e.metaKey) && tab === 'list' && !selectedId) {
         if (listContainerRef.current?.contains(document.activeElement || target)) {
           e.preventDefault()
@@ -504,11 +518,11 @@ export default function KnowledgePage({ embedded = false }: { embedded?: boolean
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [selectedId, page, total, limit, tab, selectedItems.size, showHelp, sourceFirst, visibleItems])
+  }, [selectedId, page, total, limit, tab, selectedItems.size, showHelp, sourceFirst, visibleItems, pressedPrev, pressedNext])
 
   useEffect(() => {
     setSelectedItems(new Set())
-  }, [page, query, typeFilter, statusFilter, namespaceFilter])
+  }, [page, query, typeFilter, statusFilter, namespaceFilter, sortOrder, addedFrom, addedTo])
 
   useEffect(() => {
     if (selectedEntity && entitySectionRef.current) {
@@ -547,7 +561,7 @@ export default function KnowledgePage({ embedded = false }: { embedded?: boolean
   // items, and both the list query and /namespaces are active-scoped, so it is
   // indistinguishable from an empty library and shows onboarding. The Sources
   // and Graph tabs stay mounted above this branch, so it is not a dead end.
-  const filtersPristine = !query && !typeFilter && !namespaceFilter && statusFilter === DEFAULT_STATUS_FILTER
+  const filtersPristine = !query && !typeFilter && !namespaceFilter && !dateView && statusFilter === DEFAULT_STATUS_FILTER
   const isEmpty = !loading && !listUnread && total === 0 && filtersPristine
   const totalPages = Math.ceil(total / limit)
 
@@ -600,6 +614,35 @@ export default function KnowledgePage({ embedded = false }: { embedded?: boolean
         onChange={v => { setNamespaceFilter(v); setPage(1) }}
         aria-label={i18nT('pages.knowledge.index.filter_by_namespace')}
       />
+      <SimpleSelect
+        options={['', 'newest', 'oldest']}
+        optionLabels={[i18nT('pages.knowledge.index.sort_default'), i18nT('pages.knowledge.index.sort_newest'), i18nT('pages.knowledge.index.sort_oldest')]}
+        value={sortOrder}
+        onChange={v => { setSortOrder(v); setPage(1) }}
+        aria-label={i18nT('pages.knowledge.index.sort_order')}
+      />
+      <div className="flex flex-wrap items-center gap-1.5">
+        <div className="text-muted text-[12px]">{i18nT('pages.knowledge.index.date_added')}</div>
+        <Input
+          type="date"
+          className="flex-none"
+          aria-label={i18nT('pages.knowledge.index.added_from')}
+          value={addedFrom}
+          max={addedTo || undefined}
+          onChange={e => { setAddedFrom(e.target.value); setPage(1) }}
+        />
+        <span className="text-muted text-[12px]" aria-hidden="true">
+          –
+        </span>
+        <Input
+          type="date"
+          className="flex-none"
+          aria-label={i18nT('pages.knowledge.index.added_to')}
+          value={addedTo}
+          min={addedFrom || undefined}
+          onChange={e => { setAddedTo(e.target.value); setPage(1) }}
+        />
+      </div>
     </div>
   )
 
@@ -737,11 +780,14 @@ export default function KnowledgePage({ embedded = false }: { embedded?: boolean
                   </div>
                 )
               ) : !items.length ? (
-                <EmptyState icon={<Search size={40} />} title={i18nT('pages.knowledge.index.no_items_match_your_search')} subtitle={i18nT('pages.knowledge.index.try_different_keywords_or_filters')} />
+                query
+                  ? <EmptyState icon={<Search size={40} />} title={i18nT('pages.knowledge.index.no_items_match_your_search')} subtitle={i18nT('pages.knowledge.index.try_different_keywords_or_filters')} />
+                  : <EmptyState icon={<Search size={40} />} title={i18nT('pages.knowledge.index.no_items_match_your_filters')} subtitle={i18nT('pages.knowledge.index.try_a_different_date_range_or_filter')} />
               ) : (
                 <div className="space-y-2 mt-3">
                   {items.map(item => (
                     <ItemCard key={item.id} item={item} onClick={() => setSelectedId(item.id)}
+                      showAddedDate={dateView}
                       selected={selectedItems.has(item.id)}
                       onSelect={(checked) => {
                         setSelectedItems(prev => {
@@ -759,10 +805,10 @@ export default function KnowledgePage({ embedded = false }: { embedded?: boolean
                   source-first mode each group owns its own pager. */}
               {!sourceFirst && totalPages > 1 && (
                 <div className="flex items-center justify-center gap-3 mt-4 py-3 border-t border-border">
-                  <Btn disabled={page <= 1} onClick={() => setPage(p => p - 1)}>{i18nT('pages.knowledge.index.prev')}</Btn>
+                  <Btn ref={pager.prevRef} disabled={page <= 1} onClick={() => { setPage(p => p - 1); pressedPrev() }}>{i18nT('pages.knowledge.index.prev')}</Btn>
                   <span className="text-[13px] text-text font-medium">{i18nT('pages.knowledge.index.page_of', { page: fmtNumber(page), pages: fmtNumber(totalPages) })}</span>
                   <span className="text-[11px] text-muted">{i18nT('pages.knowledge.index.items_count', { count: total })}</span>
-                  <Btn disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>{i18nT('pages.knowledge.index.next')}</Btn>
+                  <Btn ref={pager.nextRef} disabled={page >= totalPages} onClick={() => { setPage(p => p + 1); pressedNext() }}>{i18nT('pages.knowledge.index.next')}</Btn>
                 </div>
               )}
             </>

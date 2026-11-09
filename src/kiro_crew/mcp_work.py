@@ -6,6 +6,10 @@ happened by reading their transcripts. These five tools replace that inference
 with a record: a worker writes a schema-bounded status against the ONE work item
 it was bound to, and the conductor reads that record as data.
 
+One more tool, ``accept_eval`` (:data:`CHECK_TOOLS`), runs the goal-conductor
+skill's bundled acceptance check in-process so a verify cycle needs no shell; it
+reads nothing from the ledger and writes nothing to it.
+
 Why this is a store and not a message. ``session_send`` would let a worker push a
 line into the conductor's session, and it is withheld from workers for a reason
 that does not weaken with care: the text becomes the conductor's next prompt,
@@ -57,9 +61,15 @@ binding.
 
 from __future__ import annotations
 
+import copy
+import functools
+import importlib.util
 import json
 import logging
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 from urllib.parse import urlencode
 
@@ -98,7 +108,15 @@ SUMMARY_CAP: int = next(
     f.max_len for f in MCP_WORK_SCHEMAS["work_report"].fields if f.name == "summary"
 )
 
-WORK_TOOLS: tuple[str, ...] = WORKER_TOOLS + CONDUCTOR_TOOLS
+#: The conductor's fixed check: goal-conductor's bundled ``accept_eval.py``,
+#: IMPORTED and called in-process with typed arguments. It exists so a verify
+#: cycle needs no ``execute_bash``, whose grant cannot be narrowed to one script.
+#: It takes no command, path to run or shell string: only the ``accept_batch``
+#: document (whose kinds build their own argv, and which refuses ``cmd``). It does
+#: not touch the ledger.
+CHECK_TOOLS: tuple[str, ...] = ("accept_eval",)
+
+WORK_TOOLS: tuple[str, ...] = WORKER_TOOLS + CONDUCTOR_TOOLS + CHECK_TOOLS
 
 _BRIEF_PATH = "/api/work-ledger/brief"
 _REPORT_PATH = "/api/work-ledger/report"
@@ -125,7 +143,6 @@ _RECORD_FIELDS: tuple[str, ...] = (
     "goal",
     "round",
     "fails",
-    "item_cap",
     "concurrency_cap",
     "new_goal",
 )
@@ -353,6 +370,11 @@ def _tool_definitions(remote_dispatch: bool = False) -> list[dict[str, Any]]:
 
 def _base_tool_definitions() -> list[dict[str, Any]]:
     """The tool surface with the remote-dispatch preview off."""
+    return _ledger_tool_definitions() + copy.deepcopy(_CHECK_TOOL_DEFINITIONS)
+
+
+def _ledger_tool_definitions() -> list[dict[str, Any]]:
+    """The worker and conductor ledger tools."""
     return [
         {
             "name": "work_brief",
@@ -380,10 +402,16 @@ def _base_tool_definitions() -> list[dict[str, Any]]:
                 "wake it, 'progress' does not, and a turn that ends without a report "
                 "wakes nobody — so before you stop, say why you stopped. A pause you "
                 "expect to be resumed from is a 'progress' report: it records where you "
-                "stopped and spends your conductor no turn. On 'blocked' "
+                "stopped and spends your conductor no turn. When that pause lasts "
+                "until a known time, set wake_at to it: the item is not flagged stale "
+                "before then; a wait longer than a day is a 'blocked' report. On 'blocked' "
                 "or 'question', set reason when only a person can move it: 'approval' "
-                "when a tool approval timed out or is waiting, 'needs_human' when only "
-                "a person can unblock you; leave it unset for a build or service. A "
+                "when a tool approval timed out or is waiting, 'needs_human' only for "
+                "credentials or a permission only a person can grant, spend, an "
+                "irreversible step or deleting someone else's work, a costly preference "
+                "nobody can infer, or a choice the person said they want to make; leave "
+                "it unset for a build or service. A choice you can recommend is "
+                "'question' without needs_human, naming your recommendation and why. A "
                 "ledger whose open items all wait on a person holds the conductor's "
                 "patrol until something changes. 'done' claims "
                 "the acceptance condition is met — put the evidence in artifacts and any "
@@ -443,6 +471,14 @@ def _base_tool_definitions() -> list[dict[str, Any]]:
                             "with 'progress' or 'done'. Each report replaces it."
                         ),
                     },
+                    "wake_at": {
+                        "type": "string",
+                        "description": (
+                            "On 'progress': when you will resume, an ISO-8601 time with a "
+                            "zone, ahead of now by at most 24 hours. Refused with any other "
+                            "status. Each report replaces it."
+                        ),
+                    },
                 },
                 "required": ["status", "summary"],
             },
@@ -485,9 +521,9 @@ def _base_tool_definitions() -> list[dict[str, Any]]:
                 "back to the worker. A worker session that has closed after at least one "
                 "report counts as quiet at once, without waiting out the window. "
                 "An item is pending_overdue once its acceptance has read 'pending' for "
-                "24 hours on end (never for a human_approval bar): ask the user, then "
-                "either write its bar again with action=accept, which starts a fresh "
-                "run, or close it. report_undelivered is {tool, at} while the worker's "
+                "24 hours on end (never for a human_approval bar): the first time, write "
+                "its bar again with action=accept, which starts a fresh run, and say so; "
+                "the second time, close it abandoned. report_undelivered is {tool, at} while the worker's "
                 "last work_report or work_brief call failed before reaching the ledger "
                 "(the harness could not deliver it) and no work tool call has got through since: the "
                 "worker tried to report, so check its session_status and pull request "
@@ -645,17 +681,6 @@ def _base_tool_definitions() -> list[dict[str, Any]]:
                         "type": "integer",
                         "description": "verdict: acceptance attempts that came back fail.",
                     },
-                    "item_cap": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 256,
-                        "description": (
-                            "goal: how many items this goal is expected to create in "
-                            "total, every round included; default 20. Advisory: nothing "
-                            "is refused past it; work_ledger_read reports "
-                            "cap_exceeded=true and you tell the user."
-                        ),
-                    },
                     "concurrency_cap": {
                         "type": "integer",
                         "minimum": 1,
@@ -679,6 +704,111 @@ def _base_tool_definitions() -> list[dict[str, Any]]:
             },
         },
     ]
+
+
+#: The fixed check's definition, appended after the ledger tools.
+_CHECK_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "name": "accept_eval",
+        "description": (
+            "Run the goal-conductor acceptance evaluator (scripts/accept_eval.py) on "
+            "an accept_batch document and return its results JSON: one "
+            "{id, verdict, evidence} per item, verdict pass|fail|pending|refused|"
+            "error. Pass the accept_batch from a full work_ledger_read as the "
+            "arguments, after keeping only the entries whose status is done. Same "
+            "kinds and refusals as the script: pr_checks, pr_merged, file, "
+            "human_approval, edition_check; a 'cmd' kind is refused. No argument "
+            "names a command or a path to run. Read-only: record each verdict with "
+            "work_ledger_record action=verdict in a later step."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "maxItems": 256,
+                    "items": {"type": "object"},
+                    "description": (
+                        'The accept_batch items: [{"id": "it_...", "accept": '
+                        '{"kind": "pr_checks", "pr": 123, "repo": "owner/name"}, '
+                        '"status": "done"}].'
+                    ),
+                }
+            },
+            "required": ["items"],
+        },
+    },
+]
+
+
+@functools.lru_cache(maxsize=None)
+def _skill_script(name: str) -> ModuleType:
+    """Import one of goal-conductor's bundled scripts from the PACKAGED skill.
+
+    Loaded by file location because the skill directory is not a package, and from
+    the install's own ``builtin_skills`` tree (never a user skills root), so the
+    code run is the code shipped. No ``__pycache__`` is left beside it.
+    """
+    from kiro_crew.skills import _BUILTIN_SKILLS_DIR
+
+    path = Path(_BUILTIN_SKILLS_DIR) / "goal-conductor" / "scripts" / f"{name}.py"
+    # Not under ``kiro_crew.``: the script is a stdlib-only skill file, not
+    # package code, and coverage's ``--cov=kiro_crew`` matches by module name.
+    spec = importlib.util.spec_from_file_location(f"_goal_conductor_{name}", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - a broken install
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    previous, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
+
+
+def _screen_file_item(item: Any) -> tuple[Any, dict[str, str] | None]:
+    """A ``file`` item with its path screened, or the ``refused`` result in its place.
+
+    The evaluator stats a ``file`` path as given. Run as an auto-approved tool,
+    nobody reads that path first, so it goes through the same screen the
+    dashboard's file I/O uses before anything probes it: a sensitive path or an
+    untrusted UNC share (whose probe would open an SMB connection on Windows) is
+    refused, and the evaluator stats only the canonical path.
+    """
+    accept = item.get("accept") if isinstance(item, dict) else None
+    if not isinstance(accept, dict) or accept.get("kind") != "file":
+        return item, None
+    path = accept.get("path")
+    if not isinstance(path, str) or not path:
+        return item, None  # the evaluator's own "needs a path" error
+    from kiro_crew import hooks
+
+    canonical = hooks.validate_file_path(path)
+    if canonical is None:
+        refused = {
+            "id": str(item.get("id", "")),
+            "verdict": "refused",
+            "evidence": "this path is not one the evaluator may check (a sensitive "
+            "path or an untrusted network share); name a path in the workspace",
+        }
+        return None, refused
+    return {**item, "accept": {**accept, "path": canonical}}, None
+
+
+def _accept_eval(args: dict[str, Any]) -> str:
+    screened = [_screen_file_item(item) for item in args["items"]]
+    document, code = _skill_script("accept_eval").evaluate_document(
+        {"items": [item for item, refused in screened if refused is None]}
+    )
+    if code == 0:
+        evaluated = iter(document["results"])
+        document = {
+            "results": [
+                refused if refused is not None else next(evaluated) for _, refused in screened
+            ]
+        }
+    # Evidence quotes gh / edition output, so it is redacted like every reply here.
+    return redact(json.dumps(document, indent=2, ensure_ascii=False))
 
 
 def _list_tools() -> list[dict[str, Any]]:
@@ -735,6 +865,18 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
     if not caller_key:
         return strict_err
 
+    if name in CHECK_TOOLS:
+        # Auto-approved, so the channel block (matched on a permission prompt)
+        # never runs for them. Admission is the gateway's ledger gate instead: the
+        # channel, restricted-session and unknown-session refusals every ledger
+        # route applies. A caller with no ledger has no batch to evaluate.
+        resp = _get(f"{_READ_PATH}?compact=true", session_key=caller_key)
+        if resp.get("error"):
+            return _refusal(f"{name} runs only for a session that holds a work ledger", resp)
+
+    if name == "accept_eval":
+        return _accept_eval(args)
+
     if name == "work_brief":
         resp = _get(_BRIEF_PATH, session_key=caller_key)
         if resp.get("error"):
@@ -747,7 +889,9 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
 
     if name == "work_report":
         payload = {
-            k: v for k, v in args.items() if k in ("status", "summary", "artifacts", "pr", "reason")
+            k: v
+            for k, v in args.items()
+            if k in ("status", "summary", "artifacts", "pr", "reason", "wake_at")
         }
         resp = _post(_REPORT_PATH, payload, session_key=caller_key)
         if resp.get("error"):

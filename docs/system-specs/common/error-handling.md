@@ -99,6 +99,7 @@ instead of the row simply disappearing.
 | Process spawn | Backend-specific executable resolver, including trusted-path checks where required; clear error if missing |
 | Notes git subprocess (`md_notebook/git_ops.py`) | A non-zero exit reports git's last 3 stderr lines PLUS the first transport-caused line when one sits outside that tail. git ends every fetch/push failure with the same access-rights boilerplate and prints an SSH diagnosis first, so a tail alone reports a permission problem the operator does not have (a host reachable only via `~/.ssh/config` never resolved at all). The extra line widens what the message reports; it does not decide whether the command failed. |
 | Auto-Improvement git step (`auto_improvement/backend/clone_setup.py`) | A failed clone, branch list, checkout or fetch reports git's last 2 stderr lines after dropping blank lines and git's access-rights advisory (`Please make sure you have the correct access rights` / `and the repository exists.`), redacted and then bounded. The advisory follows every transport or auth fatal, so keeping it reports a repository problem in place of the `Permission denied (publickey).` line above it. |
+| App Store install clone, pinned fetch and pull (`apps/registry_pipeline/checkout.py`) | A credential-free (catalog or `index`-tier registry) fetch of an ssh remote whose output holds ssh's own `ssh: Could not resolve hostname` line returns `git_clone_failed_strict_ssh_route` with a fixed sentence: the fetch ran in the strict sandbox, which hides `~/.ssh`, so neither `~/.ssh/config` nor the ssh-agent applied, and a host reachable only through an ssh config route is installed from the operator's own clone with `kirocrew app install <dir>`. It carries no proxy hint, because ssh never reads `HTTPS_PROXY`; an owner-credentialed clone and an HTTPS remote keep the network hint. |
 | asyncio loop callback | A Windows Proactor reset repeated by its `connection_lost` close callback is warning-only; task-level connection resets and other exceptions remain ERRORs with crash breadcrumbs |
 
 ## Code Review Sage consolidation refusal
@@ -135,7 +136,18 @@ asks that answer before it writes the FIFO or notifies a mounted chat subscriber
 a veto therefore leaves the current page, its draft, and the hand-off queue
 unchanged. With no registered page guard the answer remains `true`, preserving
 the existing hand-off. The root error boundary's explicit hard-navigation mode
-continues to bypass the live React tree and stages before reloading.
+bypasses the live React tree: it stages, then leaves through `hardNavigate`,
+a full page load of `/chat` unless the window installed a hard-exit sink
+(`installHardExit`).
+
+An app pop-out window (`/popout/app/<route>`) must never load the dashboard
+itself, so it installs that sink (`AppPopoutHardExit` in
+`pages/AppPopoutFrame.tsx`): the sink drains the staged prompt and hands `/chat`
+to the main window through the pop-out channel. The shell installs
+`hardNavigate` as that window's soft navigator too, with no leave guard, since
+the pop-out's own page is never left. So every Ask the agent there, soft or
+hard, reaches the main window's chat and leaves the popped-out app mounted with
+its state; the main window asks its own leave guard before it navigates.
 
 The ask happens exactly once per click. A surface that already has a leave gate
 in scope (the notification sheet's crash fallback, through `AskAgentButton`'s
@@ -321,11 +333,13 @@ available models. Please try again." and `data.errorType`
 reason other than a rejected or denied credential. The frame keeps no HTTP status
 and none of the service's answer, and its cause may persist (a sign-in that sends
 no profile ARN got HTTP 400 `ValidationException` on every call, #26109), so it is
-never worded as an HTTP 5xx: `acp/model_registry_errors.py` matches the token in
-`data` and words it as a model list that could not load, with the sign-in as the
-fix when it repeats. Only the wording changes: the frame's "Please try again"
-still gives it the retryable verdict and the `http_5xx` classifier kind, which
-match the engine's own `SERVER_ERROR`, bounded by the ladder.
+never worded as an HTTP 5xx: `acp/model_registry_errors.py` compares
+`data.errorType` exactly (a `data` sent as JSON text is parsed first; the name in
+`message` or other prose matches nothing) and words it as a model list that could
+not load, with the sign-in as the fix when it repeats. Only the wording changes:
+the frame's "Please try again" still gives it the retryable verdict and the
+`http_5xx` classifier kind, which match the engine's own `SERVER_ERROR`, bounded by
+the ladder.
 
 Retry hints are the other wording-only signal, and they are **provider-scoped**:
 `_RE_5XX_HINT` carries one alternative per backend spelling ("please try again"
@@ -381,6 +395,15 @@ notice stays pending. Another re-queued recovery row (`kind: transient_retry`,
 such as a dead process's "Connection lost — retrying…") is read as recovery
 still running, so the scan continues past it. Provider answers keep the
 fixed count: a provider that answers with errors is not helped by a longer wait.
+
+A dead process is read by `llm_helpers.acp_error_is_pipe_death`: the client's
+own "process exited" / "not running" wording on an `AcpError` that carries no
+JSON-RPC `code`. An error frame is never a death, because the process that sent
+it is alive. The claude adapter answers a failed Claude Code start with
+`-32603` and "Claude Code process exited with code 1"; a fresh process repeats
+it, so the turn shows that error card instead of re-queuing behind
+"Connection lost — retrying…" until "Session stuck".
+`test_chat_runner_turn_error_arms.py` pins both.
 
 ### Provider failures a harness writes as text
 

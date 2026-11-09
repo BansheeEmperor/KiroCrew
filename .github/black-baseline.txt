@@ -7,11 +7,9 @@
 #
 # Refresh (after formatting something listed here):
 #   python3 scripts/check_black_formatting.py --update-baseline
-src/kiro_crew/acp/kas_wire.py
 src/kiro_crew/acp/worker_pool.py
 src/kiro_crew/apps/app_storage.py
 src/kiro_crew/apps/backend.py
-src/kiro_crew/apps/builtins/auto_improvement/backend/routes.py
 src/kiro_crew/apps/builtins/auto_improvement/spine/gate.py
 src/kiro_crew/apps/builtins/auto_improvement/tests/test_data_home_isolation.py
 src/kiro_crew/apps/builtins/auto_improvement/tests/test_dogfood_learnings.py
@@ -22,7 +20,6 @@ src/kiro_crew/apps/builtins/auto_improvement/tests/test_pr_checks.py
 src/kiro_crew/apps/builtins/auto_improvement/tests/test_profile_capture.py
 src/kiro_crew/apps/builtins/auto_improvement/tests/test_runner.py
 src/kiro_crew/apps/builtins/auto_improvement/tests/test_spine_scope_cov80.py
-src/kiro_crew/apps/builtins/auto_research/handlers.py
 src/kiro_crew/apps/builtins/auto_research/subquestion_queue.py
 src/kiro_crew/apps/builtins/code_review_sage/backend/routes.py
 src/kiro_crew/apps/builtins/code_review_sage/sage_lib/adapters.py
@@ -130,7 +127,6 @@ src/kiro_crew/connections/l0_record.py
 src/kiro_crew/connections/tool_aliases.py
 src/kiro_crew/cron_history.py
 src/kiro_crew/dashboard/channel_folders.py
-src/kiro_crew/dashboard/chat_folder_suggest.py
 src/kiro_crew/dashboard/chat_nav.py
 src/kiro_crew/dashboard/chat_title.py
 src/kiro_crew/dashboard/file_index.py
@@ -186,7 +182,6 @@ src/kiro_crew/knowledge/sync.py
 src/kiro_crew/knowledge/watcher.py
 src/kiro_crew/mcp_gateway/app_call.py
 src/kiro_crew/mcp_gateway/apps.py
-src/kiro_crew/mcp_gateway/backend.py
 src/kiro_crew/mcp_gateway/breaker.py
 src/kiro_crew/mcp_gateway/claim.py
 src/kiro_crew/mcp_gateway/evaluate.py
@@ -202,7 +197,6 @@ src/kiro_crew/mcp_gateway/stub.py
 src/kiro_crew/mcp_gateway/transport.py
 src/kiro_crew/mcp_tools/artifacts.py
 src/kiro_crew/metrics/http_metrics.py
-src/kiro_crew/metrics/recorder.py
 src/kiro_crew/perf_sampler.py
 src/kiro_crew/pod/launchd.py
 src/kiro_crew/publish_sync.py
@@ -317,7 +311,6 @@ test/test_channel_resolver.py
 test/test_channel_slots.py
 test/test_chat_backfill.py
 test/test_chat_folder_app_isolation.py
-test/test_chat_folder_suggest.py
 test/test_chat_nav.py
 test/test_chat_slot_create_folder.py
 test/test_chat_slot_end_wait.py
@@ -656,7 +649,6 @@ test/test_slack_upload_binary.py
 test/test_slash_task_tracking.py
 test/test_slot_needs_input_status.py
 test/test_slot_sync_on_create.py
-test/test_slots_broadcast_coalesce.py
 test/test_socketsec.py
 test/test_source_providers.py
 test/test_source_providers_comment_guard.py

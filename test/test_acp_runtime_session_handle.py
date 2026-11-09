@@ -45,7 +45,7 @@ from kiro_crew.acp.types import (
     METHOD_SET_CONFIG_OPTION,
     JsonRpcMessage,
 )
-from kiro_crew.testing.wait import await_until
+from kiro_crew.testing.wait import await_until, until_parked
 
 # ── Send paths ──
 
@@ -642,6 +642,34 @@ async def test_prompt_resets_turn_done_when_cancelled_while_building_blocks():
 
 
 @pytest.mark.asyncio
+async def test_prompt_gate_is_asked_under_the_write_lock():
+    """A sender revoked while the prompt waits behind another writer's frame is
+    refused under the lock: nothing is written, the id is not left routed, and
+    the handle stays reusable."""
+    rt, _, proc = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    admitted = [True]
+
+    def _gate():
+        if not admitted[0]:
+            raise PermissionError("sender no longer admitted")
+
+    lock = rt._stdin_write_lock()
+    await lock.acquire()  # another session's frame holds the shared stdin
+    first = asyncio.ensure_future(handle.prompt("hi", prompt_gate=_gate).__anext__())
+    await until_parked(lock)
+    admitted[0] = False
+    lock.release()
+    with pytest.raises(PermissionError):
+        await await_until(first, what="the gated prompt's refusal")
+
+    proc.stdin.write.assert_not_called()
+    assert rt._routed_requests == {}
+    assert handle.is_turn_active is False
+
+
+@pytest.mark.asyncio
 async def test_handle_wait_turn_done_immediate():
     rt, _, _ = _make_runtime()
     q = _register(rt, "sA")
@@ -893,6 +921,39 @@ async def test_approve_tool_echoes_recorded_option():
     sent = json.loads(proc.stdin.write.call_args.args[0].decode())
     assert sent["result"]["outcome"]["optionId"] == "allow"
     assert 42 not in handle._permission_options  # consumed on use
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bridged, sent", [(True, "allow"), (False, "allow_always")])
+async def test_approve_tool_answers_a_connection_tool_once(bridged, sent):
+    """An allow-always on a Crew-owned Connection would stop the harness asking,
+    and the gateway proxy refuses every call no approval was minted for."""
+    from kiro_crew.acp.types import EVENT_PERMISSION_REQUEST, AcpEvent
+    from kiro_crew.connections import crew_oauth_proxy
+
+    rt, _, proc = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle._session_key = "dashboard_chat-bridge-h"
+    if bridged:
+        crew_oauth_proxy.register_bridge(
+            version="vh",
+            token="tok",
+            session_key="dashboard_chat-bridge-h",
+            server="github",
+            slug="github",
+            mcp_url="https://api.githubcopilot.com/mcp/",
+        )
+    handle._permission_options[42] = {"once": "allow", "always": "allow_always"}
+    handle._permission_gate_events[42] = AcpEvent(
+        kind=EVENT_PERMISSION_REQUEST, request_id=42, title="get_me", mcp_server_name="github"
+    )
+    try:
+        await handle.approve_tool(42, option_id="allow_always")
+    finally:
+        crew_oauth_proxy._bridges.pop("vh", None)
+    sent_frame = json.loads(proc.stdin.write.call_args.args[0].decode())
+    assert sent_frame["result"]["outcome"]["optionId"] == sent
 
 
 @pytest.mark.asyncio

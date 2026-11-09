@@ -257,7 +257,10 @@ export function GatewayAutoUpdateSwitch({ anchor = true, readOnMount = false, on
   contextNote?: string
 
 }) {
-  const canApply = useAppSelector(s => s.dashboard.status?.update_can_apply) === true
+  // `update_can_apply` answers for `POST /api/update` alone; a managed venv whose
+  // policy turns unattended installs off still installs through its own Update.
+  const canApply = useAppSelector(s =>
+    s.dashboard.status?.update_can_apply === true || s.dashboard.status?.update_auto_manual_only === true)
   const copy = gatewayAutoUpdateCopy(useGatewayAutoUpdateEffect(), { canApply })
   const gw = useGatewayAutoUpdate({ readOnMount })
   const reduceMotion = useReducedMotion()
@@ -422,6 +425,17 @@ export function AboutPanel() {
   // Query-cache listeners run for every updater payload, before React Query
   // batches observer renders. The refs preserve the event order for one armed
   // click even when `downloading` and its cancellation share a render.
+  //
+  // Read in that order, a payload also says when a click's request ended
+  // before any download started. For a click made with nothing found, the
+  // main process checks first: `not-available` and a failed check end the
+  // request there, and so does `found` on the feed lane with auto-download
+  // off, where it waits for a Download click. The managed lane follows its
+  // `found` with `downloaded` at once, and with auto-download on the download
+  // starts; the feed lane says which on the `found` itself, and a shell too old
+  // to say leaves the cached preference to answer. Left armed, the click keeps both request actions disabled and
+  // installs whatever a later download brings, with nobody clicking. The
+  // rendered state cannot say this: a click is also made FROM each of them.
   useEffect(() => queryClient.getQueryCache().subscribe(event => {
     if (event.type !== 'updated'
       || event.query.queryKey.length !== 1
@@ -431,13 +445,19 @@ export function AboutPanel() {
     if (pushed?.state === 'downloading') {
       agentArmSawDownloadRef.current = true
       setAgentArmSawDownload(true)
-    } else if (agentArmSawDownloadRef.current
-      && (pushed?.state === 'not-available' || pushed?.state === 'checking')) {
-      agentInstallArmedRef.current = false
-      agentArmSawDownloadRef.current = false
-      setAgentInstallArmed(false)
-      setAgentArmSawDownload(false)
+      return
     }
+    const info = queryClient.getQueryData<UpdateInfo | null>(updateInfoQuery.queryKey)
+    const ended = agentArmSawDownloadRef.current
+      ? pushed?.state === 'not-available' || pushed?.state === 'checking'
+      : pushed?.state === 'not-available'
+        || (pushed?.state === 'error' && pushed.phase === 'check')
+        || (pushed?.state === 'found' && (pushed.autoDownload ?? info?.autoDownload) === false && !info?.updateCommand)
+    if (!ended) return
+    agentInstallArmedRef.current = false
+    agentArmSawDownloadRef.current = false
+    setAgentInstallArmed(false)
+    setAgentArmSawDownload(false)
   }), [queryClient])
   const agentDownloadLanded = agentInstallArmed && updateState?.state === 'downloaded'
   useEffect(() => {
@@ -492,7 +512,7 @@ export function AboutPanel() {
   const agentRequestPanelError = agentRequest.failureCount >= ARM_POLL_FAILURE_THRESHOLD
     ? i18nT('pages.settings.aboutPanel.arm_status_poll_failing')
     : agentDownloadFailed
-      ? `${i18nT('pages.settings.aboutPanel.download_failed')}: ${updateState?.state === 'error' ? updateErrorText(updateState) : i18nT(UPDATE_ERROR_KEYS.unknown)}`
+      ? i18nT('pages.settings.aboutPanel.download_failed_reason', { reason: updateState?.state === 'error' ? updateErrorText(updateState) : i18nT(UPDATE_ERROR_KEYS.unknown) })
       : ''
   // While a request is live, its card owns the one Install control. Rendering
   // the ordinary card's "Download & Install" beneath it shows two buttons for
@@ -613,6 +633,9 @@ export function AboutPanel() {
   // True when the policy provider governs this bundled install.
   // Read from the main-process-confirmed update-state (useIsPolicyGoverned).
   const isGatewayPolicyManaged = useIsPolicyGoverned(infoQuery.data)
+  // Where the policy file the notice says to edit lives; '' when it is not one
+  // the user can edit to change updates.
+  const policyFile = useAppSelector(s => s.dashboard.status?.update_policy_file) || ''
   // In-app arm+approve applies only where the backend probed the managed-venv
   // shape; managed_by alone also covers bare source installs whose arm would 409.
   const gwCanArm = useAppSelector(s => s.dashboard.status?.update_can_arm) === true
@@ -631,6 +654,10 @@ export function AboutPanel() {
   // promoted stable release keeps its candidate's `rc` stamp, that comparison
   // reported "mid-switch" permanently for every promoted-stable install.
   const gwChannelMovePending = useAppSelector(s => s.dashboard.status?.update_channel_move_pending) === true
+  const statusCheckStatus = useAppSelector(s => s.dashboard.status?.update_check_status)
+  // The read-only channel rows print the channel id; `lts` (the LTS
+  // edition's own lane, RFC D11) gets a translated label like the switcher's.
+  const channelLabel = (c: string | undefined) => (c === 'lts' ? i18nT('pages.settings.aboutPanel.lts') : c)
   // Running prerelease bytes? See `isPrerelease` below — computed after the
   // gateway check state it consults, and rendered from JSX, so the ordering is
   // free.
@@ -649,7 +676,7 @@ export function AboutPanel() {
     status = (
       <ErrorNotice
         variant="inline"
-        message={`${i18nT('pages.settings.aboutPanel.couldn_t_check_for_updates')}: ${updateErrorText(updateState)}`}
+        message={i18nT('pages.settings.aboutPanel.couldn_t_check_for_updates_reason', { reason: updateErrorText(updateState) })}
         askAgent
       />
     )
@@ -659,7 +686,7 @@ export function AboutPanel() {
     status = (
       <ErrorNotice
         variant="inline"
-        message={`${i18nT('pages.settings.aboutPanel.couldn_t_check_for_updates')}: ${i18nT(UPDATE_ERROR_KEYS.unknown)}`}
+        message={i18nT('pages.settings.aboutPanel.couldn_t_check_for_updates_reason', { reason: i18nT(UPDATE_ERROR_KEYS.unknown) })}
         askAgent
         testId="check-request-failed"
       />
@@ -747,7 +774,7 @@ export function AboutPanel() {
       {cardFailed && (
         <ErrorNotice
           variant="inline"
-          message={`${i18nT(cardInstallFailed ? 'pages.settings.aboutPanel.install_failed' : 'pages.settings.aboutPanel.download_failed')}: ${updateErrorText(updateState)}`}
+          message={i18nT(cardInstallFailed ? 'pages.settings.aboutPanel.install_failed_reason' : 'pages.settings.aboutPanel.download_failed_reason', { reason: updateErrorText(updateState) })}
           askAgent
           testId="update-download-error"
         />
@@ -762,7 +789,7 @@ export function AboutPanel() {
       {!cardFailed && downloadMutation.isError && (
         <ErrorNotice
           variant="inline"
-          message={`${i18nT('pages.settings.aboutPanel.download_failed')}: ${i18nT(UPDATE_ERROR_KEYS.unknown)}`}
+          message={i18nT('pages.settings.aboutPanel.download_failed_reason', { reason: i18nT(UPDATE_ERROR_KEYS.unknown) })}
           askAgent
           testId="update-download-request-error"
         />
@@ -770,7 +797,7 @@ export function AboutPanel() {
       {!cardFailed && installMutation.isError && (
         <ErrorNotice
           variant="inline"
-          message={`${i18nT('pages.settings.aboutPanel.install_failed')}: ${i18nT(UPDATE_ERROR_KEYS.installUnknown)}`}
+          message={i18nT('pages.settings.aboutPanel.install_failed_reason', { reason: i18nT(UPDATE_ERROR_KEYS.installUnknown) })}
           askAgent
           testId="update-install-request-error"
         />
@@ -921,7 +948,10 @@ export function AboutPanel() {
   // A manual check's / switch's answer wins; otherwise the background check's,
   // shipped in status. Empty means this layout has no channel to switch.
   const effectiveGwChannel = gwChannel || statusUpdateChannel
-  const showGwChannelSwitcher = !isDesktop && !!effectiveGwChannel
+  // `lts` is the LTS edition's own lane (RFC D11): the backend holds it
+  // there and refuses every switch, and no segment names it. Show it read-only.
+  const gwLtsLane = !isDesktop && effectiveGwChannel === 'lts'
+  const showGwChannelSwitcher = !isDesktop && !!effectiveGwChannel && !gwLtsLane
   // Nightly is not an OFFERABLE destination on any surface. Its builds are
   // untested `main` HEAD, so following that lane is a deliberate install
   // (`cli.sh --channel nightly`), never a one-click flip from a control that
@@ -1175,7 +1205,7 @@ export function AboutPanel() {
             <Row label={i18nT('pages.settings.aboutPanel.update_channel')}>
               {info?.channelLockedByPolicy ? (
                 <span className="inline-flex items-center gap-2">
-                  {channel}
+                  {channelLabel(channel)}
                   {/* A build that cannot follow the required channel names both:
                       the lane it is on, and the one the policy requires. */}
                   {info.requiredChannel && info.requiredChannel !== channel && (
@@ -1188,6 +1218,16 @@ export function AboutPanel() {
               ) : channel}
             </Row>
           )
+        )}
+        {gwLtsLane && (
+          <div data-testid="gateway-channel-locked">
+            <Row label={i18nT('pages.settings.aboutPanel.update_channel')}>
+              <span className="inline-flex items-center gap-2">
+                {channelLabel(effectiveGwChannel)}
+                <LockedByPolicyBadge />
+              </span>
+            </Row>
+          </div>
         )}
         {showGwChannelSwitcher && (
           // Gateway (CLI / wheel / cloud source) channel switcher: the same two
@@ -1392,8 +1432,12 @@ export function AboutPanel() {
                       // an update lane, just not on the channel this install
                       // tracks, so switching channels above restores updates.
                       // Falling through to the platform string would blame the
-                      // OS and hide the way back.
-                      ? i18nT('pages.settings.aboutPanel.automatic_updates_unavailable_channel')
+                      // OS and hide the way back. A locked channel (the
+                      // LTS edition's `lts`, RFC D11) has no switch to
+                      // offer: say the channel is not published yet instead.
+                      ? info?.channelLockedByPolicy
+                        ? <span data-testid="updates-channel-unpublished">{i18nT('pages.settings.aboutPanel.automatic_updates_unavailable_channel_unpublished', { channel: channelLabel(channel) })}</span>
+                        : i18nT('pages.settings.aboutPanel.automatic_updates_unavailable_channel')
                       : updatesDisabled === 'policy-channel'
                         // The policy names a channel this build cannot follow:
                         // name it, and link its build as the way back.
@@ -1427,6 +1471,11 @@ export function AboutPanel() {
               <p className="text-sm text-text" data-testid="gateway-policy-managed-note">
                 {i18nT('pages.settings.aboutPanel.updates_managed_by_policy_desktop')}
               </p>
+              {policyFile && (
+                <p className="text-sm text-muted break-all" data-testid="gateway-policy-file">
+                  {i18nT('pages.settings.aboutPanel.updates_policy_file', { path: policyFile })}
+                </p>
+              )}
               {/* When the provider has a pending update, render the gateway's
                   check/apply controls so the user can act on it. Shown ONLY
                   when showUpdate is true to avoid displaying a "Check for
@@ -1591,6 +1640,15 @@ export function AboutPanel() {
             checkIntervalSecs={checkIntervalSecs}
             botName={botName}
             autoUpdateSwitch={<GatewayAutoUpdateSwitch />}
+            // The backend defers the check for a channel with no published
+            // builds (updates_check.py channel_is_published). Like the
+            // desktop's `disabled: "channel"` branch, this notice replaces the
+            // Check button and the auto-update switch, which could do nothing.
+            unpublishedNotice={gwLtsLane && statusCheckStatus === 'deferred' ? (
+              <p className="text-sm text-muted" data-testid="gateway-channel-unpublished">
+                {i18nT('pages.settings.aboutPanel.automatic_updates_unavailable_channel_unpublished', { channel: channelLabel(effectiveGwChannel) })}
+              </p>
+            ) : undefined}
           />
         )}
 

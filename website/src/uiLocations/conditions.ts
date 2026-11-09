@@ -31,6 +31,7 @@ export const UI_CONDITIONS = {
   pointer_on_session_row: 'the pointer or keyboard focus is on a session row of this machine that is not being renamed (the control is drawn on that row)',
   // Shell and notifications
   terminal_enabled: 'the terminal is turned on in Settings',
+  topbar_search_shown: 'the Show search in the top bar setting is on (Settings → Display → View)',
   phone_connect_available: 'pairing a phone is available on this machine',
   kiro_account_entry: 'the menu offers a Kiro account row (always when this installation runs on Kiro; with another backend, only once an account usage reading has arrived)',
   has_notifications: 'at least one notification is listed',
@@ -122,6 +123,7 @@ export const UI_REVEAL_STATES = {
   crewmate_profile_closed: "the Bot's profile card is closed (pressing the Bot's name in the chat header opens it)",
   crewmate_profile_tab_closed: "the Bot's profile card is on another tab (the card opens on Sessions; its Profile tab is the last one on the rail)",
   crewmate_settings_closed: "the Bot's Settings page is closed (the Settings row on its profile card's Profile tab opens it)",
+  crewmate_panel_closed: "the Bot's side panel is closed (the Dashboard & files button in the chat header opens it)",
 } as const
 
 export type UiRevealState = keyof typeof UI_REVEAL_STATES
@@ -150,6 +152,7 @@ export const UI_REVEAL_SCOPES = {
   'members.profile': 'crewmate_profile_closed',
   'members.profile-tab': 'crewmate_profile_tab_closed',
   'members.settings': 'crewmate_settings_closed',
+  'members.panel': 'crewmate_panel_closed',
 } as const satisfies Record<string, UiRevealState>
 
 export type UiRevealScopeId = keyof typeof UI_REVEAL_SCOPES
@@ -171,6 +174,7 @@ export const UI_RUNTIME_PREDICATES = [
   'crewmate_danger_zone_open',
   'crewmate_place_pane_open',
   'crewmate_model_pane_open',
+  'crewmate_panel_not_docked',
   'no_response_running',
   'mouse_input',
   'phone_connect_available',
@@ -235,6 +239,7 @@ export type UiSelectionId = keyof typeof UI_SELECTION_SCOPES
 export const PREVIEW_GATE_PREFIX = 'preview_flag:'
 export const UI_GATES = {
   terminal_enabled: { setting: null },
+  topbar_search_shown: { setting: 'display.show-search-in-the-top-bar' },
 } as const satisfies Partial<Record<UiConditionId, { setting: string | null }>>
 
 export type UiGateId = keyof typeof UI_GATES

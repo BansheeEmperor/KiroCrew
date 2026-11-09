@@ -178,6 +178,8 @@ _SPAWN_NAMES = {
     "popen_limited",
     # kiro_prerequisite's one-shot wrapper; its call sites must stay visible.
     "spawn_supervised_oneshot",
+    # platform_compat's timeout-kills-the-tree run; its call sites must stay visible.
+    "run_killing_tree_on_timeout",
 }
 
 # Tokens whose presence anywhere in the enclosing function marks the spawn as
@@ -275,7 +277,7 @@ BENIGN_SPAWNS: frozenset[str] = BENIGN_PACKAGE_SPAWNS | BENIGN_APP_SPAWNS
 # Kiro Crew already launches for every ACP session -- resolved only by
 # ``kiro_cli.find_kiro_cli_candidates`` -- with a fixed argv. That binary is
 # already trusted and run on every ACP launch, so the carve-out adds no new
-# trust (owner decision, enterprise sign-in check). Keyed by
+# trust (owner decision, LTS sign-in check). Keyed by
 # ``<relpath>::<enclosing function>``, same discipline as ``BENIGN_SPAWNS``.
 FIRST_PARTY_SPAWNS: frozenset[str] = frozenset(
     {
@@ -309,9 +311,9 @@ FIRST_PARTY_SPAWNS: frozenset[str] = frozenset(
         # because the scan is deliberately value-blind, so a future caller
         # passing True here would still have to be reviewed as its own entry.
         "voice_reply.py::_run_tts_subprocess",
-        # The enterprise sign-in check (owner decision, enterprise smoke test
+        # The LTS sign-in check (owner decision, LTS smoke test
         # P9; owner-approved widening of this rule). ``_probe`` claims the flag
-        # with a literal ``True`` only inside ``edition.is_enterprise()``, only
+        # with a literal ``True`` only inside ``edition.is_lts()``, only
         # after the sandboxed ``--version`` was refused, and only for two fixed
         # argvs: ``--version`` (via ``_audited_probe``) and ``whoami`` (via
         # ``_audited_identity_probe``, real-home branch of ``_run_auth_command``
@@ -1000,6 +1002,13 @@ def _is_spawn_call(node: ast.AST) -> bool:
     )
 
 
+def _starts_spawn(node: ast.AST) -> bool:
+    """A spawn call, bare or started through ``update_provider._start_installer``."""
+    if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_start_installer":
+        node = node.args[0]
+    return _is_spawn_call(node)
+
+
 def _handler_catches(handler: ast.ExceptHandler, name: str) -> bool:
     """Whether *handler* names *name* (bare or attribute-qualified) explicitly.
 
@@ -1090,7 +1099,7 @@ def test_gateway_proc_waits_all_kill_on_timeout_and_cancel():
             for stmt in ast.walk(func)
             if isinstance(stmt, ast.Assign)
             and isinstance(stmt.value, ast.Await)
-            and _is_spawn_call(stmt.value.value)
+            and _starts_spawn(stmt.value.value)
             for t in stmt.targets
             if isinstance(t, ast.Name)
         }

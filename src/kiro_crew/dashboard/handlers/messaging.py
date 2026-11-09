@@ -35,8 +35,15 @@ from kiro_crew.config.loader import (  # noqa: F401
     config_path,
     read_config_text,
 )
-from kiro_crew.constants import CHANNEL_SEND_NAMESPACES, SUBAGENT_COMPLETION_META_KEY  # noqa: F401
+from kiro_crew.constants import (  # noqa: F401
+    CHANNEL_SEND_NAMESPACES,
+    MAX_SHORT_STRING,
+    SUBAGENT_COMPLETION_META_KEY,
+)
 from kiro_crew.cron import CronStoreBusy, CronStoreUnreadable  # noqa: F401
+from kiro_crew.dashboard.app_token_refusal import (  # noqa: F401 -- read by messaging_api.run_control
+    app_token_refusal,
+)
 from kiro_crew.dashboard.body_numbers import body_int  # noqa: F401
 from kiro_crew.dashboard.channel_folders import (  # noqa: F401
     CHANNEL_CONFIG_SECTIONS,
@@ -101,6 +108,9 @@ from kiro_crew.dashboard.messaging_api import telegram_settings as _owner_telegr
 from kiro_crew.dashboard.messaging_api import webex_settings as _owner_webex_settings
 from kiro_crew.dashboard.messaging_api import wecom_settings as _owner_wecom_settings
 from kiro_crew.dashboard.messaging_api.agent_push import (  # noqa: F401
+    _refuse_redactable_key,
+    _refuse_unattributable_caller,
+    api_notification_agent_dismiss,
     api_notification_agent_push,
 )
 from kiro_crew.dashboard.messaging_api.channel_config_writes import (  # noqa: F401
@@ -120,6 +130,8 @@ from kiro_crew.dashboard.messaging_api.channel_delivery import (  # noqa: F401
     _cron_job_for,
     _deliver_channel_dm,
     _deliver_to_channel,
+    _fresh_governance,
+    _generation_now,
     _owner_dm_target,
     _send_to_channel_target,
     _vet_app_messaging,
@@ -224,6 +236,7 @@ from kiro_crew.dashboard.messaging_api.slack_settings import (  # noqa: F401
 )
 from kiro_crew.dashboard.messaging_api.slack_workspace import (  # noqa: F401
     _missing_scope_message,
+    api_slack_history,
     api_slack_manifest,
     api_slack_pins,
     api_slack_profile,
@@ -234,8 +247,9 @@ from kiro_crew.dashboard.messaging_api.spawn import (  # noqa: F401
     _backend_name,
     _chain_note,
     _continue_on_loop,
-    _enterprise_kiro_successor,
     _failover_backend,
+    _inherited_backend_name,
+    _lts_kiro_successor,
     _qualified_model_refusal,
     _requested_backend,
     _slot_for_parent,
@@ -280,6 +294,7 @@ from kiro_crew.dashboard.state import (  # noqa: F401
     PERSISTED_SUBAGENT_REPLAY_KEEP,
     PERSISTED_SUBAGENT_REPLAY_MAX_AGE_SECS,
     DashboardState,
+    _redact_note_value,
     load_window_off_loop,
 )
 from kiro_crew.dashboard.token_auth import (  # noqa: F401
@@ -319,7 +334,7 @@ from kiro_crew.notifications.bus import (  # noqa: F401
     NotificationPayload,
     NotificationValidationError,
 )
-from kiro_crew.parent_turns import ledger_of, settles_at_release  # noqa: F401
+from kiro_crew.parent_turns import ledger_of  # noqa: F401
 from kiro_crew.platform.context import redact_via_context  # noqa: F401
 from kiro_crew.platform.governance_profiles import HOST_SESSION_KEY  # noqa: F401
 from kiro_crew.platform_compat import IS_MACOS  # noqa: F401

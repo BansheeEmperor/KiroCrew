@@ -6,6 +6,7 @@ import { useLongPressReorder } from '../hooks/useLongPressReorder'
 import { useImeGuard } from '../hooks/useImeGuard'
 import { useScrollEdges } from '../hooks/useScrollEdges'
 import { useWheelToHorizontal } from '../hooks/useWheelToHorizontal'
+import { TAB_ID_ATTR, useRevealActiveTab } from '../hooks/useRevealActiveTab'
 import { useKeyboardLift } from '../hooks/useKeyboardLift'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { isTerminalFullscreenAllowed, findKeycap, fullscreenKeycap } from '../utils/terminalFullscreen'
@@ -15,6 +16,7 @@ import {
 } from './ui/dropdown-menu'
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from './ui/context-menu'
 import { Input } from './ui'
+import { AllTabsMenu } from './AllTabsMenu'
 import { useTranslation } from 'react-i18next'
 import { TabCloseMenuItems, batchCloseConfirm, openTabCloseMenu, type TabCloseActions } from './TabCloseMenu'
 import { useConfirm } from './ConfirmDialog'
@@ -37,11 +39,22 @@ import { i18nT } from '../i18n/t'
 import { uiLocation } from '../uiLocations/uiLocation'
 import { useGuideRevealScope } from '../guide/GuideRevealScope'
 import { isMac } from '../utils/platform'
+import { TERMINAL_TAB_COMMAND_EVENT, type TerminalTabCommand } from '../lib/panelToggleShortcuts'
 
 /** Longest a phone waits for an idle moment to build a restored terminal. */
 const PREWARM_IDLE_TIMEOUT_MS = 4000
 /** Latest: open the terminal even if the slide never reports completion. */
 const SETTLE_CEILING_MS = 700
+
+function useTermTabTitle(tab: TermTab): string {
+  const { t } = useTranslation()
+  const liveTitle = useTerminalTitle(tab.id)
+  return tab.name || liveTitle || t('components.bottomTerminalPanel.terminal')
+}
+
+function TermTabRowTitle({ tab }: { tab: TermTab }) {
+  return <>{useTermTabTitle(tab)}</>
+}
 
 /** A terminal tab chip — mirrors the activity-bar SidePanel TabChip design.
  *  `hintId` names the strip's visible editing helper (rendered outside the
@@ -56,8 +69,7 @@ function TabChip({ tab, active, closing = false, hintId, closeActions, onSelect,
   const { onClose } = closeActions
   const { t } = useTranslation()
   const ime = useImeGuard()
-  const liveTitle = useTerminalTitle(tab.id)
-  const title = tab.name || liveTitle || t('components.bottomTerminalPanel.terminal')
+  const title = useTermTabTitle(tab)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const editingRef = useRef(false)
@@ -123,6 +135,7 @@ function TabChip({ tab, active, closing = false, hintId, closeActions, onSelect,
         <div
           ref={chipRef}
           role="tab"
+          {...{ [TAB_ID_ATTR]: tab.id }}
           aria-label={title}
           aria-selected={active}
           aria-busy={closing || undefined}
@@ -400,10 +413,12 @@ export function TerminalTabsView({ variant, deferOpen = false }: { variant: 'doc
   // its box as tabs open/close/rename, so remeasure on the tabs list.
   const [attachEdges, edges, remeasure] = useScrollEdges<HTMLUListElement>()
   const attachWheel = useWheelToHorizontal<HTMLUListElement>()
+  const [attachReveal, reveal] = useRevealActiveTab<HTMLUListElement>(activeId)
   const attachScroller = useCallback((node: HTMLUListElement | null) => {
     attachEdges(node)
     attachWheel(node)
-  }, [attachEdges, attachWheel])
+    attachReveal(node)
+  }, [attachEdges, attachWheel, attachReveal])
   useEffect(() => { remeasure() }, [tabs, remeasure])
 
   // New tabs spawn in the selected session's project directory when one is
@@ -485,6 +500,23 @@ export function TerminalTabsView({ variant, deferOpen = false }: { variant: 'doc
     for (const tab of targets) del.mutate(tab.id)
     finishTargets(targets)
   }, [closingIds.size, confirm, confirmOpen, del, finishPendingPopoutClose, finishTargets, tabs, variant])
+
+  // The close / previous / next terminal chords act on this strip as its × and
+  // a click on a tab do; previous and next wrap. Not while restored tabs are
+  // unverified, when the strip draws no tabs to act on.
+  useEffect(() => {
+    if (hydratePending) return
+    const onCommand = (e: Event) => {
+      const command = (e as CustomEvent<TerminalTabCommand>).detail
+      if (!activeId) return
+      if (command === 'close') { void closeTabs([activeId]); return }
+      const i = tabs.findIndex(tab => tab.id === activeId)
+      const target = tabs[(i + (command === 'next' ? 1 : -1) + tabs.length) % tabs.length]
+      if (target) setActiveTab(target.id)
+    }
+    window.addEventListener(TERMINAL_TAB_COMMAND_EVENT, onCommand)
+    return () => window.removeEventListener(TERMINAL_TAB_COMMAND_EVENT, onCommand)
+  }, [hydratePending, activeId, tabs, closeTabs])
 
   /** Detach the WHOLE panel into its own browser window. Order matters, twice
    *  over: `openPopout` must run synchronously in the click (window.open needs
@@ -574,6 +606,12 @@ export function TerminalTabsView({ variant, deferOpen = false }: { variant: 'doc
         >
           <Plus size={15} />
         </button>
+        <AllTabsMenu
+          groups={[{ id: 'terminals', rows: tabs.map(t => ({ id: t.id, glyph: <TerminalSquare size={13} />, title: <TermTabRowTitle tab={t} /> })) }]}
+          currentId={activeId}
+          onSelect={id => { if (id === activeId) reveal(id); else setActiveTab(id) }}
+          label={i18nT('pages.chat.sidePanel.all_tabs')}
+        />
         {variant === 'dock' ? (
           <div className="flex items-center gap-0.5 ml-auto shrink-0">
             <DropdownMenu guideScope="menu:shell.terminal-more">
@@ -865,8 +903,11 @@ export default function BottomTerminalPanel() {
   const motionKey = isRight ? 'right-terminal' : 'bottom-terminal'
   // A bottom-docked terminal being typed into rises above the on-screen
   // keyboard instead of relying on Safari's focus pan (see useKeyboardLift).
+  // Measured on the wrapper that takes the lift as padding, so the lift does
+  // not move the measured edge.
+  const liftRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
-  const keyboardLift = useKeyboardLift(panelRef, open && !isRight)
+  const keyboardLift = useKeyboardLift(liftRef, open && !isRight)
   // A terminal opened for the first time waits until the slide is over before
   // xterm builds itself (see CliPanel's `deferOpen`), so the slide, and a
   // drawer the same tap closes (it settles before the slide does), run without
@@ -897,6 +938,7 @@ export default function BottomTerminalPanel() {
           of over it. When the band leaves less room than the panel's height,
           the panel shrinks (min-h-0) instead of running under the keyboard. */}
       <div
+        ref={liftRef}
         className={isRight ? 'shrink-0 flex' : 'flex flex-col min-h-0'}
         style={keyboardLift > 0 ? { paddingBottom: keyboardLift } : undefined}
       >
@@ -938,7 +980,8 @@ export default function BottomTerminalPanel() {
               aria-orientation={isRight ? 'vertical' : 'horizontal'}
               aria-label={i18nT('components.bottomTerminalPanel.resize_terminal_panel')}
             >
-              <div className={`absolute transition-colors duration-200 ${
+              {/* group-active: a pressed style is what makes Chromium treat the grip as a touch target */}
+              <div className={`absolute transition-colors duration-200 group-active/drag:bg-accent-hover ${
                 isRight
                   ? `inset-y-0 left-0 w-[2px] ${dragging ? 'bg-accent' : 'bg-transparent group-hover/drag:bg-accent'}`
                   : `inset-x-0 top-0 h-[2px] ${dragging ? 'bg-accent' : 'bg-transparent group-hover/drag:bg-accent'}`

@@ -87,9 +87,11 @@ BASE_NAMES = frozenset(
         "ConversationState",
         "DENY_CAUSE_APPROVAL_TIMEOUT",
         "DM_SCOPE_UNIFIED",
+        "EmbedAdmissionTimeout",
         "InboundMessage",
         "InboundRoute",
         "IngestLimits",
+        "LiveDefaultAgent",
         "NamedTuple",
         "ReceiptQueue",
         "ReceiptSurface",
@@ -117,7 +119,6 @@ BASE_NAMES = frozenset(
         "_AUDIO_MIMES",
         "_BUSY_OPTIONS_REFUSAL",
         "_CHANNEL",
-        "_DEFAULT_KIROCREW_AGENT",
         "_DETACH_EXEMPT_COMMANDS",
         "_FAILURE_REASON_MAX_CHARS",
         "_HELP_TEXT",
@@ -201,7 +202,6 @@ BASE_NAMES = frozenset(
         "parse_mid_turn_override",
         "parse_session_key",
         "persisted_session_agent",
-        "predecessor_sid",
         "privacy_mode",
         "process_telegram_attachments",
         "publish_turn_identity",
@@ -360,7 +360,10 @@ BASE_MEMBERS = {
         "(self, route: 'tuple[str, str]', chat_id: 'int', thread_id: 'int | None', "
         "user_id: 'int', chat_type: 'str') -> 'str'",
     ),
-    "_configured_agent": ("function", "(self) -> 'str'"),
+    "_configured_agent": (
+        "function",
+        "(self, route: 'tuple[str, str] | None' = None) -> 'str'",
+    ),
     "_consume_picker": (
         "function",
         "(self, cb: \"'TelegramCallback'\", data: 'str', table: 'dict[str, _Picker]', *, "

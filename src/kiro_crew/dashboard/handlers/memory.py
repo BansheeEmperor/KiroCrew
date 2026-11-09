@@ -579,7 +579,7 @@ class _MemorySectionNotObject(Exception):
 
 async def api_memory_settings(request: web.Request) -> web.Response:
     """GET/PUT /api/memory/settings — memory consolidation config."""
-    cfg = KiroCrewConfig.load()
+    cfg = await asyncio.to_thread(KiroCrewConfig.load)
     if request.method == "PUT":
         # The body may carry `migrated`, which is the same install-wide flag
         # /api/memory/migrate flips, so this PUT is a durable memory write and takes
@@ -979,8 +979,18 @@ async def _set_migrated(value: bool) -> None:
     ``on_corrupt="fail"``, which is exactly that contract.
     """
 
-    def _apply(data: dict) -> dict:
-        data.setdefault("memory", {})["migrated"] = value
+    skipped_not_object = False
+
+    def _apply(data: dict) -> dict | None:
+        nonlocal skipped_not_object
+        section = data.setdefault("memory", {})
+        if not isinstance(section, dict):
+            # Same fail-closed contract as an unparseable file: keep the
+            # person's entry as written and write nothing. `None` tells
+            # update_config_locked there is no change to persist.
+            skipped_not_object = True
+            return None
+        section["migrated"] = value
         return data
 
     try:
@@ -989,6 +999,12 @@ async def _set_migrated(value: bool) -> None:
         logger.warning(
             "config.json is unparseable; skipping memory.migrated write to "
             "avoid clobbering other settings — will retry next boot"
+        )
+        return
+    if skipped_not_object:
+        logger.warning(
+            "config.json has a 'memory' entry that is not an object; skipping "
+            "memory.migrated write to leave it as written — will retry next boot"
         )
 
 
@@ -1098,7 +1114,7 @@ async def api_memory_stats(request: web.Request) -> web.Response:
     # source module.
     from kiro_crew.config.loader import KiroCrewConfig  # noqa: F811
 
-    cfg = KiroCrewConfig.load()
+    cfg = await asyncio.to_thread(KiroCrewConfig.load)
     stats["embedding_provider"] = cfg.memory.embedding_provider
     stats["migrated"] = cfg.memory.migrated
     # Legacy markdown presence (diagnostics; migration is automatic at boot).
@@ -1236,7 +1252,7 @@ async def api_memory_consolidate(request: web.Request) -> web.Response:
     # SEL-recorded: the request passed identity and the write gate, so the
     # refusal is a config-state decision an audit trail has to show rather than
     # an unauthenticated caller being turned away upstream.
-    writes_off = memory_writes_off_key(KiroCrewConfig.load().memory)
+    writes_off = memory_writes_off_key((await asyncio.to_thread(KiroCrewConfig.load)).memory)
     if writes_off is not None:
         code = (
             "persistence_disabled"
@@ -1528,6 +1544,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _embedding_setup_status,
         _ensure_pip_available,
         _faiss_install_lock,
+        _ollama_provider_refusal,
         _probe_model_path,
         _redact_pip_stderr,
         _store_progress_adapter,
@@ -1584,10 +1601,12 @@ if TYPE_CHECKING:  # names it serves from outside the family, from their homes
         legacy_embedding_ids,
         model_download_manager,
         model_file_present,
+        ollama_backend_selected,
         reconcile_store_embedding_space,
         reembed_progress,
         reset_shared_embedder,
         resolve_custom_model,
+        resolve_ollama_settings,
         validate_custom_model_path,
     )
     from kiro_crew.executors import (  # noqa: F401

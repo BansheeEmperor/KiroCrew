@@ -83,6 +83,11 @@ from kiro_crew.agent_sdk.backend_install import (
     probe_backend,
     probe_backends,
 )
+from kiro_crew.agent_sdk.backends import (
+    CODEX_CLI_ADAPTER_MISSING,
+    CODEX_CLI_OVERRIDE_UNUSABLE,
+    CODEX_CLI_UNRESOLVED,
+)
 from kiro_crew.agent_sdk.capabilities import (
     MODEL_NAMESPACE_ACP,
     UNKNOWN_BACKEND_CAPABILITIES,
@@ -121,6 +126,7 @@ from kiro_crew.agent_sdk.native_commands import NativeCommandBatch, run_kiro_nat
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from kiro_crew.acp.client_spawn_env import CodexCliResolution
     from kiro_crew.acp.managed_agent_shadow import AgentNameClaim
 
 
@@ -147,6 +153,33 @@ def agents_dir_competing_claim(
     from kiro_crew.acp.managed_agent_shadow import agents_dir_competing_claim as _claim
 
     return _claim(agent, agents_dir, own_file)
+
+
+def shell_command_from_tool_params(params: dict) -> str | None:
+    """The shell command the tool gate scans in a tool call's *params*, or None."""
+    from kiro_crew.acp.types import _command_from_tool_params as _command
+
+    return _command(params)
+
+
+def published_stderr_tail(
+    lines: list[str], sep: str, last: int, redact: Callable[[str], str] | None = None
+) -> str:
+    """The *last* of a child's stderr *lines* joined with *sep*, or ``""``, or the
+    withheld marker when ``acp/stderr_tail.py:safe_stderr_tail`` flags ANY of the
+    lines: all of them are judged, so a secret straddling the cut is seen whole."""
+    from kiro_crew.acp.stderr_tail import STDERR_WITHHELD, safe_stderr_tail
+
+    judged = safe_stderr_tail(lines, "\n", redact=redact)
+    return judged if judged in ("", STDERR_WITHHELD) else sep.join(lines[-last:])
+
+
+def resolve_codex_cli() -> CodexCliResolution:
+    """The ``codex`` CLI the codex-acp adapter would run, or why it cannot be found."""
+    # Imported lazily: the ACP spawn module is heavy and imports back into this package.
+    from kiro_crew.acp.client_spawn_env import resolve_codex_cli as _resolve
+
+    return _resolve()
 
 
 def session_start_concurrency() -> int:
@@ -177,6 +210,15 @@ def batch_guard_refusal_outcome(reason: str | None) -> tuple[str, dict[str, str]
     return refusal_outcome(reason)
 
 
+def mcp_call_arguments(event: Any, server: str, tool: str) -> dict[str, Any]:
+    """The arguments of an MCP call to *server*/*tool*, read through the harness
+    envelopes (``{tool_id, arguments}``, Codex's ``{server, tool, arguments}``) only
+    when the envelope names that same tool. Imported lazily, as above."""
+    from kiro_crew.acp.batch_guard import _mcp_arguments
+
+    return _mcp_arguments(event, server, tool)
+
+
 def watch_agent_turns(provider: object, callback: Callable[[], None] | None) -> bool:
     """Call *callback* when *provider*'s agent starts a turn between prompts; ``None`` stops it.
 
@@ -202,9 +244,15 @@ class AgentTurnUsage(Protocol):
 
 
 __all__ = [
+    "published_stderr_tail",
+    "CODEX_CLI_ADAPTER_MISSING",
+    "CODEX_CLI_OVERRIDE_UNUSABLE",
+    "CODEX_CLI_UNRESOLVED",
+    "resolve_codex_cli",
     "session_start_concurrency",
     "take_batch_guard_refusal",
     "batch_guard_refusal_outcome",
+    "mcp_call_arguments",
     "watch_agent_turns",
     "tool_row_text",
     "agents_dir_competing_claim",

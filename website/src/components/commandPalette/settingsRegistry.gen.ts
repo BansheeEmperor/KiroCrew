@@ -187,6 +187,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "channels.allowed-user-ids-feishu",
+    "label": "Allowed user IDs (Feishu)",
+    "labelKey": "pages.settings.botChannelPanel.allowed_user_ids",
+    "labelSuffix": "Feishu",
+    "tab": "channels",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "channel": "feishu"
+    }
+  },
+  {
     "id": "channels.allowed-user-ids-telegram",
     "label": "Allowed user IDs (Telegram)",
     "labelKey": "pages.settings.botChannelPanel.allowed_user_ids",
@@ -307,6 +319,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "configKey": "slack.auto_link_sessions"
   },
   {
+    "id": "channels.discord-bot-token",
+    "labelKey": "pages.settings.discordPanel.token_label",
+    "tab": "channels",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "channel": "discord"
+    },
+    "label": "Discord bot token",
+    "description": "From the Developer Portal's Bot page (Reset Token to view it once)."
+  },
+  {
     "id": "channels.enable-imessage-channel-imessage",
     "label": "Enable iMessage channel (iMessage)",
     "labelKey": "pages.settings.iMessagePanel.enable",
@@ -370,6 +394,30 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "channels.feishu-app-id",
+    "labelKey": "pages.settings.feishuPanel.app_id_label",
+    "tab": "channels",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "channel": "feishu"
+    },
+    "label": "Feishu app ID",
+    "description": "The App ID from your custom app’s Credentials page in the Feishu developer console."
+  },
+  {
+    "id": "channels.feishu-app-secret",
+    "labelKey": "pages.settings.feishuPanel.app_secret_label",
+    "tab": "channels",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "channel": "feishu"
+    },
+    "label": "Feishu app secret",
+    "description": "The App Secret shown next to the App ID on the same Credentials page."
+  },
+  {
     "id": "channels.file-sessions-in-a-folder-discord",
     "label": "File sessions in a folder (Discord)",
     "labelKey": "pages.settings.botChannelPanel.file_sessions_in_folder",
@@ -379,6 +427,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1,
     "params": {
       "channel": "discord"
+    }
+  },
+  {
+    "id": "channels.file-sessions-in-a-folder-feishu",
+    "label": "File sessions in a folder (Feishu)",
+    "labelKey": "pages.settings.botChannelPanel.file_sessions_in_folder",
+    "labelSuffix": "Feishu",
+    "tab": "channels",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "channel": "feishu"
     }
   },
   {
@@ -488,6 +548,19 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1,
     "params": {
       "channel": "discord"
+    }
+  },
+  {
+    "id": "channels.folder-name-feishu",
+    "label": "Folder name (Feishu)",
+    "labelKey": "pages.settings.botChannelPanel.session_folder_name",
+    "labelSuffix": "Feishu",
+    "hint": "Created for you when you save these settings, if it does not exist yet.",
+    "tab": "channels",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "channel": "feishu"
     }
   },
   {
@@ -775,6 +848,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "channels.soft-context-threshold-feishu",
+    "label": "Soft context threshold % (Feishu)",
+    "labelKey": "pages.settings.botChannelPanel.soft_context_threshold",
+    "labelSuffix": "Feishu",
+    "tab": "channels",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "channel": "feishu"
+    }
+  },
+  {
     "id": "channels.soft-context-threshold-teams",
     "label": "Soft context threshold % (Teams)",
     "labelKey": "pages.settings.botChannelPanel.soft_context_threshold",
@@ -825,6 +910,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "channels.telegram-bot-token",
+    "labelKey": "pages.settings.telegramPanel.token_label",
+    "tab": "channels",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "channel": "telegram"
+    },
+    "label": "Telegram bot token",
+    "description": "From @BotFather after creating your bot (looks like 110201543:AAHdqT…)."
+  },
+  {
     "id": "channels.tenant-id-teams",
     "label": "Tenant ID (Teams)",
     "labelKey": "pages.settings.teamsPanel.tenant_id",
@@ -852,6 +949,30 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "channels.wecom-bot-id",
+    "labelKey": "pages.settings.weComPanel.bot_id_label",
+    "tab": "channels",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "channel": "wecom"
+    },
+    "label": "WeCom bot ID",
+    "description": "The Bot ID from your AI bot’s settings page in the WeCom admin console."
+  },
+  {
+    "id": "channels.wecom-bot-secret",
+    "labelKey": "pages.settings.weComPanel.token_label",
+    "tab": "channels",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "channel": "wecom"
+    },
+    "label": "WeCom bot secret",
+    "description": "The Secret shown next to the Bot ID on the same settings page."
+  },
+  {
     "id": "channels.when-the-agent-may-speak-whatsapp",
     "label": "When the agent may speak (WhatsApp)",
     "labelKey": "pages.settings.whatsAppPanel.when_the_agent_may_speak",
@@ -864,6 +985,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "channels.who-can-message-the-agent-wechat",
+    "label": "Who can message the agent (WeChat)",
+    "labelKey": "pages.settings.weixinPanel.who_can_message_the_bot",
+    "labelSuffix": "WeChat",
+    "tab": "channels",
+    "type": "select",
+    "occurrence": 1,
+    "params": {
+      "channel": "weixin"
+    }
+  },
+  {
     "id": "channels.who-can-message-the-agent-whatsapp",
     "label": "Who can message the agent (WhatsApp)",
     "labelKey": "pages.settings.whatsAppPanel.who_can_message_the_bot",
@@ -873,18 +1006,6 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1,
     "params": {
       "channel": "whatsapp"
-    }
-  },
-  {
-    "id": "channels.who-can-message-the-bot-wechat",
-    "label": "Who can message the bot (WeChat)",
-    "labelKey": "pages.settings.weixinPanel.who_can_message_the_bot",
-    "labelSuffix": "WeChat",
-    "tab": "channels",
-    "type": "select",
-    "occurrence": 1,
-    "params": {
-      "channel": "weixin"
     }
   },
   {
@@ -1220,6 +1341,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "chat.include-subfolder-contents-in-folder-counts",
+    "label": "Include Subfolder Contents in Folder Counts",
+    "labelKey": "pages.settings.chatPanel.folder_count_includes_subfolders",
+    "hint": "A folder's count adds up everything inside its subfolders too, so a collapsed folder shows how much it holds",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "sessions"
+    }
+  },
+  {
     "id": "chat.jump-to-the-bottom-when-you-send",
     "label": "Jump to the bottom when you send",
     "labelKey": "pages.settings.chatPanel.scroll_on_send",
@@ -1332,6 +1465,17 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "chat.optimize-before-sending",
+    "label": "Optimize Before Sending",
+    "labelKey": "pages.settings.chatPanel.optimize_before_sending",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "composer"
+    }
+  },
+  {
     "id": "chat.pin-summary-in-side-panel",
     "label": "Pin Summary in Side Panel",
     "labelKey": "pages.settings.chatPanel.side_panel_pin_summary",
@@ -1381,6 +1525,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "chat.preferred-reply-language",
+    "label": "Preferred Reply Language",
+    "labelKey": "pages.settings.chatPanel.preferred_language",
+    "hint": "Code, commit messages and PR text keep the project's own language.",
+    "tab": "chat",
+    "type": "select",
+    "occurrence": 1,
+    "params": {
+      "sub": "transcript"
+    }
+  },
+  {
     "id": "chat.prevent-sleep-while-running",
     "label": "Prevent sleep while running",
     "labelKey": "pages.settings.chatPanel.prevent_sleep_while_running",
@@ -1409,6 +1565,30 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.quick-send",
     "label": "Quick Send",
     "labelKey": "pages.settings.chatPanel.quick_send",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "composer"
+    }
+  },
+  {
+    "id": "chat.recall-sent-messages-with-arrow-keys",
+    "label": "Recall Sent Messages with Arrow Keys",
+    "labelKey": "pages.settings.chatPanel.arrow_key_prompt_history",
+    "hint": "In an empty message input, or with the cursor at its very start, ↑ brings back a message you sent in this chat and ↓ moves forward again. Turn it off to keep ↑ and ↓ for moving the cursor.",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "composer"
+    }
+  },
+  {
+    "id": "chat.require-a-second-escape-to-stop-the-turn",
+    "label": "Require a second Escape to stop the turn",
+    "labelKey": "pages.settings.chatPanel.double_escape_to_stop",
+    "hint": "When on, the first Escape in the message input only shows a hint. A second Escape while the hint shows stops the running turn.",
     "tab": "chat",
     "type": "toggle",
     "occurrence": 1,
@@ -1527,6 +1707,17 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "chat.show-optimize-prompt",
+    "label": "Show Optimize Prompt",
+    "labelKey": "pages.settings.chatPanel.show_optimize_prompt",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "composer"
+    }
+  },
+  {
     "id": "chat.show-pasted-text-in-full",
     "label": "Show Pasted Text in Full",
     "labelKey": "pages.settings.chatPanel.show_pasted_text_in_full",
@@ -1621,6 +1812,20 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "params": {
       "sub": "sessions"
     }
+  },
+  {
+    "id": "chat.start-new-chats-in-ultra-mode",
+    "label": "Start New Chats in Ultra Mode",
+    "labelKey": "pages.settings.chatPanel.new_chat_crew_mode",
+    "description": "Ultra Mode runs each task in its own chat and reports back on the new chat's Board. You can turn it off on any new chat before the first message.",
+    "hint": "Not for Incognito or Temporary chats, or chats on another agent.",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "sessions"
+    },
+    "configKey": "dashboard.new_chat_crew_mode"
   },
   {
     "id": "chat.style-markdown-while-typing",
@@ -1951,11 +2156,11 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "description": "Client ID, client secret and redirect URI for a provider that needs a registered OAuth app"
   },
   {
-    "id": "developer.agent-harness-per-bot",
-    "label": "Agent harness per Bot",
-    "labelKey": "pages.developer.featurePreviewsTab.crewmate_harness",
-    "description": "Lets one Bot run on another AI coding tool.",
-    "hint": "Adds an Agent harness setting to each Bot's profile, so one Bot can run on a different AI coding tool, such as Claude Code, with that tool's models, while the rest keep the default.",
+    "id": "developer.agent-harness-for-worker-chats",
+    "label": "Agent Harness for worker chats",
+    "labelKey": "pages.developer.featurePreviewsTab.session_harness",
+    "description": "Lets a main chat run its worker chats on a different Agent Harness, such as Claude or Codex.",
+    "hint": "A main chat can start each worker chat on a different Agent Harness, such as Claude or Codex, instead of the one set in Settings > Agent Harness. A bot's own Agent Harness setting keeps working either way.",
     "tab": "developer",
     "type": "toggle",
     "occurrence": 1,
@@ -2040,10 +2245,10 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
   },
   {
     "id": "developer.bot-sessions-on-the-bot-s-profile",
-    "label": "Bot sessions on the Bot's profile",
+    "label": "Bot sessions on the bot's profile",
     "labelKey": "pages.developer.featurePreviewsTab.mate_sessions",
-    "description": "Moves a Bot's chats to its Sessions tab.",
-    "hint": "Moves the chats a Bot opens out of your Sessions list, Recents and grid, onto that Bot's Sessions tab. The Bot's own chat stays where it is, and History and search still find every chat.",
+    "description": "Moves a bot's chats to its Sessions tab.",
+    "hint": "Moves the chats a bot opens out of your Sessions list, Recents and grid, onto that bot's Sessions tab. The bot's own chat stays where it is, and History and search still find every chat.",
     "tab": "developer",
     "type": "toggle",
     "occurrence": 1,
@@ -2129,12 +2334,38 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "developer.github-sign-in-by-kiro-crew",
+    "label": "GitHub sign-in by Kiro Crew",
+    "labelKey": "pages.developer.featurePreviewsTab.crew_oauth",
+    "description": "Lets Kiro Agent chats use your GitHub profile, orgs and public repos. Turn it on, then connect GitHub in Customize > Connections.",
+    "hint": "Kiro Crew signs in to GitHub itself. Disconnect GitHub on Connections to remove access.",
+    "tab": "developer",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "feature-previews"
+    }
+  },
+  {
     "id": "developer.jev-api-key",
     "label": "Jev API key",
     "labelKey": "pages.developer.featurePreviewsTab.decisions_api_key_label",
     "description": "Kept in this dashboard's secret store on the machine that runs Kiro Crew, never in config.json, and never shown again once you save it.",
     "tab": "developer",
     "type": "input",
+    "occurrence": 1,
+    "params": {
+      "sub": "feature-previews"
+    }
+  },
+  {
+    "id": "developer.mark-out-of-date-dashboard-fields",
+    "label": "Mark out-of-date Dashboard fields",
+    "labelKey": "pages.developer.featurePreviewsTab.dashboard_stale_fields",
+    "description": "Marks bot-written Dashboard fields that are out of date.",
+    "hint": "When a bot has not rewritten a field it writes on its Dashboard page for a day (or the field's own limit), the page marks that field with how long ago it was updated, and the bot is reminded to write it again in its next turn and check-in.",
+    "tab": "developer",
+    "type": "toggle",
     "occurrence": 1,
     "params": {
       "sub": "feature-previews"
@@ -2168,9 +2399,9 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
   },
   {
     "id": "developer.reply-threads-on-bot-chat-messages",
-    "label": "Reply threads on Bot chat messages",
+    "label": "Reply threads on bot chat messages",
     "labelKey": "pages.settings.crewmatesSection.reply_threads",
-    "hint": "Let any message in a Bot's chat carry its own reply thread, opened in the side panel while the chat stays visible. Off, the Reply in thread control is not offered and existing threads are hidden, not deleted.",
+    "hint": "Let any message in a bot's chat carry its own reply thread, opened in the side panel while the chat stays visible. Off, the Reply in thread control is not offered and existing threads are hidden, not deleted.",
     "tab": "developer",
     "type": "toggle",
     "occurrence": 1,
@@ -2242,6 +2473,19 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "developer.wake-bots-to-update-out-of-date-fields",
+    "label": "Wake bots to update out-of-date fields",
+    "labelKey": "pages.developer.featurePreviewsTab.dashboard_stale_wake",
+    "description": "Asks a bot to update its out-of-date fields.",
+    "hint": "When a field a bot writes on its Dashboard page goes out of date, Kiro Crew starts one short turn in that bot's chat asking it to write the field again, even with no check-in on. At most one such turn per bot every 30 minutes, and each one uses credits.",
+    "tab": "developer",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "feature-previews"
+    }
+  },
+  {
     "id": "developer.webhooks",
     "label": "Webhooks",
     "labelKey": "pages.developer.featurePreviewsTab.webhooks",
@@ -2276,6 +2520,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
       "sub": "terminal"
     },
     "configKey": "dashboard.terminal.completion.enabled"
+  },
+  {
+    "id": "display.copy-on-select",
+    "label": "Copy on select",
+    "labelKey": "pages.settings.displayPanel.terminal_copy_on_select",
+    "hint": "Copy text to the clipboard as soon as you select it in the terminal with the mouse. The selection toolbar still opens.",
+    "tab": "display",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "terminal"
+    }
   },
   {
     "id": "display.cursor-style",
@@ -2338,6 +2594,19 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "params": {
       "sub": "sidebar"
     }
+  },
+  {
+    "id": "display.editor",
+    "label": "Editor",
+    "labelKey": "pages.settings.displayPanel.remote_editor_editor",
+    "description": "Adds “Open in VS Code” to the ⋯ menu of a file open in the side panel. Needs VS Code with Remote-SSH on the computer you’re using. The file opens there, connected to the SSH host below.",
+    "tab": "display",
+    "type": "select",
+    "occurrence": 1,
+    "params": {
+      "sub": "remote-editor"
+    },
+    "configKey": "dashboard.remote_editor.editor"
   },
   {
     "id": "display.enable-ligatures",
@@ -2534,6 +2803,31 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "configKey": "dashboard.terminal.reuse_current"
   },
   {
+    "id": "display.show-search-in-the-top-bar",
+    "label": "Show search in the top bar",
+    "labelKey": "pages.settings.displayPanel.show_topbar_search",
+    "hint": "Show the search box in the middle of the top bar. Off, the controls on either side get its space, so the CPU, MEM and DSK readings stay visible in narrower windows. The search shortcut still opens search. While keyboard shortcuts are off, the box stays shown.",
+    "tab": "display",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "view"
+    }
+  },
+  {
+    "id": "display.show-tray-icon",
+    "label": "Show tray icon",
+    "labelKey": "pages.settings.displayPanel.show_tray_icon",
+    "hint": "Shows Kiro Crew in the system tray, or the menu bar on macOS, so you can open its window or quit from there.",
+    "tab": "display",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "view"
+    },
+    "settingId": "display.show-tray-icon"
+  },
+  {
     "id": "display.show-unread-dot-on-session-cards",
     "label": "Show unread dot on session cards",
     "labelKey": "pages.settings.displayPanel.show_unread_dot",
@@ -2555,6 +2849,19 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "params": {
       "sub": "theme"
     }
+  },
+  {
+    "id": "display.ssh-host",
+    "label": "SSH host",
+    "labelKey": "pages.settings.displayPanel.remote_editor_host",
+    "description": "The name after Host in ~/.ssh/config on the computer you’re using, like dev-box. Every computer you open this dashboard from needs that name.",
+    "tab": "display",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "sub": "remote-editor"
+    },
+    "configKey": "dashboard.remote_editor.host"
   },
   {
     "id": "display.theme",
@@ -2694,6 +3001,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "notifications.mute-sounds",
+    "label": "Mute sounds",
+    "labelKey": "pages.settings.notificationsPanel.mute_sounds",
+    "hint": "Silences notification sounds for a while, then turns them back on by itself. Notifications still arrive.",
+    "tab": "notifications",
+    "type": "select",
+    "occurrence": 1,
+    "params": {
+      "sub": "sound"
+    }
+  },
+  {
     "id": "notifications.notify-me-even-when-kiro-crew-is-closed",
     "label": "Notify me even when Kiro Crew is closed",
     "labelKey": "pages.settings.notificationsPanel.push_toggle_label",
@@ -2741,8 +3060,8 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "description": "When the agent proactively messages you outside a chat"
   },
   {
-    "id": "notifications.show-a-banner-for-new-notifications",
-    "label": "Show a banner for new notifications",
+    "id": "notifications.show-a-banner-while-this-window-is-open",
+    "label": "Show a banner while this window is open",
     "labelKey": "pages.settings.notificationsPanel.show_banner_for_new_notifications",
     "hint": "A card slides in under the top bar when a notification arrives, then tucks into the bell.",
     "tab": "notifications",
@@ -2918,6 +3237,19 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "description": "Off shows files the dashboard opens for you — the chat side panel's Files tab, and the Library and Artifacts previews — as written, in your own dashboard only. On by default. Conversations in this dashboard, Slack, and messaging channels stay redacted. Changing it reloads the files you have open (unsaved edits are kept) and closes file-comparison (diff) views."
   },
   {
+    "id": "security.config-pending",
+    "labelKey": "pages.settings.securityPanel.configPending.nav_dot",
+    "tab": "security",
+    "type": "buttonGroup",
+    "occurrence": 1,
+    "params": {
+      "section": "posture"
+    },
+    "settingId": "security.config-pending",
+    "label": "Settings files changed outside {{productName}}",
+    "description": "Review edits made to settings files outside {{productName}}, then apply or discard them."
+  },
+  {
     "id": "security.trust-every-third-party-app",
     "labelKey": "pages.settings.securityPanel.trustedApps.allow_all_label",
     "tab": "security",
@@ -3058,8 +3390,8 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "skills.require-approval-before-generated-skills-go-live",
     "label": "Require approval before generated skills go live",
     "labelKey": "pages.settings.skillsPanel.require_approval_before_generated_skills_go_live",
-    "description": "Off lets skills without scripts go live without your approval.",
-    "hint": "Keep every auto-generated candidate in the pending queue until you approve it. Turning this off lets prose-only skills publish automatically; skills that bundle scripts always require approval regardless.",
+    "description": "Off lets new skills without scripts go live without your approval.",
+    "hint": "Keep every auto-generated candidate in the pending queue until you approve it. Turning this off lets new prose-only skills publish automatically; skills that bundle scripts, and any update to an existing skill, always require approval, unless skills.auto_refine_on_deviation is on.",
     "tab": "skills",
     "type": "toggle",
     "occurrence": 1,

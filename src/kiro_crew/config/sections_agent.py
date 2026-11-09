@@ -24,6 +24,7 @@ from kiro_crew.config.sections_agent_fields import (
     DEFAULT_CWD_ALLOWED_ROOTS,
     JAIL_MODE_AUTO,
     KAS_BUNDLE_DEFAULT_URL,
+    KAS_REFUSE_PLAIN_HTTP_MCP_HEADERS_HELP,
     YOLO_UNTIL_SHUTDOWN,
     coerce_model_context_tokens,
     coerce_refusal_fallback_model,
@@ -74,7 +75,7 @@ def coerce_fallback_model(raw: object) -> str:
 #: The Crew Mode conductor template's name. Equal to
 #: ``crew_mode.DEFAULT_CREW_MODE_AGENT`` (a test pins it); defined here so this owner
 #: binds no name the sections facade does not.
-_CREW_MODE_AGENT_DEFAULT = "kirocrew-conductor"
+_CREW_MODE_AGENT_DEFAULT = "kirocrew-team-lead"
 
 
 @dataclass
@@ -256,9 +257,11 @@ class AgentConfig:
         default="kas",
         metadata=_meta(
             "Bot ACP backend",
-            "Backend for crew-member DM sessions: 'kas' (default when omitted or '') "
-            "or another dispatch-capable backend (claude, codex, opencode, goose). "
-            "Bots run on KAS as their Kiro backend, so 'kiro' here also "
+            "Legacy backend for bot DM sessions and their workers. Omitted or '': "
+            "Bots follow agent.acp_backend, or run on 'kas' when that is a harness "
+            "bots cannot run on. A stored value (claude, codex, kas, ...) still wins "
+            "over agent.acp_backend; a bot's own agents.<name>.acp_backend wins over "
+            "both. Bots run on KAS as their Kiro backend, so 'kiro' here also "
             "selects KAS. Members dispatch work into worker sessions through "
             "session-control tools mounted per session over the wire.",
             # Same no-enum reasoning as acp_backend above: the live selectable
@@ -323,6 +326,12 @@ class AgentConfig:
             # Declared in the engine's initialize, so a running KAS process keeps
             # what it declared until it is replaced.
             restart=True,
+        ),
+    )
+    kas_refuse_plain_http_mcp_headers: bool = field(
+        default=False,
+        metadata=_meta(
+            "KAS: refuse MCP headers over plain http", KAS_REFUSE_PLAIN_HTTP_MCP_HEADERS_HELP
         ),
     )
     kas_bundle_url: str = field(
@@ -611,6 +620,15 @@ class AgentConfig:
             "uninstalling the app sticks. Written by the gateway; do not edit.",
         ),
     )
+    apps_builtin_adoption_nav: dict[str, dict[str, str]] = field(
+        default_factory=dict,
+        metadata=_meta(
+            "Adopted Built-in App Navigation",
+            "The navigation route and icon each adopted former built-in app had "
+            "as a built-in, so its sidebar entry, order, pin and hidden setting "
+            "stay the same. Written by the gateway; do not edit.",
+        ),
+    )
     apps_ui_stream_timeout_secs: int = field(
         default=30,
         metadata=_meta(
@@ -817,13 +835,13 @@ class AgentConfig:
         default=True,
         metadata=_meta(
             "Posture Admission Gate",
-            "While available memory is at or below resource_critical_gb, defer "
-            "scheduled cron firings to the next tick, and TaskRunner steps and "
-            "workflow ctx.agent() calls by admit_wait_secs, until memory frees. "
-            "Subagent spawns are not gated on this posture; they wait on "
-            "spawn_min_memory_gb instead. Manually triggered cron runs and "
-            "direct chat turns are never gated; an unreadable probe admits "
-            "(fail-open). Set false to make the critical posture advisory-only.",
+            "While available memory is at or below resource_critical_gb, defer scheduled cron "
+            "firings to the next tick, and TaskRunner steps and workflow ctx.agent() calls by "
+            "admit_wait_secs, until memory frees. Background helper turns (titles, labels, "
+            "summaries, history consolidation) are skipped while it lasts. Subagent "
+            "spawns are not gated on this posture; they wait on spawn_min_memory_gb instead. "
+            "Manually triggered cron runs and direct chat turns are never gated; an unreadable "
+            "probe admits (fail-open). Set false to make the critical posture advisory-only.",
         ),
     )
     task_queue_enabled: bool = field(
@@ -1195,6 +1213,15 @@ class AgentConfig:
             "completed before the cutoff is preserved on the run record.",
         ),
     )
+    kas_workflows: bool = field(
+        default=False,
+        metadata=_meta(
+            "Kiro Workflows on Kiro Agent",
+            "Developer opt-in to Kiro Agent's (KAS) own workflow engine, off by "
+            "default. This build has no surface that reads it yet, so setting it "
+            "changes nothing. No effect unless the backend is Kiro Agent.",
+        ),
+    )
     subagent_mem_buffer_pct: int = field(
         default=20,
         metadata=_meta(
@@ -1280,6 +1307,23 @@ class AgentConfig:
             "closing the conductor hands its workers to the lead. Off by default.",
         ),
     )
+    peer_steer_loss_recovery: bool = field(
+        default=False,
+        metadata=_meta(
+            "Peer Steer Loss Recovery",
+            "Let a steer that is not typed into the session's own composer (another "
+            "session's session_send or session_broadcast steer, or an automation's) "
+            "cut into a running Claude Code, Codex, Goose, Pi or OpenCode turn. "
+            "Those harnesses can drop a steer they accepted, so it counts as "
+            "delivered only when the turn ends cleanly; a turn that is cancelled, "
+            "fails or loses it to a denied approval puts it back as a queue card "
+            "that runs as the next turn, so it can run twice. While it is on, a "
+            "hard stop that drops another session's pending steer, on any harness, "
+            "tells that session the steer may not have run. Off by default: such "
+            "a steer queues for the next turn, and only the composer steers these "
+            "harnesses.",
+        ),
+    )
     member_dispatch: bool = field(
         default=True,
         metadata=_meta(
@@ -1294,6 +1338,17 @@ class AgentConfig:
             "disabling them. When on, their reach is still bounded to sessions "
             "they created themselves (creator ownership), the same fence that "
             "binds a member when Session Control is on.",
+        ),
+    )
+    conductor_own_child_verbs: bool = field(
+        default=True,
+        metadata=_meta(
+            "Conductor Own-Child Sends",
+            "Let the Conductor and the Ultra Mode team lead send to and close a "
+            "session they created themselves without an approval prompt, the way a "
+            "Bot already does. A send or close aimed at any other session still "
+            "prompts, and the child keeps its own approval mode. Turn this off to "
+            "read every send before it runs.",
         ),
     )
     crew_panel: bool = field(

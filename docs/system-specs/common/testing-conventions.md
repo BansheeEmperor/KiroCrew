@@ -194,7 +194,7 @@ module through any binding is the semgrep rule's), a `sys.modules` eviction with
 no restore in the same function, raw environment writes, duration bounds, literal waits
 under two seconds (the too-tight lost-run bound of class 6; a negative such as
 `assert not done.wait(0.3)` is not one), literal listener ports, fixed crew-log flush
-ceilings, crew-log removals outside `eager.paused()`, Event waits a test parks on a thread-pool executor, direct writes of asyncio Tasks or TimerHandles to a ``kiro_crew`` module attribute from a test function (K16), ``pytest.mark.xfail(strict=False)`` overrides (K18), a non-zero numeric literal used as a duration-named keyword argument or as a ``setattr`` value on a duration-named attribute — the production-deadline-as-test-boundary shape (K19), and five frontend shapes. In a file
+ceilings, crew-log removals outside `eager.paused()`, Event waits a test parks on a thread-pool executor, direct writes of asyncio Tasks or TimerHandles to a ``kiro_crew`` module attribute from a test function (K16), ``pytest.mark.xfail(strict=False)`` overrides (K18), a non-zero numeric literal used as a duration-named keyword argument or as a ``setattr`` value on a duration-named attribute — the production-deadline-as-test-boundary shape (K19), an `update_metadata` or `update_metadata_if` call in a coroutine's own frame (K20, [Async tests](#async-tests)), and five frontend shapes. In a file
 the pinned semgrep reads no line of, it counts the `time` patches the semgrep rule would
 refuse as well: a file over 1,000,000 bytes, or one holding both a lambda with a bare `*`
 (`lambda a, *, b: ...`) and a parenthesized `with (a as b, ...):`, which semgrep 1.78
@@ -278,7 +278,11 @@ thread, so a synchronous helper that ends in a session-file rename
 `async def` test loses to any handle a scanner holds on the destination for a few
 milliseconds (`[WinError 5]` on `sessions/<key>.jsonl`). `member_memory_helpers`'
 `env.bind_session` refuses to run on the loop for this reason; a coroutine awaits
-`env.bind_session_async`, which runs the same writes on a worker thread.
+`env.bind_session_async`, which runs the same writes on a worker thread. The
+flake-pattern ratchet counts an `update_metadata` or `update_metadata_if` call made in
+a coroutine's own frame (K20; a sync helper that calls it is not counted), so a new one
+fails a change; hand the method to
+`await asyncio.to_thread(log.update_metadata, ...)` instead.
 
 A test that drives code to `RecursionError` on purpose must hold the cyclic
 collector off for the walk. Its innermost frames have no headroom, and a gen0
@@ -424,7 +428,8 @@ path, so the crash needs the full shard. The surface is every kill helper on
 `platform_compat`, not only the tree kill: `kill_pid`, `kill_pid_pinned`,
 `kill_pid_async`, `kill_process_group`, `kill_process_tree`,
 `kill_process_tree_pinned`, `kill_process_tree_async`, `kill_popen_tree`,
-`kill_and_reap`, `terminate_and_reap` and `terminate_and_reap_sync`. Pick
+`kill_and_reap`, `terminate_and_reap`, `terminate_and_reap_sync` and
+`run_killing_tree_on_timeout`. Pick
 one of the two spellings
 already in the tree rather than inventing a third: give the mock a pid above
 every supported platform's `pid_max`
@@ -551,8 +556,8 @@ pause -- a loaded Windows xdist worker does -- is split across two claims, and a
 that floods past `max_pending_count` sees fewer rejections than it counted on
 (`overflow_writes() == 2`, not 6). Give that writer a `batch_deadline_seconds` the
 burst cannot outlast, assert the exact buffered and overflow counts, and end the burst
-with `emit.drain_for_shutdown`, which wakes the writer and skips the pause (`flush`
-waits it out). The blocked append's gate must be opened in `finally`: the writer
+with `emit.drain_for_shutdown`, which wakes the writer and skips the pause (so does a
+waiting `flush`, so a flush in the middle of the burst ends the hold early too). The blocked append's gate must be opened in `finally`: the writer
 thread parked in it holds the log handle and with it the unit's write lease, which the
 file's autouse teardown reports as a lease that outlived its test and the next test
 on the worker inherits as an error (`test_crew_log_edge_exhaustion.py`).
@@ -826,7 +831,7 @@ developer's machine rather than the correctness of one suite, so it holds for al
 testpaths. It pins `$XDG_CONFIG_HOME` and the launchd paths, traps the spawn
 funnels against service mutation, pins `KIROCREW_HOME` and the import-time `~/.kiro`
 bindings, scrubs the inherited shell-preload and exported-function variables
-`name_grant` refuses on (`BASH_ENV`/`ENV`/`SHELLOPTS`/`BASHOPTS`, `BASH_FUNC_*` keys,
+`name_grant` refuses on (`BASH_ENV`/`SHELLOPTS`/`BASHOPTS`, `BASH_FUNC_*` keys,
 and the legacy `() {` value spelling — a RHEL-family host inherits `BASH_FUNC_which%%`
 from `which2.sh`, and the refusal outranks every narrower code), redirects
 `tempfile`'s base, and fails the run on residue in the
@@ -1606,6 +1611,8 @@ measures, never above.
   `--deselect` is the wrong tool three ways: it is invisible in the run output, it takes
   the file's other tests with it, and nothing goes red when its reason expires. A
   `skipif` names the capability, on the test that needs it, in the report.
+  `a-ratchet-may-only-tighten` in `AUTOSDE.yaml` says when that guard on a new test is not
+  a loosening.
 
   Measured: eleven files were deselected from every CI backend invocation because a GH
   runner denies `unshare(CLONE_NEWNS)`, which kept **608 tests** — the ops autonomy gate
@@ -4023,7 +4030,9 @@ review finding; the version below is what the lane accepted.
   The first cut gated them (`pytest.skip` when the bash resolves no `jq`), and the GPT
   lane blocked it under `a-ratchet-may-only-tighten`: a newly added `skip` in a file the
   diff otherwise only extends is a loosened ratchet, whatever the spec's capability-gate
-  rule says about a test that ASSERTS a host fact. The remedy is the one the harness
+  rule says about a test that ASSERTS a host fact. (The rule's capability exception does
+  not reach this case: the tests already existed, and `jq` is a tool the harness can
+  supply.) The remedy is the one the harness
   already uses for `gh` and `curl`: a shell FUNCTION in the `BASH_ENV` stub file. `jq()`
   hands its arguments to a twelve-line Python stand-in that implements the three
   invocations the step and the gh stub make (`-Rs .`, `-r '.title'`, `-r '.body // ""'`),
@@ -4234,8 +4243,8 @@ Linux child-process tests verify these mechanics, not native Windows performance
 
 ### Running on a machine with little RAM
 
-**The Linux/Windows budget reserves 3 GiB per worker; the Linux wide-run
-measurements below were 1.8–2.8 GiB. macOS reserves 16 GiB after measured
+**The Linux/Windows budget reserves 5 GiB per worker; the Linux wide-run
+measurements below were 1.8–2.8 GiB, and a host OOM later showed ~4.5 GiB workers. macOS reserves 16 GiB after measured
 14.9–16.1 GiB workers.** Without the budget, `-n auto` would ask for one worker per
 core. In the Linux measurement almost all of the fixed part was *collection*: every
 xdist worker collected every testpath — 106,491 items — at ~1,499 MiB of peak RSS
@@ -4267,9 +4276,10 @@ noise: the same worker slot peaked at 2,771 MiB in all five runs, because the
 `tree_scan_*` xdist groups land together and one of them alone retains ~1.3 GiB of parsed
 source.
 
-That is why `xdist_budget.py` reserves 3 GiB per worker on Linux and Windows,
-and 16 GiB on macOS. The 3 GiB value is ~1.1× the measured Linux worst-case peak at
-`-n 12`, and the worker count where the budget binds is far lower than that. On
+That is why `xdist_budget.py` reserves 5 GiB per worker on Linux and Windows,
+and 16 GiB on macOS. The 5 GiB value is ~1.1× the ~4.5 GiB anonymous RSS per worker that
+the kernel OOM table showed when ~40 workers filled a 184 GiB host with no swap; the
+`-n 12` peak above (2,771 MiB) undercounts workers that run long suites. On
 Linux/Windows, sizing the divisor on a wide-run number would grant 4 workers on an
 8 GiB laptop, whose ~26,600 tests each would then want ~12 GiB between them and swap
 the machine. On macOS, the 16 GiB value prevents four workers measured at roughly
@@ -4310,10 +4320,9 @@ a run to one worker even on larger hosts. The budget in the rootdir conftest wor
 out and clamps `-n auto`, naming the active platform reservation. A Linux/Windows example:
 
 ```
-xdist worker budget: 1 of 10 workers (3.0 GiB free, 16 GiB installed). Each worker
-needs about 3 GiB, mostly to collect the suite. A run this narrow is slow, not
-stuck -- free some memory, run a subset (pytest test/test_thing.py), or pass an
-explicit -n <N> to bypass this budget.
+xdist worker budget: 1 of 10 workers (5.0 GiB free, 16 GiB installed). Each worker
+needs about 5 GiB, mostly to collect the suite. A run this narrow is slow, not
+stuck -- free some memory, or run a subset (pytest test/test_thing.py).
 ```
 
 It bounds the worker count by **two** memory readings, and the split is deliberate:
@@ -4340,7 +4349,8 @@ The knobs, tightest-wins:
 
 | Knob | Effect |
 |---|---|
-| `-n <N>` on the command line | Bypasses the budget entirely. xdist only calls it for `auto`/`logical`. |
+| `-n <N>` on the command line | Skips the memory readings, but still claims N slots from the same host pool (rootdir `pytest_cmdline_main`). Fewer than N free: clamped to what it got, floor 1, with a warning. |
+| `KIROCREW_TEST_SLOTS_BYPASS=1` | Lets an explicit `-n <N>` skip the host pool too. Only for a host you own outright. |
 | `--maxprocesses=<N>` | Clamps *after* the budget, so it can only tighten. |
 | `KIROCREW_MAX_TEST_WORKERS` | Per-run ceiling, default 32. |
 | `PYTEST_XDIST_AUTO_NUM_WORKERS` | xdist's own ceiling. Honoured here, because this hook replaces xdist's default implementation. Kiro Crew seeds it with a memory-aware cap at every agent spawn boundary. |
@@ -4413,6 +4423,13 @@ replaced node), `test/conftest.py`'s `pytest_internalerror` hook prints an
 `xdist run ABANDONED` banner to stderr replaying the crashed workers and the
 tests they were running, so the red stays diagnosable. The run still exits
 non-zero; the banner only preserves the report the crash would otherwise erase.
+A worker can also finish, without crashing, while still assigned work, after a
+shutdown command or its channel closing: xdist then fails `assert not crashitem`
+on an item that never started. The banner names that worker, that item and how
+many selected items the scheduler still queued, and says to re-run the shard;
+that worker's `session_end` progress record carries `channel_closed` to tell the
+two causes apart (other workers' channels close at teardown, so only its own
+record counts).
 
 So any override that still runs MANY tests must carry
 `-n auto --dist loadgroup --max-worker-restart=2`, and keep `-p no:platformdirs`

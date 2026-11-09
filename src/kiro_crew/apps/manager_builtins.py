@@ -29,6 +29,7 @@ from kiro_crew.apps.manager_records import (
     INSTALLED_META_FILENAME,
     AppResult,
     InstalledApp,
+    _is_sidecar_entry,
     _now_iso,
     _read_installed,
     _update_in_progress,
@@ -777,8 +778,8 @@ def register_builtin_apps() -> int:
         if existing is None and name in _adoption_pin_names() and _update_in_progress(name):
             # A hard-killed adoption swap that recovery could not settle: the record's
             # tree, data and secret sit aside. A fresh record here would put a reset
-            # app over them, and a later adoption's stale-copy cleanup would delete
-            # the data, so nothing registers until the files are put back.
+            # app over them, with its data then in two places, so nothing registers
+            # until the files are put back.
             logger.warning(
                 "Not registering builtin %r: an interrupted switch to its repository "
                 "left its files beside %s; restore them before it can run again",
@@ -953,7 +954,7 @@ def detect_orphaned_builtins(*, force_refresh: bool = False) -> set[str]:
     # its record is pending adoption, and teardown would delete what moves.
     pinned = _adoption_pin_names()
     for entry in root.iterdir():
-        if not entry.is_dir():
+        if _is_sidecar_entry(entry.name) or not entry.is_dir():
             continue
         meta = _read_installed(entry.name)
         if (

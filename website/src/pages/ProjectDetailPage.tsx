@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useIsMobile } from '../hooks/useIsMobile'
+import { useReducedMotion } from '../hooks/useReducedMotion';
 import { useNavigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -13,6 +14,8 @@ import { api } from '../api/client';
 import { AlertTriangle, Download, Hourglass, Zap } from 'lucide-react';
 import { Badge } from '../components/ui';
 import ErrorNotice from '../components/ErrorNotice';
+import { RadioChipGroup, radioChip } from '../components/RadioChipGroup';
+import Tablist from '../components/Tablist';
 
 import { i18nT } from '../i18n/t'
 type Tab = 'idea' | 'tasks';
@@ -189,13 +192,28 @@ export default function ProjectDetailPage({ run, onRetry, onRefresh }: Props) {
       <div className={`flex-1 min-w-0 flex flex-col min-h-0 ${isMobile && selected ? 'hidden' : ''}`}>
         {/* Tab bar */}
         <div className="px-4 py-2 border-b border-border flex gap-1 items-center shrink-0">
-          <button onClick={() => setTab('idea')} className={tabCls(tab === 'idea')}>{i18nT('pages.projectDetailPage.idea')}</button>
-          <button onClick={() => setTab('tasks')} className={tabCls(tab === 'tasks')}>{i18nT('pages.projectDetailPage.tasks')}</button>
+          {/* Idea / Tasks switches the content below, so it is a tablist with
+              the open tab marked selected (#32055). One shared subtree, not a
+              panel per tab, which is the case Tablist is for. */}
+          <Tablist<Tab>
+            tabs={[
+              { key: 'idea', label: i18nT('pages.projectDetailPage.idea') },
+              { key: 'tasks', label: i18nT('pages.projectDetailPage.tasks') },
+            ]}
+            value={tab}
+            onChange={setTab}
+            ariaLabel={i18nT('pages.projectDetailPage.view_label')}
+            layoutId="project-detail-tab-indicator"
+          />
           {tab === 'tasks' && !isPlanning && (
             <>
               <span className="mx-1 text-muted">·</span>
-              <button onClick={() => setView('dag')} className={tabCls(view === 'dag')}>{i18nT('pages.projectDetailPage.dag')}</button>
-              <button onClick={() => setView('phased')} className={tabCls(view === 'phased')}>{i18nT('pages.projectDetailPage.phased')}</button>
+              {/* One-of-two layout of the same task list: a radio group, so the
+                  chosen layout is announced and not shown by colour alone. */}
+              <RadioChipGroup className="flex gap-1 items-center" ariaLabel={i18nT('pages.projectDetailPage.layout_label')}>
+                <button type="button" {...radioChip(view === 'dag')} onClick={() => setView('dag')} className={tabCls(view === 'dag')}>{i18nT('pages.projectDetailPage.dag')}</button>
+                <button type="button" {...radioChip(view === 'phased')} onClick={() => setView('phased')} className={tabCls(view === 'phased')}>{i18nT('pages.projectDetailPage.phased')}</button>
+              </RadioChipGroup>
             </>
           )}
           <div className="flex-1" />
@@ -228,9 +246,11 @@ export default function ProjectDetailPage({ run, onRetry, onRefresh }: Props) {
             </Badge>
           )}
           {!isPlanning && (run.task_details || []).length > 0 && (
+            /* `aria-disabled` plus the guard, NOT `disabled`, which leaves the tab
+               order and drops a keyboard user's focus to the page while it runs. */
             <button
-              onClick={() => exportMutation.mutate()}
-              disabled={exportMutation.isPending}
+              onClick={() => { if (!exportMutation.isPending) exportMutation.mutate() }}
+              aria-disabled={exportMutation.isPending || undefined}
               title={i18nT('pages.projectDetailPage.export_this_plan_as_a_yaml_workflow_re_importabl')}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-[13px] rounded border border-border text-muted cursor-pointer transition-all hover:text-accent hover:border-accent ${exportMutation.isPending ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
@@ -317,17 +337,21 @@ export default function ProjectDetailPage({ run, onRetry, onRefresh }: Props) {
 
 function PlanningOverlay() {
   const [dots, setDots] = useState('');
+  // Ticking text is motion too: under reduced motion the line holds still,
+  // and the static copy below it still says the plan is being built.
+  const reduceMotion = useReducedMotion();
   useEffect(() => {
+    if (reduceMotion) return;
     const iv = setInterval(() => setDots(d => d.length >= 3 ? '' : d + '.'), 500);
     return () => clearInterval(iv);
-  }, []);
+  }, [reduceMotion]);
   return (
     <div className="flex items-center justify-center h-full">
       <div className="text-center">
         {/* Static glyph plus a shimmer bar — the ticking dots and the sweep carry
             the "work in flight" signal, so nothing here spins. */}
         <Hourglass size={28} className="text-accent mx-auto mb-4" />
-        <div className="text-accent text-[16px] font-semibold">{i18nT('pages.projectDetailPage.generating_execution_plan')}{dots}</div>
+        <div className="text-accent text-[16px] font-semibold">{i18nT('pages.projectDetailPage.generating_execution_plan')}{reduceMotion ? '' : dots}</div>
         <div className="text-muted text-[13px] mt-1">{i18nT('pages.projectDetailPage.analyzing_task_and_building_step_by_step_plan')}</div>
         <div className="skeleton h-1.5 w-40 rounded-full mx-auto mt-4" aria-hidden="true" />
         <div className="text-muted text-[12px] mt-3">{i18nT('pages.projectDetailPage.the_dag_view_will_appear_once_the_plan_is_ready')}</div>

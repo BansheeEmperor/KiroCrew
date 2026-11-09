@@ -517,6 +517,15 @@ provision_pbs() {
   printf '%s\n' "$dir"
 }
 
+# Remove the precompressed .br/.gz twins of the dashboard's hashed assets from a
+# staged dist ($1). They save transfer time over a tunnel, not on the localhost
+# link the desktop app uses, and the server falls back to the plain file when a
+# twin is missing (dist_file_response._open_variant). They are ~28 MiB per
+# backend, and the universal macOS zip holds two backends under a size gate.
+drop_precompressed_dist() {
+  find "$1/assets" -type f \( -name '*.br' -o -name '*.gz' \) -delete
+}
+
 # Build ONE self-contained backend tree.
 #   $1 = PBS interpreter dir   $2 = output dir   $3 = required Mach-O arch tag
 #        ("" skips the arch gate — used by the non-universal Linux path)
@@ -547,19 +556,21 @@ build_backend() {
     "$out/bin/python3.12" -m pip install --prefer-binary \
     --no-warn-script-location --disable-pip-version-check "$ROOT"
 
-  # The voice extras, in TWO steps.
+  # Each voice provider's dependencies install separately so a recogniser
+  # resolution failure cannot omit the independent cloud transports.
   #
   # They have to be in the bundle at all because `local` is the default
   # speech-to-text provider and nothing in the app can install it later: the
   # pip-invoking endpoint was deliberately removed, so a bundle without them
   # reports the default provider as unavailable with no in-app way to fix it.
   #
-  # Two steps because pip resolves an extra ATOMICALLY, and this bundle is
+  # Separate steps because pip resolves an extra ATOMICALLY, and this bundle is
   # UNIVERSAL on macOS where Intel has no published pywhispercpp wheel. A single
   # `[voice]` install there fails as a whole and omits boto3 and amazon-transcribe
   # with it, taking the `transcribe` provider down alongside the `local` one it has
-  # nothing to do with. So the cloud half goes in first and unconditionally, then
-  # the recogniser is attempted on its own.
+  # nothing to do with. The cloud transports go in unconditionally, then
+  # the recogniser is attempted on its own. Codex remains opt-in and its media
+  # packages load only when selected; a sealed bundle cannot pip-install later.
   #
   # `--only-binary pywhispercpp` (scoped to that one name, so kirocrew itself still
   # installs from this checkout) prevents a surprise CMake/C++ source build. Missing
@@ -569,6 +580,10 @@ build_backend() {
     "$out/bin/python3.12" -m pip install --prefer-binary \
     --no-warn-script-location --disable-pip-version-check \
     "$ROOT[voice-aws]"
+  env PYTHONNOUSERSITE=1 PYTHONPATH= KIROCREW_SKIP_FRONTEND=1 \
+    "$out/bin/python3.12" -m pip install --prefer-binary \
+    --no-warn-script-location --disable-pip-version-check \
+    "$ROOT[voice-codex]"
   if ! env PYTHONNOUSERSITE=1 PYTHONPATH= KIROCREW_SKIP_FRONTEND=1 \
       "$out/bin/python3.12" -m pip install --prefer-binary \
       --only-binary pywhispercpp \
@@ -582,6 +597,12 @@ build_backend() {
     fi
   fi
 
+  # The Feishu channel SDK. Settings offers no install command for this bundle,
+  # and every app update replaces the whole bundle, so it ships here or not at all.
+  env PYTHONNOUSERSITE=1 PYTHONPATH= KIROCREW_SKIP_FRONTEND=1 \
+    "$out/bin/python3.12" -m pip install --prefer-binary \
+    --no-warn-script-location --disable-pip-version-check "$ROOT[feishu]"
+
   # Stage the dashboard dist into the package's static dir.
   sp="$out/lib/python3.12/site-packages"
   install_desktop_decoder "$out/bin/python3.12" "$sp" "$want_arch"
@@ -591,6 +612,7 @@ build_backend() {
   [ -f "$sp/kiro_crew/static/dist/index.html" ] || {
     echo "ERROR: dashboard dist not staged" >&2; exit 1
   }
+  drop_precompressed_dist "$sp/kiro_crew/static/dist"
 
   # Beacon provenance, stamped into the INSTALLED tree (not $ROOT) so a
   # universal build's two backends are each stamped and no state leaks into the
@@ -774,7 +796,7 @@ build_backend_windows() {
   root_uri="$(cd "$ROOT" && "$out/python.exe" -c \
     'import sys; from pathlib import Path; sys.stdout.write(Path.cwd().as_uri())')"
 
-  # The voice extras, in two steps so an independent AWS-provider dependency
+  # The voice providers install separately so independent cloud dependencies
   # cannot be omitted by recogniser resolution. Windows is a supported local-
   # dictation target, so the recogniser is a hard gate. Model weights remain an
   # explicit one-click download after installation.
@@ -793,6 +815,11 @@ build_backend_windows() {
     --only-binary pywhispercpp \
     --no-warn-script-location --disable-pip-version-check \
     "kirocrew[voice] @ $root_uri"
+  # The Feishu channel SDK, for the same reason as in build_backend.
+  env PYTHONNOUSERSITE=1 PYTHONPATH= KIROCREW_SKIP_FRONTEND=1 \
+    "$out/python.exe" -m pip install --prefer-binary \
+    --no-warn-script-location --disable-pip-version-check \
+    "kirocrew[feishu] @ $root_uri"
 
   sp="$out/Lib/site-packages"
   install_desktop_decoder "$out/python.exe" "$sp" ""
@@ -864,11 +891,13 @@ build_backend_windows() {
   # median 12.5 s on a cold file cache. Both hash modes ignore mtime, which is
   # the property this needs; only the re-read is dropped. The posix tree above
   # stays checked-hash: it is a different mechanism (whole tree, codesigned) and
-  # does not show the symptom.
+  # does not show the symptom. lark_oapi is traced too: the Feishu channel
+  # imports its ~11k modules on the gateway loop, and compiling them there on
+  # the first start stalls that loop.
   log "Precompiling Windows gateway startup modules ($(basename "$out"))…"
   env PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH= \
     "$out/python.exe" -s "$ROOT/packaging/precompile_windows.py" \
-    --root "$out" --module kiro_crew.cli_server
+    --root "$out" --module kiro_crew.cli_server --module lark_oapi
 
   echo "    $(basename "$out") size: $(du -sh "$out" 2>/dev/null | cut -f1)"
 }
@@ -1100,9 +1129,9 @@ if [ -n "${KIROCREW_AUTH_SERVER_ALLOWLIST:-}" ]; then
   log "Baking AUTH-SERVER-ALLOWLIST into the app: $AUTH_ALLOWLIST"
 fi
 
-# --- 3b3. Baked EDITION (enterprise only) ------------------------------------
+# --- 3b3. Baked EDITION (lts only) -------------------------------------------
 # The same stamp the backend's kiro_crew/edition.py gets from setup.py:
-# KIROCREW_BUILD_EDITION (`make desktop EDITION=enterprise`). An enterprise build
+# KIROCREW_BUILD_EDITION (`make desktop EDITION=lts`). An LTS build
 # stages $ELECTRON_DIR/EDITION, packed into app.asar by package.json's `files`
 # list and read by website/electron/edition.js, so the app gives its local
 # gateway time for the login and policy checks it runs before binding. An oss
@@ -1110,13 +1139,13 @@ fi
 # build, as setup.py refuses it. Removed on exit with the other baked inputs.
 case "${KIROCREW_BUILD_EDITION:-oss}" in
   oss) ;;
-  enterprise)
+  lts)
     trap 'rm -f "$ELECTRON_DIR/EXTERNALLY-MANAGED" "$ELECTRON_DIR/AUTH-SERVER-ALLOWLIST" "$ELECTRON_DIR/EDITION"' EXIT
-    printf 'enterprise\n' > "$ELECTRON_DIR/EDITION"
-    log "Baking EDITION=enterprise into the app"
+    printf 'lts\n' > "$ELECTRON_DIR/EDITION"
+    log "Baking EDITION=lts into the app"
     ;;
   *)
-    echo "❌ KIROCREW_BUILD_EDITION must be oss or enterprise, not: ${KIROCREW_BUILD_EDITION}" >&2
+    echo "❌ KIROCREW_BUILD_EDITION must be oss or lts, not: ${KIROCREW_BUILD_EDITION}" >&2
     exit 1
     ;;
 esac

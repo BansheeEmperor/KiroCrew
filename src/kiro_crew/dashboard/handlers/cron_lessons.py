@@ -1,7 +1,7 @@
-"""The lesson routes: ``POST``, ``DELETE`` and ``GET /api/lessons``.
+"""The lesson routes: ``POST``, ``PATCH``, ``DELETE`` and ``GET /api/lessons``.
 
-Each route resolves the lesson store its caller may reach, then writes, deletes or
-pages the lessons there; the create path embeds the rule within a bounded wait
+Each route resolves the lesson store its caller may reach, then writes, re-tiers,
+deletes or pages the lessons there; the create path embeds the rule within a bounded wait
 and hands the contradiction sweep to :mod:`.cron_lesson_supersede`.
 
 Served through :mod:`kiro_crew.dashboard.handlers.cron`, which callers and tests import and patch; this module
@@ -30,6 +30,13 @@ from kiro_crew.dashboard.handlers.cron_lesson_supersede import _resolve_and_supe
 from kiro_crew.dashboard.handlers.cron_shared import _sel
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.history import is_incognito_transcript
+from kiro_crew.lesson_events import (
+    LESSON_REMOVED,
+    LESSON_SOURCE_USER,
+    LESSON_UPDATED,
+    emit_lessons_changed,
+    lesson_write_action,
+)
 from kiro_crew.lesson_validation import (
     LESSON_APPLIES_ON_TOPIC,
     LESSON_APPLIES_UNSTATED,
@@ -48,6 +55,7 @@ from kiro_crew.project_scope import (
 from kiro_crew.validation import (
     ALLOWED_LESSON_SCOPES,
     LEARN_ADD_SCHEMA,
+    LEARN_UPDATE_SCHEMA,
     LESSON_LIST_LIMIT,
     LESSON_LIST_LIMIT_MAX,
     WORKSPACE_NAME_RE,
@@ -157,6 +165,15 @@ def _lesson_jsonl_store(
     if scope == "workspace":
         return _get_lessons(state, workspace, session_key=session_key)
     return state.lessons
+
+
+def _is_operator_browser(request: web.Request, session_key: str) -> bool:
+    """The operator's own browser surface: no slot key, positively the dashboard user.
+
+    Only it may name any workspace on the lesson list and write; every other
+    caller is held to its own slot's workspace.
+    """
+    return session_key in ("", "dashboard:ui") and request.get("is_dashboard_user") is True
 
 
 def _load_workspace_lessons(state: DashboardState, workspace: str) -> list[Lesson]:
@@ -467,26 +484,40 @@ async def api_lessons_create(request: web.Request) -> web.Response:
                 state._background_tasks.add(task)
                 task.add_done_callback(state._background_tasks.discard)
     else:
-        # A workspace-scoped write that names no workspace takes the requesting
-        # session's. When that resolves to "default" -- no key, or a key with no
-        # live slot -- the write would land in the GLOBAL file, which every
-        # workspace reads. Refuse it, like the delete route refuses
-        # scope='workspace' without a name, rather than widen its reach.
-        if (
-            not _lesson_silo
-            and scope == "workspace"
-            and not cleaned.get("workspace")
-            and _get_active_workspace(state, sk) == "default"
-        ):
-            return web.json_response(
-                {
-                    "error": "scope='workspace' requires a workspace name: this "
-                    "session has no workspace of its own; use scope='global' or "
-                    "name the workspace",
-                    "code": "workspace_required",
-                },
-                status=400,
-            )
+        named = cleaned.get("workspace")
+        if not _lesson_silo and scope == "workspace":
+            own = _get_active_workspace(state, sk)
+            # A workspace-scoped write that names no workspace takes the requesting
+            # session's. When that resolves to "default" -- no key, or a key with no
+            # live slot -- the write would land in the GLOBAL file, which every
+            # workspace reads. Refuse it, like the delete route refuses
+            # scope='workspace' without a name, rather than widen its reach.
+            if not named and own == "default":
+                return web.json_response(
+                    {
+                        "error": "scope='workspace' requires a workspace name: this "
+                        "session has no workspace of its own; use scope='global' or "
+                        "name the workspace",
+                        "code": "workspace_required",
+                    },
+                    status=400,
+                )
+            # A named workspace is honoured only when it is the caller's own or the
+            # caller is the operator's browser: any other session would write
+            # another workspace's file.
+            if named and named != own and not _is_operator_browser(request, sk):
+                error = f"workspace '{named}' is not this session's workspace"
+                _sel().log_api_access(
+                    caller=sk,
+                    operation="learn_add",
+                    outcome="denied",
+                    source="dashboard",
+                    resources="workspace_not_owned",
+                    error=error,
+                )
+                return web.json_response(
+                    {"error": error, "code": "workspace_not_owned"}, status=403
+                )
         lesson = Lesson(
             rule=rule,
             category=category,
@@ -496,9 +527,7 @@ async def api_lessons_create(request: web.Request) -> web.Response:
             ts=datetime.now(timezone.utc).isoformat(),
             written_by=written_by,
         )
-        store = _lesson_jsonl_store(
-            state, _lesson_silo, scope, cleaned.get("workspace"), session_key=sk
-        )
+        store = _lesson_jsonl_store(state, _lesson_silo, scope, named, session_key=sk)
         # save_or_enrich, not save: a re-submit of a stored rule carrying a new
         # NOT-clause has to attach it rather than be skipped as a duplicate.
         # Off the loop because it reads the file and rewrites it whole -- the
@@ -556,6 +585,13 @@ async def api_lessons_create(request: web.Request) -> web.Response:
     # refresh on a no-op re-submit costs a redundant list fetch, a missed one shows
     # deleted data.
     state.push_refresh("lessons")
+    # The app-facing signal is narrower than the refresh above: it fires only when
+    # the store changed, and only for the global store an app token's read
+    # resolves to, so a write into a crew's or crewmate's silo stays silent.
+    if not _lesson_silo:
+        change = lesson_write_action(str(outcome), bool(superseded))
+        if change is not None:
+            emit_lessons_changed(change, LESSON_SOURCE_USER)
     # Newest wins, and everyone is told: a write that replaced stored lessons is
     # audited with who changed what, and in a shared Crew the session gets a
     # notice and every collaborator a frame. Never fails the write.
@@ -811,7 +847,92 @@ async def api_lessons_delete(request: web.Request) -> web.Response:
         )
     if ok:
         state.push_refresh("lessons")
+        # Global store only, for the reason the create route gives.
+        if not _lesson_silo:
+            emit_lessons_changed(LESSON_REMOVED, LESSON_SOURCE_USER)
     return web.json_response({"ok": ok})
+
+
+async def api_lessons_update(request: web.Request) -> web.Response:
+    """PATCH /api/lessons — change one lesson's ``applies`` tier in place.
+
+    Gated like the create route, since a re-tier changes what later sessions are
+    given. Only a vector store holding the lessons can do it; where they live in the
+    JSONL fallback the route answers ``unsupported`` and a re-tier stays a delete
+    plus an add.
+    """
+    state: DashboardState = request.app["state"]
+    sk = request.headers.get("X-Session-Key", "")
+    refusal = await _recognize_session(
+        state, sk, "lessons.update", blocks_persisted_mode=is_incognito_transcript
+    )
+    if refusal is not None:
+        return refusal
+    cfg = await asyncio.to_thread(KiroCrewConfig.load)
+    writes_off = memory_writes_off_key(cfg.memory)
+    if _is_restricted_session(state, request):
+        code = "restricted_session"
+    elif writes_off == "memory.persistence_enabled":
+        code = "persistence_disabled"
+    elif writes_off is not None:
+        code = "writes_disabled"
+    else:
+        code = ""
+    if code:
+        _sel().log_api_access(
+            caller=sk,
+            operation="lessons.update",
+            outcome="denied",
+            source="dashboard",
+            resources=code,
+        )
+        reason = (
+            "Memory writes are not allowed in this session mode."
+            if code == "restricted_session"
+            else f"Persistent memory writes are disabled ({writes_off} is false)."
+        )
+        return web.json_response({"error": reason, "code": code}, status=403)
+    body, body_err = await read_bounded_json(request)
+    if body_err is not None:
+        return body_err
+    assert body is not None  # read_bounded_json returns (dict, None) on success
+    known = {f.name for f in LEARN_UPDATE_SCHEMA.fields}
+    try:
+        cleaned = validate_tool_args(
+            {k: v for k, v in body.items() if k in known}, LEARN_UPDATE_SCHEMA
+        )
+    except ValidationError as exc:
+        return web.json_response({"error": str(exc), "code": "validation_error"}, status=400)
+    _lesson_silo, refusal = await resolve_lesson_memory_store(request, state, "lessons.update")
+    if refusal is not None:
+        return refusal
+    memory_refusal = await _prepare_member_lesson_store(_lesson_silo)
+    if memory_refusal is not None:
+        return memory_refusal
+    _lesson_mem = (
+        await asyncio.to_thread(ContextBuilder.get_memory_for, memory_store=_lesson_silo)
+        if _lesson_silo
+        else _get_memory(state)
+    )
+    vs = _lesson_mem.vector_store
+    # A V1 vector store with no decodable lesson leaves the lessons in the JSONL
+    # file, which is what the list then shows.
+    if vs is None or (
+        vs.algorithm_version != "v2" and not await asyncio.to_thread(vs.has_any_decodable_lesson)
+    ):
+        return web.json_response({"ok": False, "outcome": "unsupported"})
+    outcome = await asyncio.to_thread(
+        vs.update_lesson_applies,
+        cleaned["rule"],
+        cleaned.get("repo_scope"),
+        current=cleaned["current"],
+        applies=cleaned["applies"],
+    )
+    if outcome == "updated":
+        state.push_refresh("lessons")
+        if not _lesson_silo:
+            emit_lessons_changed(LESSON_UPDATED, LESSON_SOURCE_USER)
+    return web.json_response({"ok": outcome in ("updated", "unchanged"), "outcome": outcome})
 
 
 # ``LESSON_LIST_LIMIT`` / ``LESSON_LIST_LIMIT_MAX`` (the ``GET /api/lessons``
@@ -926,7 +1047,7 @@ async def api_lessons(request: web.Request) -> web.Response:
         return page
     limit, offset = page
 
-    def _page_body(data: list[dict], total: int) -> web.Response:
+    def _page_body(data: list[dict], total: int, **extra: str) -> web.Response:
         return web.json_response(
             {
                 "lessons": data,
@@ -934,11 +1055,13 @@ async def api_lessons(request: web.Request) -> web.Response:
                 "truncated": len(data) < total,
                 "limit": limit,
                 "offset": offset,
+                **extra,
             }
         )
 
     # Block lesson reads only for temporary sessions (blocks_reads=True).
     # Incognito sessions can read lessons (memory context is already injected).
+    # The empty page is marked so a reader can tell "withheld" from "none saved".
     if _blocks_reads_session(state, request):
         sk = request.headers.get("X-Session-Key", "")
         _sel().log_api_access(
@@ -948,7 +1071,7 @@ async def api_lessons(request: web.Request) -> web.Response:
             source="dashboard",
             resources=sk,
         )
-        return _page_body([], 0)
+        return _page_body([], 0, lessons_withheld="memory_reads_disabled")
     workspace = request.query.get("workspace")
 
     def _safe_lesson(
@@ -1122,13 +1245,13 @@ async def api_lessons(request: web.Request) -> web.Response:
             (le, ("global", None)) for le in rows
         ]
         if not _lesson_silo:
-            # Merge global + workspace-scoped lessons. A named workspace wins; a
-            # session sees only its own slot's workspace. The all-workspaces
-            # union -- every configured workspace's rows, so each one stays
-            # visible and deletable from the operator's Memory tab -- is for the
-            # operator's own BROWSER surface ONLY: no key (or the shared
-            # ``dashboard:ui`` key, which names no slot) AND positively
-            # authenticated as the dashboard user.
+            # Merge global + workspace-scoped lessons. A session sees only its
+            # own slot's workspace, whatever ``?workspace=`` it names. Naming one,
+            # and the all-workspaces union -- every configured workspace's rows,
+            # so each one stays visible and deletable from the operator's Memory
+            # tab -- are for the operator's own BROWSER surface ONLY: no key (or
+            # the shared ``dashboard:ui`` key, which names no slot) AND
+            # positively authenticated as the dashboard user.
             #
             # ``is_dashboard_user`` is set by the token-auth middleware to
             # ``not app`` on every path that reaches a mixed-internal route
@@ -1142,13 +1265,13 @@ async def api_lessons(request: web.Request) -> web.Response:
             # reaches the union. That keeps workspace data isolated: only the
             # operator's own browser sees every workspace.
             sk = request.headers.get("X-Session-Key", "")
-            if workspace:
+            if not _is_operator_browser(request, sk):
+                union = [_get_active_workspace(state, sk)]
+            elif workspace:
                 union = [workspace]
-            elif sk in ("", "dashboard:ui") and request.get("is_dashboard_user") is True:
+            else:
                 cfg = await asyncio.to_thread(KiroCrewConfig.load)
                 union = sorted(cfg.workspaces)
-            else:
-                union = [_get_active_workspace(state, sk)]
             for ws in union:
                 if ws == "default":
                     continue
@@ -1188,5 +1311,8 @@ async def api_lessons(request: web.Request) -> web.Response:
 # member's internal call is refused before it runs. These verify and scope
 # their own caller instead.
 guard_owner_surface_routes(
-    globals(), member_scoped=frozenset({"api_lessons", "api_lessons_create", "api_lessons_delete"})
+    globals(),
+    member_scoped=frozenset(
+        {"api_lessons", "api_lessons_create", "api_lessons_delete", "api_lessons_update"}
+    ),
 )

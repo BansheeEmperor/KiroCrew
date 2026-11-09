@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from kiro_crew.dashboard.slot_preparing import is_preparing
+from kiro_crew.dashboard.slot_preparing import is_preparing, preparing_caption
 from kiro_crew.history_schema import transcript_sort_key
 from kiro_crew.safety_override import safety_override, yolo_policy_permits
 from kiro_crew.session_lifecycle import STOP_DECLINED_ESCALATION_SECS
@@ -31,6 +31,27 @@ def summary_rows(slot: Any) -> list[Any]:
     if getattr(slot, "window_pending", False) is True:
         return slot.sidebar_messages()
     return slot.messages
+
+
+CLEAR_COMMAND = "/clear"
+
+
+def is_clear_command_row(msg: Any) -> bool:
+    """Whether *msg* is a user row that typed ``/clear``.
+
+    Matches the runner's own test (``chat_turn/slash_commands.py``): the first
+    word of the message, case-insensitive. The user row is the boundary because
+    it is durable and every harness writes it, while the confirmation row's text
+    differs per harness and a native clear empties only the in-memory window, so
+    a restore brings the earlier rows back.
+    """
+    if not isinstance(msg, dict) or msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if not isinstance(content, str):
+        return False
+    words = content.split(maxsplit=1)
+    return bool(words) and words[0].lower() == CLEAR_COMMAND
 
 
 def stop_declined_armed(slot: Any, now: float | None = None) -> bool:
@@ -187,6 +208,14 @@ class SlotProjection:
         parse_budget = max_links * 64
         for msg in reversed(summary_rows(slot)):
             if len(found) >= max_links or parse_budget <= 0:
+                break
+            # A ``/clear`` starts the session over: a change or issue named
+            # before it belongs to the dropped conversation, so its chip goes
+            # with it. The rows stay in the transcript; only the derivation
+            # stops at the boundary. Unlike the plan pill, which resets only on
+            # a clear that ran, the boundary is the typed ``/clear`` row, so a
+            # clear that was queued or refused also drops the earlier chips.
+            if is_clear_command_row(msg):
                 break
             if not isinstance(msg, dict) or msg.get("role") in non_durable_roles:
                 continue
@@ -527,7 +556,8 @@ class SlotProjection:
             "instance_id": slot.instance_id,
             "row_identity": resolved_row_identity(slot),
             "artifact": slot._artifact,
-            "messages": len(rows),
+            # Durable rows only, like ``last_ts``: the save path keeps no other row.
+            "messages": sum(1 for message in rows if message.get("role") not in transient_roles),
             # A turn waiting in fair admission is still in flight, so Stop
             # stays available; ``admission_queued`` says it has not started.
             "running": turn_in_flight,
@@ -551,6 +581,11 @@ class SlotProjection:
             # reason as `compacting`: it must not make the slot look busy to
             # sends or queueing, only show the chat's working indicator.
             "preparing": is_preparing(slot),
+            # What is being prepared, built by the gateway, and the language
+            # it is written in. A client whose UI language differs, or a ""
+            # caption, shows its own generic caption.
+            "preparing_text": preparing_caption(slot)[0],
+            "preparing_lang": preparing_caption(slot)[1],
             # A cooperative Stop was declined moments ago (the session was
             # compacting) and the next press escalates to a force stop. Read
             # with the same window the stop route uses, so the button's hint and
@@ -568,6 +603,9 @@ class SlotProjection:
             "stop_state": slot._stop_state,
             "wait_state": slot._wait_state,
             "created": slot.created_at,
+            # The slot object's never-persisted id: a failed close's restore keeps
+            # it, a reopen under the same key builds a new object with a new one.
+            "incarnation": slot._dashboard_card_identity,
             "last_ts": last_ts,
             "last_turn_ts": last_turn_ts,
             "last_message": last_msg,

@@ -67,10 +67,11 @@ class SessionConfig:
             "still ends it. On the kiro-cli or KAS backend, a Kiro sign-out from the dashboard "
             "ends it at once, whatever account it signed in with. After any other switch or "
             "sign-out of the Kiro account it signed in with, the next dashboard chat turn ends "
-            "it, and so does the next agent cron run unless Kiro Crew then cannot tell which "
+            "it, and so does the next session start or reuse elsewhere, such as an agent cron "
+            "run, a channel reply or a task step, unless Kiro Crew then cannot tell which "
             "account is signed in, as with a social login. A session that "
             "is mid-turn then ends later instead, when its next turn starts or at a later "
-            "dashboard chat turn or agent cron run. At most 10 keys are kept.",
+            "dashboard chat turn or session start. At most 10 keys are kept.",
         ),
     )
     empty_response_auto_continue: bool = field(
@@ -443,9 +444,8 @@ class KiroCrewAgentConfig:
             "Tool stall hard cap override (s)",
             "Per-agent override for watchdog.tool_stall_hard_cap_secs on sessions "
             "running this agent. 0 inherits watchdog.tool_stall_hard_cap_secs. Applies "
-            "to UNKNOWN verdicts and to an opaque MCP tool whose only WORKING "
-            "evidence is movement in the runtime's process tree; every other "
-            "WORKING session is never acted on.",
+            "to UNKNOWN verdicts and to the WORKING readings that key bounds; every "
+            "other WORKING session is never acted on.",
         ),
     )
     # Per-agent compaction threshold. Same empty-inherits convention as the
@@ -721,6 +721,11 @@ class ResolvedBindings:
     # Revision observed before resolution: "" means no protected record;
     # None means no observation was made. Only automatic publication uses it.
     selection_revision: str | None = None
+    # For a ``member`` record: the agent a NEW chat with its member runs now
+    # (``member_template_id``), "" for any other session. It differs from
+    # ``kiro_agent`` once the member is set to another agent than the record
+    # keeps, which the chat then tells its user; this turn never runs it.
+    new_chat_agent: str = ""
 
     def same_dispatch_binding(self, other: "ResolvedBindings") -> bool:
         """Whether two resolutions name the SAME dispatch target.
@@ -741,6 +746,7 @@ class ResolvedBindings:
         from ``memory_store_name`` plus global config shared by both sides).
         ``execution_context`` carries the admitted session's identity and mode;
         session selection checks those separately before comparing these targets.
+        ``new_chat_agent`` is what another chat would run, not this one's target.
         """
         return (
             self.kiro_agent == other.kiro_agent

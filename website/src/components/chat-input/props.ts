@@ -125,6 +125,8 @@ export interface ChatInputProps {
   /** How many uploads `onCancelUpload` aborts. Above one, the cancel control's
    *  label names the count, since pressing it stops every one of them. */
   uploadCount?: number
+  /** The slot those uploads run in; their progress shows beside the cancel control. */
+  uploadSlot?: string | null
   /** Pending file paths (images + non-images) for preview strip */
   pendingFiles?: string[]
   /** Pending folder references for the preview strip: RELATIVE paths with trailing slash, derived from `@rel/` composer tokens (a path reference handed to the agent, not an upload) */
@@ -235,6 +237,13 @@ export interface ChatInputProps {
    * one that costs money. */
   modelIsJevRouted?: boolean
   /**
+   * The session's harness when it is not this install's own: selection-
+   * capabilities' `models_backend` (config spelling, e.g. `'claude'`), which the
+   * server sets only then (`own_models_backend`; Kiro CLI and KAS count as one).
+   * The model chip draws that harness's mark before the model, named in its
+   * tooltip (`Runs on Claude Code`). Unset: the chip is unchanged. */
+  harnessBackend?: string
+  /**
    * Picker openers (agent, model, project, and `onSessionControlClick` below).
    * Each hands the host the chip's click-time rect AND the chip element itself:
    * the host owns the picker's portal and must keep it glued to the chip while
@@ -283,6 +292,8 @@ export interface ChatInputProps {
   }[]
   onSessionControlClick?: (key: string, rect: DOMRect, trigger?: HTMLElement) => void
   contextPct?: number
+  /** The slot has no context reading yet: the meter says so instead of 0%. */
+  contextUnknown?: boolean
   contextUsedTokens?: number
   contextWindowTokens?: number
   derivePctFromUsed?: boolean
@@ -316,6 +327,10 @@ export interface ChatInputProps {
    * component keeps working, it just gets the neutral wording.
    */
   continueIsRecovery?: boolean
+  /** Queue cards restored from before a gateway restart. Resume runs only the
+   *  interrupted turn and leaves them for the user to send, so while Resume is
+   *  offered the placeholder says how many wait. */
+  restoredQueueCount?: number
   onContinue?: () => void
   /** True while a continue request is in flight. */
   continuing?: boolean

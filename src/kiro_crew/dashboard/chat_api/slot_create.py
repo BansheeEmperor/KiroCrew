@@ -49,7 +49,7 @@ if TYPE_CHECKING:
         effective_session_key,
         folder_principal,
         is_owner_dashboard_request,
-        is_sensitive_path,
+        is_sensitive_canonical_path,
         logger,
         members_mod,
         owner_start_priority,
@@ -146,11 +146,13 @@ async def _birth_default_project(cfg: KiroCrewConfig | None, workspace: str) -> 
     def resolve() -> str:
         if isinstance(cfg_proj, str) and cfg_proj:
             resolved = os.path.realpath(os.path.expanduser(cfg_proj))
+            # *resolved* is canonical, so the canonical gate judges it: it answers
+            # inline off the loop, where a resolver stall cannot read as a match.
             # A configured default that overlaps the data home would be refused
             # at spawn anyway, so it is skipped here like a sensitive path.
             if (
                 os.path.isdir(resolved)
-                and not is_sensitive_path(resolved)
+                and not is_sensitive_canonical_path(resolved)
                 and voice_runtime_workspace_conflict(resolved) is None
             ):
                 return resolved
@@ -175,6 +177,7 @@ async def _check_new_slot_assignment(
     """
     from kiro_crew.dashboard.chat_persistence import (
         _member_private_selection,
+        _missing_member_database_repair,
         member_store_ownership_holds,
     )
     from kiro_crew.execution_context import resolve_member_execution
@@ -182,8 +185,12 @@ async def _check_new_slot_assignment(
 
     if agent_kind != "template":
         selected, store = _member_private_selection(agent, cfg)
-        if store and not await asyncio.to_thread(
-            member_store_ownership_holds, cfg, selected, store
+        # A deleted memory.db the assignment's pin repairs is not a refusal here.
+        if (
+            store
+            and not await asyncio.to_thread(member_store_ownership_holds, cfg, selected, store)
+            and await asyncio.to_thread(_missing_member_database_repair, cfg, selected, store)
+            is None
         ):
             raise UnknownMemoryStore(
                 f"Bot {selected!r} does not own its private memory store; " "no session was created"
@@ -475,6 +482,23 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                 validate_memory_files=False,
                 selection_kind=agent_kind,
             )
+            from kiro_crew.config.loader_snapshots import rescan_before_refusal
+
+            if (
+                agent_kind != "member"
+                and not bindings.requested_resolved
+                and await rescan_before_refusal()
+            ):
+                # The snapshot may lack a template whose file is on disk (a
+                # member comes from the config just loaded). The staleness check
+                # below covers the extra await.
+                bindings = await asyncio.to_thread(
+                    resolve_agent_bindings,
+                    cfg,
+                    agent,
+                    validate_memory_files=False,
+                    selection_kind=agent_kind,
+                )
             workspace = _workspace_name_for_dir(cfg, bindings.workspace_dir)
             if agent_kind and not bindings.requested_resolved:
                 # A stated namespace never falls back to whoever answers by
@@ -590,9 +614,9 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     # wait. The state-owned 10 ms handoff moves its coalesced full-list frame past
     # the response. Only known request keys may qualify; metadata-bearing,
     # app-owned, mode-specific and nonpersistent creates remain
-    # synchronous. Errors before a successful handoff retain request-visible
-    # publication semantics; delayed publication failures are logged and retried
-    # once by the guarded callback.
+    # synchronous. Without a successful handoff the flush runs at block exit; a
+    # delayed publication failure is logged and retried once by the guarded
+    # callback.
     defer_plain_create_broadcast = bool(
         set(body).issubset(_DEFERRED_PLAIN_CREATE_KNOWN_KEYS)
         and is_new_slot
@@ -626,6 +650,18 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
             return web.json_response(
                 {"error": "invalid app agent owner", "code": "invalid_app_agent_owner"},
                 status=400,
+            )
+        # A History delete in flight unlinks the transcript a slot minted now
+        # would write; refuse retryably, as send does, before charging a create.
+        if (
+            is_new_slot
+            and _requested_key
+            and state.conversation_log is not None
+            and state.conversation_log.delete_in_flight(_history_key_for(_requested_key))
+        ):
+            return web.json_response(
+                {"error": "this session is being deleted; try again", "code": "delete_in_flight"},
+                status=409,
             )
         # Charge only a new allocation, with no await between the check and mint.
         if is_new_slot:
@@ -986,21 +1022,13 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         # Persist INSIDE the suspension, ahead of the coalesced broadcast, the
         # same ordering `session_control_parts/session_create.py`'s create span uses ("the whole
         # allocation-to-persist span runs under `suspend_slots_push`", so "a
-        # slot whose birth write fails is never broadcast at all"). Two paths
-        # mint a slot through this context manager; leaving the durable write
-        # outside it is what makes the failure below reachable:
-        #
-        # `suspend_slots_push`'s `__exit__` flushes the owed push, and on the
-        # coalescing window's LEADING edge that flush broadcasts synchronously
-        # (`state.push_slots_update`). An exception there — a non-serializable
-        # value reaching `json.dumps` is the evidenced shape —
-        # escapes `__exit__`, so with the write out here it skipped a metadata
-        # mutation the request had already acknowledged: this `force=True` save
-        # is the ONLY durable record of a recreate's folder filing or pinned
-        # title (see `_save_slot_to_history`'s message-less merge), and the slot
-        # itself survives in memory, so nothing later reconciles the two. Every
-        # client repairs a dropped FRAME on its next read; none of them repairs
-        # a write that never happened.
+        # slot whose birth write fails is never broadcast at all"). This
+        # `force=True` save is the ONLY durable record of a recreate's folder
+        # filing or pinned title (see `_save_slot_to_history`'s message-less
+        # merge), so it lands before `__exit__` publishes anything; a broadcast
+        # that fails there is logged and the create still answers success.
+        # Every client repairs a dropped FRAME on its next read; none of them
+        # repairs a write that never happened.
         #
         # The cost this ordering accepts, named by the comment it replaces: the
         # suspension is process-wide, so other clients' slot updates coalesce

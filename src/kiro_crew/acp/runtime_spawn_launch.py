@@ -17,13 +17,14 @@ Instance fields written: ``_agent``, ``_agent_capabilities``, ``_agent_version``
 ``_native_launch_sources``, ``_native_launch_view_alias``, ``_native_skill_projection``,
 ``_pid``, ``_process``, ``_process_instance``, ``_process_tree_confirmed_dead``,
 ``_prompt_capabilities``, ``_reader_task``, ``_sandbox_cleanup``, ``_scope_unit``,
-``_skill_projection_generation``, ``_spawn_monotonic``, ``_spawn_skill_projection``,
-``_spawn_start_token``, ``_start_time``, ``_stderr_task``, ``_tool_search_wire``.
+``_skill_projection_generation``, ``_spawn_agent_env``, ``_spawn_monotonic``,
+``_spawn_skill_projection``, ``_kas_telemetry_sent``, ``_spawn_start_token``, ``_start_time``, ``_stderr_task``,
+``_tool_search_wire``.
 
 ``_with_mcp_sign_in_storage`` (a plain function handed the runtime) also writes
 ``_mcp_secret_server``.
 
-Instance fields read: ``_acp_backend``, ``_extra_env``, ``_launch_agent``, ``_member_context``,
+Instance fields read: ``_acp_backend``, ``_extra_env``, ``_harness_pin``, ``_launch_agent``, ``_member_context``,
 ``_model``, ``_native_skill_projection_enabled``, ``_refuse_over_ceiling_launch``, ``_sandbox_mode``, ``_scratch_dir``, ``_shared_scratch``, ``_tool_search``,
 ``_work_dir``.
 """
@@ -40,7 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 
 from kiro_crew import agent_scratch, member_essential_context, platform_compat
-from kiro_crew.acp import kas_secret_storage
+from kiro_crew.acp import kas_cli_settings, kas_secret_storage
 from kiro_crew.acp._dispatch import agent_version_from_init
 from kiro_crew.acp.agent_env import agent_env_overlay
 from kiro_crew.acp.client import (
@@ -57,7 +58,7 @@ from kiro_crew.acp.launch import LaunchRequest, LaunchTools, launch
 from kiro_crew.acp.runtime_process_tree import ChildRecord, _kill_escaped_children
 from kiro_crew.acp.runtime_tree_kill import _prune_dead_descendants
 from kiro_crew.acp.session_handle import AcpRequestTimeout, AcpRuntimeError, AcpRuntimeOverloaded
-from kiro_crew.acp.types import ACP_BACKEND_KIRO
+from kiro_crew.acp.types import ACP_BACKEND_KAS, ACP_BACKEND_KIRO
 from kiro_crew.agent import ensure_agent_materialized
 from kiro_crew.agent_sdk.backends import spawn_delegates_to_internal_sandbox
 from kiro_crew.agent_sdk.drivers import acp as acp_driver
@@ -322,6 +323,7 @@ async def _resolve_spawn_plan(self: AcpRuntime) -> SpawnPlan:
             home=Path.home(),
             sandbox_mode=self._sandbox_mode,
             member_context=self._member_context,
+            harness_pin=self._harness_pin,
         )
     )
     # The ONE derived-spec gate on this path, and the one host-level gate that is
@@ -643,6 +645,8 @@ async def _spawn_admitted(self: AcpRuntime) -> None:
     # spec read is the generation the child will load. Every other host reads
     # its constant directly: no new await, no new step on that path.
     client_capabilities = self._harness.client_capabilities
+    # Set by the handshake below when it read agent.env; None lets launch read it.
+    self._spawn_agent_env = None
     if self._harness.client_meta_settings:
         client_capabilities = await self._handshake_client_capabilities()
 
@@ -763,6 +767,7 @@ async def _spawn_admitted(self: AcpRuntime) -> None:
             backend=self._acp_backend,
             sandbox_mode=self._sandbox_mode,
             extra_env=self._extra_env,
+            agent_env=self._spawn_agent_env,
             scratch_label="runtime",
             env_before_scrub=_env_before_scrub,
             env_after_marker=_env_after_marker,
@@ -1056,6 +1061,7 @@ async def _spawn_admitted(self: AcpRuntime) -> None:
         from kiro_crew.agent import require_unchanged_derived_spec
 
         await asyncio.to_thread(require_unchanged_derived_spec, self._derived_spec_snapshot)
+        await _switch_off_mcp_for_toolless_spawn(self)
         self._initialized = True
         # The scope unit name is logged beside the PID because it is the only
         # durable half of the join. An OOM report or ``systemctl`` listing
@@ -1231,6 +1237,18 @@ async def _handshake_client_capabilities(self: AcpRuntime) -> dict[str, Any]:
     """
     base = self._harness.client_capabilities
     base = await _with_mcp_sign_in_storage(self, base)
+    if self._harness.client_meta_settings:
+        # KAS takes the opt-out only at initialize. It is judged on the child's own
+        # environment, in launch's order: the gateway's, agent.env, then extra_env.
+        # The agent.env snapshot read here is the one launch applies.
+        self._spawn_agent_env = await asyncio.to_thread(agent_env_overlay)
+        telemetry_on = await asyncio.to_thread(
+            kas_cli_settings.kiro_cli_telemetry_enabled,
+            self._work_dir,
+            {**os.environ, **self._spawn_agent_env, **self._extra_env},
+        )
+        base = kas_cli_settings.with_telemetry_opt_out(base, telemetry_on)
+        self._kas_telemetry_sent = telemetry_on
     if self._tool_search is None:
         return base
     spec = await asyncio.to_thread(self._projected_spawn_spec)
@@ -1267,6 +1285,52 @@ def _known_server_tool_names(server: str) -> list[str] | None:
     from kiro_crew.acp.kas_permissions import cached_mcp_tool_names
 
     return cached_mcp_tool_names(server)
+
+
+#: KAS's extension notification that switches its whole MCP subsystem on or off
+#: for the process. Sent before the first ``session/new``, nothing is started.
+KAS_MCP_TOGGLE_METHOD = "_kiro/mcp/toggle"
+
+
+async def _switch_off_mcp_for_toolless_spawn(runtime: AcpRuntime) -> None:
+    """Tell a KAS process spawned for a tool-less agent to start no MCP server.
+
+    KAS starts every server in the user's and the workspace's ``mcp.json`` for
+    each process, whatever the agent says: ``includeMcpJson: false`` only hides
+    their tools. So each background one-liner and memory-consolidation run on
+    ``kirocrew-lite`` started a fresh copy of every such server, and a server that
+    keeps an OAuth sign-in in memory opened a browser sign-in each time.
+
+    Only when the spec this process will put on the wire mounts nothing
+    (:func:`~kiro_crew.acp.client_mcp_array.spec_is_toolless`); such an agent can
+    call no MCP tool, so nothing it could use is switched off. Any other agent, any
+    other backend, or a spec that cannot be read keeps today's behaviour. A failed
+    send is logged and left alone, as without this step.
+    """
+    if runtime._acp_backend == ACP_BACKEND_KAS:
+        await _send_mcp_off_if_toolless(runtime)
+
+
+async def _send_mcp_off_if_toolless(runtime: AcpRuntime) -> None:
+    """The KAS half of :func:`_switch_off_mcp_for_toolless_spawn`."""
+    from kiro_crew.acp.client_mcp_array import spec_is_toolless
+
+    try:
+        spec = await asyncio.to_thread(runtime._projected_spawn_spec)
+    except Exception:
+        logger.debug("AcpRuntime: spawn spec unreadable; MCP left on", exc_info=True)
+        return
+    if not spec_is_toolless(spec):
+        return
+    try:
+        await runtime.send_notification(KAS_MCP_TOGGLE_METHOD, {"enabled": False})
+    except Exception:
+        logger.warning("AcpRuntime: could not switch MCP off for a tool-less agent", exc_info=True)
+        return
+    logger.info(
+        "AcpRuntime: agent=%s mounts no tool; MCP servers are off for this process",
+        runtime._agent or "<none>",
+    )
 
 
 async def _with_mcp_sign_in_storage(runtime: AcpRuntime, base: dict[str, Any]) -> dict[str, Any]:

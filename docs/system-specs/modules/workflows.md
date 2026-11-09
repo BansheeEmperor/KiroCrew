@@ -60,12 +60,15 @@ intra-package imports per module, so the direction cannot drift:
 __init__, validate, dsl, schema, events, registry, store,
 agent_exec, agent_pool, preview   (leaves: no sibling imports, or __init__ only)
 library                         (definition persistence; may import store)
+update_from_run                 (run-to-revision update; may import library, validate, registry;
+                                 handed the service, never imports it)
     ↑
 context      (may import: __init__, validate)
     ↑
 runner       (may import: __init__, validate, dsl, events, context, schema, registry)
     ↑
-service      (may import: validate, registry, runner, agent_exec, agent_pool, store, library, events)
+service      (may import: validate, registry, runner, agent_exec, agent_pool, store, library, events,
+              update_from_run)
 ```
 
 The scan counts only relative sibling imports (`from .sib import …`, level 1).
@@ -132,7 +135,7 @@ run_id`.
 ```python
 async def agent(
     self, prompt: str, *, label=None, phase=None, schema=None, model=None,
-    agent=None, effort=None, cwd=None, session=None, nudge=None,
+    agent=None, effort=None, cwd=None, session=None, nudge=None, backend=None,
 ) -> AgentResult
 ```
 
@@ -163,9 +166,21 @@ Semantics, from `runner._RunContext.agent`:
   `MAX_AGENT_ERROR_CHARS` = 500, no traceback).
 
 `label`, `phase`, `schema`, `model`, `agent`, `effort`, `cwd`, `session` and
-`nudge` are all passed to the injected `agent_fn` in one `opts` dict. The shipped
-adapters read `session`, `agent`, `model`, `cwd` and `effort`; `label` and `phase`
-are consumed by the runner for the event stream; `schema` is consumed by the runner.
+`nudge` are all passed to the injected `agent_fn` in one `opts` dict, and `backend`
+joins them only when the call names one, so a call without it keeps the fingerprint
+it had. The shipped adapters read `session`, `agent`, `model`, `cwd`, `effort` and
+`backend`; `label` and `phase` are consumed by the runner for the event stream;
+`schema` is consumed by the runner.
+
+`agent` is the agent spec the step's session runs. Unset, it is the run carrier's
+template: each run start reads `workflow_memory.inherited_step_agent(execution)`
+off the event loop and `WorkflowService._runner` hands it to both adapters as
+`default_agent`, so a `workflow_run` from a custom agent's chat runs its steps,
+and attributes their usage rows, as that agent, and the spawn gate vets that
+agent. The `kirocrew` floor, a carrier bound to a member and an app's own agent
+(its chat runs a launch copy no step session carries) and a template with no
+user-level spec (one only a checkout declares) give no default, so those steps run
+the configured pool agent.
 
 `effort` is the step's reasoning effort. Both shipped adapters
 (`agent_exec.build_agent_fn`, `agent_pool.build_pooled_agent_fn`) hand it to
@@ -177,12 +192,25 @@ passes nothing and the session resolves its effort as before. Effort applies
 when the step's session starts: the pooled adapter keys its warm sub-pools on
 `(agent, model, cwd, effort)` so a reused worker always runs at the effort the
 call asked for, and a named `session=` chain keeps the effort its first step
-started it with. A warm reuse's `new_conversation()` re-applies the model but
-not the effort, and a harness that takes effort as a per-session config option
-(KAS, Codex) pushes it only at cold start, so the worker pushes its effort again
-through `provider.change_effort` after each cheap reset; a push that raises takes
+started it with. A warm reuse's `new_conversation()` re-applies the model but,
+except on claude, not the effort, and a harness that takes effort as a
+per-session config option (KAS, Codex) pushes it only at cold start, so the
+worker pushes its effort again through `provider.change_effort` after each
+cheap reset; a push that raises takes
 the hard-reset fallback, which cold-starts with the override. There is no
 run-level effort default.
+
+`backend` is the harness the step runs on, named as `spawn_run(backend=)` and a
+governance rule name it (`"kiro"` is Kiro CLI). Both shipped adapters hand it to
+`get_or_create` as `backend_override`, the provider factory's per-session backend,
+which also takes the session past the gateway's warm pool. A name this build cannot
+select (unknown, or denied by policy) fails the step (`WorkflowSpawnRefused`) before
+a session is allocated, rather than letting the factory move it to the floor
+backend. Unset (`None` or `""`) passes nothing. A named `session=` is scoped to its
+backend (`<name>@<backend>`), because a live session cannot change harness. With no
+`model=`, the session's model comes from the default-model ladder scoped to that
+backend, which is auto when nothing is pinned for it. The spawn and cwd gates and
+the run's memory scope apply as to any other step.
 
 > Open question: the per-call `nudge` dict is part of the frozen signature and
 > reaches `opts`, but neither shipped `agent_fn` reads it, so today it has no
@@ -490,7 +518,7 @@ are allowed** so a journal stays forward-compatible.
 | `budget_update` | `spent`, `remaining` | **builder exists, nothing emits it** (see the Budget open question) |
 | `approval_requested` | `prompt`, `approval_id` | **builder exists, nothing emits it**; `ctx.approve` delegates straight to its port |
 | `run_finished` | `result`, `duration_s` | terminal. `result` is the script's return value; `duration_s` is host `time.monotonic()` elapsed |
-| `run_failed` | `error`, `where` | terminal. `where` is one of `author`, `validate`, `ceiling`, `exec` |
+| `run_failed` | `error`, `where` | terminal. `where` is one of `author`, `validate`, `ceiling`, `exec`, `interrupted` |
 | `run_cancelled` | `reason` | terminal |
 
 **Ordering invariants**, asserted by `test_workflows_runner.py` and
@@ -507,6 +535,7 @@ agent_finished, run_finished`.
 | `validate` | static validation failed, or the script references a ctx primitive this host did not wire |
 | `ceiling` | wall-clock timeout, `BudgetExceeded`, or the per-run agent-call cap |
 | `exec` | the script itself raised |
+| `interrupted` | the script returned, but a `ctx.agent()` step's turn was stopped from outside (`WorkflowStepInterrupted`); `error` is that step's error |
 
 ### Persistence of the stream
 
@@ -1011,8 +1040,8 @@ KAS. Unlike run snapshots, definitions do not follow the configurable
 directory, so the shared sensitive-path gate blocks agent file tools and shell
 commands from planting or rewriting executable definitions. Dashboard and
 workflow-service operations open the directory directly after the human action.
-The create and revision endpoints require a positively authenticated dashboard
-user, not an app token or internal agent call. An app token is also refused before
+The create, revision and removal endpoints require a positively authenticated
+dashboard user who is the owner, not an app token or internal agent call. An app token is also refused before
 a saved run accepts its caller-supplied session header, so it cannot spoof result
 delivery into another live session. Every allow or deny decision at these
 authorization gates is SEL-audited.
@@ -1145,11 +1174,99 @@ if credential or exfiltration redaction would change executable source, the save
 the library never persists a corrupted script. Async gateway, authoring, and saved-run
 paths offload library disk I/O to worker threads, while the service serializes library
 operations so slug allocation and revision checks remain atomic in-process.
-Creates and revision updates also hold a sidecar file lock across the disk read
-(slug allocation, or the expected-revision check) and atomic replacement. A create
-with `exact_slug` refuses a used slug rather than suffixing it. This makes two gateway or harness processes sharing
-the library reject the second update to the same revision rather than silently
-accepting both and losing one writer's source.
+Creates, revision updates and removals hold one sidecar file lock, `.revisions.lock`,
+across the disk read (slug allocation, or the check) and the atomic replacement. A create
+with `exact_slug` refuses a used slug rather than suffixing it. This makes two
+gateway or harness processes sharing the library reject the second update to the
+same revision rather than silently accepting both and losing one writer's source,
+and stops a removal and an update from interleaving so that neither undoes the
+other.
+
+The library reads every `*.json` file in its folder and keys each record by its
+`id` field, not by its file name, so a copied or restored record file is a live,
+runnable definition under whatever name it has, unless a removed record holds its
+id and slug (below).
+
+Removal is a tombstone, not a file delete. `remove(ref)` sets `removed_at` on the
+record and keeps every revision on disk as stored, without re-running the
+save-time source gate, so a record saved under older redaction rules stays removable; who removed it is recorded by the route's
+SEL audit row. A v1 record also gains its default `format` field, the value every
+reader already assumes for it. The tombstone replaces the file the record was read
+from, whatever that file is named, and every file holding a live copy of the id is
+tombstoned, so no copy stays runnable after a removal succeeds. A removed definition
+is absent from `get` by id or slug, `list`, `search`, `/workflow`,
+`workflow_library_list`, saved runs and the authoring reference examples, and a
+revision update to it is refused as not found. Its id and slug stay reserved for
+good, whether a later ref matches as an id or as a slug, so a
+`/workflow <slug>` saved in a cron job or prompt answers not found from then on
+and never runs a different workflow. The reservation covers the id and the slug
+a record holds when it is removed. A rename still frees the old slug at once, so
+a written-down `/workflow <old slug>` can reach a newer workflow (#23680), and
+the reservation lives in the tombstone: deleting or damaging a removed record's
+file releases its refs, and the library logs a warning once per unreadable file
+until it changes. A revision is written to the file its record was read from,
+as a tombstone is, so a save never replaces a tombstone of the same id. One set,
+the id and the slug of every
+removed record, drives both sides. Every read by ref (`get`, `/workflow`, the
+run route, `workflow_run` with `workflow`, and the PATCH and DELETE routes)
+refuses a ref in it before matching, whether a live record carries that ref as
+its id or as its slug; otherwise ids are matched before slugs, so a free id
+reaches its own record whatever order the folder lists files in. Slug
+allocation counts that set and the id and slug of every live record, except a
+renamed record's own, as taken: a new workflow that would take one gets the
+first free numbered slug instead. A live record can still carry a reserved ref
+when it was placed by hand or restored from a tombstone; it answers to its other
+ref while that one is free. One index per read answers which record each ref
+reaches, and both what a read offers and what a ref then runs come from it. A
+record's own slug or id can miss it: a removed record holds the ref, or another
+live record answers to it first (one whose id is this record's slug, or an
+earlier one with the same slug). Reads list such refs in `shadowed_refs`,
+computed on every read and never stored (a stored copy is ignored), so the
+Customize > Workflows list and editor, `/workflow` with no name and
+`workflow_library_list` offer a ref that reaches the record, the slug first,
+else the id, and an offered command always runs the record it is listed on. With
+both listed no ref reaches it: the library list keeps the row, marked No slash
+command, the editor disables save, run and remove and says to give its file a
+new id and slug or delete it, and `/workflow`, `workflow_library_list` and their
+search leave it out; authoring references may still show it, since an adaptation
+records `id@revision`. The dashboard sends each request to the id, or to the
+slug when the id does not reach the record. Save and Remove also send the id the
+editor shows as `expected_id` (in the PATCH body, as a DELETE query parameter): when the ref now
+resolves to another workflow, because a rename freed that slug and another
+workflow took it, the request answers 409 and nothing is written or removed,
+and the dashboard re-reads the list and keeps the row. A removal that fails after tombstoning one of several copies
+leaves the rest live with their id reserved: a copy whose own slug no removed
+record holds still answers to that slug, the others to no ref, and a retried
+Remove that answers not found re-reads the list, so it never reports such a copy
+as removed. The dashboard reads the list again once any removal settles, failed
+ones included: a removal can change which ref reaches another record (a
+hand-placed record whose id is the removed slug then answers only to its own
+slug), so no row keeps a ref the library no longer answers to. Lineage is not a read by ref:
+`derived_from` still resolves a parent by id and revision, removed parents and
+reserved ids included.
+A revision saved from the dashboard sends the slug again
+and so gets the first free numbered slug, like any rename to a taken slug.
+`lineage_candidates()` is the one read
+that still returns it. `save_definition` checks `derived_from` against that read,
+so drafts and runs adapted from a removed workflow keep saving and a
+completed run's provenance keeps resolving. Lineage names a parent by id and
+revision, never by slug. Removal is a human action only: the owner-only dashboard
+route below is the single entry point, and no agent tool, MCP tool or CLI command
+can remove a saved workflow, for the same reason agents cannot write the library
+directory. Restoring a removed workflow is not offered; the tombstone keeps that
+possible later.
+
+A finished ad-hoc run can be appended to a definition the owner picks, as its next
+revision (`workflows/update_from_run.py`, reached through
+`WorkflowService.update_run_definition`). The run passes promotion's checks, must
+have the definition's format, and a source identical to the pinned revision is
+refused rather than written as an empty revision. The preview suggests the target
+from the run's `derived_from`, the script's `META["adapted_from"]`, then the slugs
+of the script's `META` name and of the run's name, and returns the run source's
+SHA-256. The update must send that digest back and is refused when the run's source
+no longer matches it, because a paused TaskRunner plan can be replanned while the
+owner reads the diff. The diff is `workflow_source_diff`, the change card's diff
+without `WORKFLOW_DIFF_MAX`, because it is never stored in a card.
 
 Only explicitly saved definitions participate in local authoring matches.
 `search(intent)` uses deterministic local lexical ranking: a query word matches a
@@ -1237,9 +1354,11 @@ errors if invalid) and the replay cache is **not** reused (`replay_before=0`,
 `replay_results={}`), because editing the script can change what its calls mean, and
 a cached result could then replay into a call it no longer answers. An unedited
 rerun of a saved definition retains its definition id, slug, and revision so it
-remains an exact saved invocation and cannot be promoted into a duplicate. An
+remains an exact saved invocation and cannot be promoted into a duplicate or
+appended as a revision. An
 edited rerun clears that saved-definition identity because its submitted source
-is no longer the exact saved revision.
+is no longer the exact saved revision, and keeps the former id and revision only
+as `derived_from` ancestry; any later rerun carries that ancestry forward.
 
 TaskRunner applies the same rule to saved task plans. A user edit or automatic
 replan clears the run's exact definition id, slug, and revision before publishing
@@ -1315,6 +1434,9 @@ so an in-flight checkpoint cannot resurrect a removed run.
 Run ids are durable monotonic `wf_NNNNNN` values allocated by
 `workflow_memory.allocate_run_id()`. The service's recovered sequence is only a
 lower bound; the cross-process, fsync-backed high-water allocator is authoritative.
+The lower bound counts only a reloaded id whose tail is ASCII digits within the
+allocator's uint64 range; any other stored id is skipped, since the allocator
+never issues one.
 See [Atomic run identity allocation](#atomic-run-identity-allocation).
 
 ### Authoring
@@ -1391,7 +1513,15 @@ never spawns `kiro-cli` in tests. Two production adapters:
   restarts at `:0`), released with `cleanup=True` afterwards. A `session=<key>`
   call reuses the named session, which persists so a stateful chain keeps its
   history. Each step runs through `llm_helpers.stream_and_collect` with
-  `AUTO_APPROVE` and `max_turns=_MAX_TURNS_PER_STEP`, then the output passes
+  `AUTO_APPROVE` and `max_turns=_MAX_TURNS_PER_STEP`. A turn that ends `cancelled`
+  or `error: cancel unacked` (a gateway stop or session reset cancelled it; a run
+  cancel or step timeout cancels the task instead) raises `WorkflowStepInterrupted`
+  through `StepStopWatch`, in both executors, so its cut-off text never becomes the
+  step's result. The step still resolves to `None`, so the script runs on, but the
+  runner ends a run that holds one `run_failed` with `where="interrupted"`, never
+  `run_finished`. Every executor path (cold, pooled worker, unpooled overflow)
+  writes the turn's usage row before that raise, so a cut-off turn's spend is still
+  recorded. Otherwise the output passes
   through `redact_credentials` and `redact_exfiltration_urls` before it can reach a
   run record, history, or parent chat. A per-turn usage row is persisted with
   `surface="workflow"` on a best-effort basis, with deliberately **narrow** guards:
@@ -1407,12 +1537,20 @@ never spawns `kiro-cli` in tests. Two production adapters:
   worker after `provider.new_conversation()` (a fresh `session/new` on the live
   process, skipping spawn and initialize), falling back to a hard
   `SessionManager.reset` if that is unavailable or fails, so a reused worker can
-  never carry prior-task context forward. Only a backend on the shared runtime
-  (kiro, KAS, Codex) has the cheap reset; one on its own `AcpClient` (claude and
-  the other per-session adapters) raises `NotImplementedError` naming the backend,
-  and its reuse is the hard reset, logged at INFO as a cold start. Dead workers are retired and replaced.
+  never carry prior-task context forward. A backend on the shared runtime (kiro,
+  KAS, Codex) has the cheap reset, and so does claude's own `AcpClient`
+  (`ACP_BACKENDS_CLIENT_NEW_CONVERSATION`, see claude-code-provider "A fresh
+  conversation on the live adapter"); any other backend on its own `AcpClient`
+  raises `NotImplementedError` naming the backend, and its reuse is the hard reset,
+  logged at INFO as a cold start. Before that reuse the worker runs the Kiro account
+  check (`SessionManager.run_identity_check`): it holds its session's lease from its
+  first task to its last, so it never acquires again and a sweep only flags that
+  session. A session the check flagged (`is_retiring`) takes the hard reset, whose
+  re-acquire starts a session on the current account. Dead workers are retired and
+  replaced.
   A `session=<key>` call bypasses the pool entirely, since it needs a stable named
-  session rather than a reset-between-uses worker.
+  session rather than a reset-between-uses worker. So does a `backend=` call: every
+  warm worker runs the default harness, so it runs on a one-shot unpooled session.
 
   Per-call `agent` / `model` / `cwd` / `effort` overrides each get their **own** warm
   sub-pool, so a multi-specialist fan-out still gets warm reuse per specialist and
@@ -1462,6 +1600,9 @@ released.
   `waiting_dependency`, is settled `cancelled` by the admission itself
   (`taskq.md` § Runner adapters), so a cancelled run leaves no `workflow_agent`
   row behind and none is left `queued` for a dispatcher this kind does not have.
+  A cancel landing between the two, while the `running` mark is written, meets
+  the same synchronous `cancel` around `running_async`: `admit` has already
+  handed over the lane slot and the lease, and nothing else would give them back.
   A
   dependency error the adapters recognise parks the row in `waiting_dependency`
   with its slot released and re-runs the call on the wake, at most
@@ -1499,7 +1640,8 @@ caller class:
   loopback caller (the chat `workflow_*` MCP tools) and a manifest-scoped app token
   keep the controls that already govern them. `POST /api/spawn` and
   `POST /api/crons` gate the dashboard-user class the same way.
-- **Definition create, update and run promotion** are owner-only for every caller.
+- **Definition create and update, run promotion, and update from a run** (its
+  preview included) are owner-only for every caller.
 - **Run list, detail, cancel and rerun** go through `workflow_memory.authorize_run`
   (the list keeps only the runs it admits); rerun does so after the owner check above.
 
@@ -1523,12 +1665,15 @@ launch a script under a trusted chat's identity.
 | `GET /api/workflows/runs` | | `{runs: [...]}` compact, newest first |
 | `GET /api/workflows/runs/{run_id}` | | full snapshot incl. `events`; adds `plan` under `?plan=1` when one is readable (404 if the run is absent) |
 | `POST /api/workflows/runs/{run_id}/promote` | `{name?, description?, slug?}` | save exact source from a finished run or paused TaskRunner plan; 404 when unknown, 409 when not promotable or only a restored redacted source remains |
+| `GET /api/workflows/runs/{run_id}/update-definition` | `?workflow=` id or slug, optional | `{target, diff, unchanged, format_mismatch, run_source_sha256}`: the definition an update would revise (`id`, `slug`, `name`, `revision`, `format` only), the uncapped diff from its current source to the run's (empty when they are equal or their formats differ), and the digest the POST sends back; without `workflow` the target is suggested and may be `null`; refused as the POST is |
+| `POST /api/workflows/runs/{run_id}/update-definition` | `{workflow, expected_revision, expected_source_sha256}` | append the run's exact source as the definition's next revision; 404 `workflow_run_not_found` / `workflow_definition_not_found`, 409 for a saved invocation, an unfinished run, a restored redacted source, a run source that changed since the preview or a stale revision, 400 on an unchanged source, a format mismatch or an invalid script |
 | `POST /api/workflows/runs/{run_id}/cancel` | | `{run_id, cancelled}` |
 | `POST /api/workflows/runs/{run_id}/rerun` | `{from_index?, source?}` | `{run_id, from, replayed_before, edited}`; 400 on an invalid edited script, 404 on an unknown run |
 | `GET /api/workflows/definitions?q=` | optional local match query | `{definitions: [...]}` |
 | `POST /api/workflows/definitions` | `{source, format?, name?, description?, slug?, exact_slug?, derived_from?}` | explicitly save a validated definition; format defaults to `python`; with `exact_slug: true` a used slug is 409 `workflow_slug_taken` instead of a suffixed one |
 | `GET /api/workflows/definitions/{id-or-slug}` | | one definition including revisions and lineage |
 | `PATCH /api/workflows/definitions/{id-or-slug}` | `{source, expected_revision, name?, description?, slug?}` | append a revision; 404 when unknown, 409 on stale revision |
+| `DELETE /api/workflows/definitions/{id-or-slug}` | | owner only; tombstone the definition and answer `{ok, id, removed_at}`; 404 `workflow_definition_not_found` when unknown or already removed; one SEL `api_access` row with outcome `completed` per removal |
 | `POST /api/workflows/definitions/{id-or-slug}/run` | `{input?, args?, budget_total?, timeout_secs?}` | run the exact saved revision; 404 when unknown, 409 on execution admission rejection, 503 when its executor is unavailable |
 
 Every mutation route that accepts JSON requires a top-level object. A syntactically
@@ -1598,7 +1743,9 @@ the redacted event plus the run's `session_key`, and the frontend
 (`website/src/apps/workflows/runModel.ts`) folds the stream into a phase tree and a
 budget snapshot. On a terminal state, `dashboard/workflow_inject.py` posts the
 result into the originating chat slot and starts (or queues) an agent turn so the
-user gets a synthesized answer rather than a raw blob.
+user gets a synthesized answer rather than a raw blob. That turn's prompt is the
+gateway's own words: it lands as an `inject` row (`injectKind: workflow`) on both the
+idle and the queued path, never as the user's bubble, and runs as a synthetic payload.
 
 A finished run's message carries its result as a `json` block when the serialized
 result is at most `_MAX_RESULT_CHARS` (4,000) characters. A longer result is cut to
@@ -1751,8 +1898,8 @@ identical across Kiro and adapted harnesses, and prevents an explicit reference
 from being reinterpreted by a harness. The definition format selects its owning
 driver; there is no user-facing engine choice. The Customize →
 Workflows tab is the human management surface. Its Workflow library view owns
-listing, authoring unsaved drafts, lineage, source edits as new revisions, and
-exact saved runs; its Runs view owns common history and explicit promotion.
+listing, authoring unsaved drafts, lineage, source edits as new revisions,
+removal behind a confirmation that names the workflow, and exact saved runs; its Runs view owns common history and explicit promotion.
 
 The `workflows` builtin app (`apps/builtins/workflows/`) is `defaultEnabled:
 false` and `hidden: true`; it exposes `/validate`, `/run` and `/examples` over its

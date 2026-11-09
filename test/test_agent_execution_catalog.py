@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call
@@ -47,20 +48,11 @@ def catalog(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_catalog, "list_agents", discovery)
     # The refresh scans the real agents dir and would replace a snapshot a test
     # arranged; stubbed here, asserted by its own test.
-    # A landed refresh moves the installed snapshot's ticket, as the real one does.
-    tickets = [0]
-
-    def landed(**_):
-        tickets[0] += 1
-        return True
-
-    refresh = Mock(side_effect=landed)
+    refresh = Mock(return_value=True)
     monkeypatch.setattr(agent_catalog, "refresh_materialized_agents", refresh)
-    monkeypatch.setattr(agent_catalog, "materialized_refresh_ticket", lambda: tickets[0])
     heal = Mock(return_value=False)
     monkeypatch.setattr(agent_catalog, "reset_dangling_default_agent", heal)
     monkeypatch.setattr(agent_catalog, "materialized_snapshot_complete", lambda: True)
-    monkeypatch.setattr(agent_catalog, "materialized_skipped_stems", frozenset)
     monkeypatch.setattr(agent_catalog.agent_state, "all_fork_info", lambda: {})
     save = Mock(side_effect=AssertionError("Catalog must not persist config"))
     allocate = Mock(side_effect=AssertionError("Catalog must not allocate member memory"))
@@ -177,6 +169,69 @@ async def test_catalog_uses_requesting_project_and_preserves_scope(catalog, tmp_
     catalog.discovery.assert_called_once_with(project_dir=tmp_path)
     assert rows[-1]["scope"] == "project"
     assert rows[-1]["selection_kind"] == "template"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case, scoped",
+    [
+        ("owner", True),
+        ("sensitive", False),
+        ("other-user", False),
+        ("app", False),
+        ("chat-key", False),
+    ],
+)
+async def test_the_owner_names_a_project_no_chat_runs_in(catalog, tmp_path, case, scoped):
+    # The folder settings modal lists the agents of the folder's project
+    # directory, which no chat is bound to yet; only the owner may name one, a
+    # request naming a chat keeps that chat's project, and a path a folder save
+    # would refuse lists the global templates only.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    named = {"sensitive": "~/.ssh"}
+    headers = {"X-Session-Key": "chat-empty"} if case == "chat-key" else {}
+    if case == "other-user":
+        catalog.caller.user = "another-user"
+    elif case == "app":
+        catalog.caller.app = "caller-app"
+    async with TestClient(TestServer(catalog.app)) as client:
+        response = await client.get(
+            "/api/agents/catalog",
+            params={"project_path": named.get(case, str(repo))},
+            headers=headers,
+        )
+        assert response.status == 200
+    expected = Path(os.path.realpath(repo)) if scoped else None
+    catalog.discovery.assert_called_once_with(project_dir=expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "named, screen_refuses", [(r"\\remote-host\share", True), ("relative/repo", False)]
+)
+async def test_a_named_project_the_path_screen_refuses_is_never_resolved(
+    catalog, monkeypatch, named, screen_refuses
+):
+    # On Windows `realpath` on a UNC share is itself the outbound SMB probe, so
+    # the shared path screen runs first and the folder validator, which
+    # resolves, is never reached for a refused or relative path. The screen
+    # also fences sensitive paths, so its refusal is the one that is audited.
+    if screen_refuses:
+        monkeypatch.setattr("kiro_crew.hooks.validate_file_path", lambda raw: None)
+    validator = Mock(side_effect=AssertionError("resolved before the path screen"))
+    monkeypatch.setattr(agent_catalog, "_validate_project_dir", validator)
+    audit = Mock()
+    monkeypatch.setattr(agent_catalog, "sel", lambda: audit)
+    async with TestClient(TestServer(catalog.app)) as client:
+        response = await client.get("/api/agents/catalog", params={"project_path": named})
+        assert response.status == 200
+    validator.assert_not_called()
+    catalog.discovery.assert_called_once_with(project_dir=None)
+    calls = [
+        (c.kwargs["outcome"], c.kwargs["resources"]) for c in audit.log_api_access.call_args_list
+    ]
+    assert calls == ([("denied", named)] if screen_refuses else [])
 
 
 @pytest.mark.asyncio
@@ -424,20 +479,32 @@ async def test_the_owner_s_catalog_fetch_resets_a_dangling_default(catalog):
 
 
 @pytest.mark.asyncio
-async def test_catalog_handler_uses_the_gate(catalog, monkeypatch, tmp_path):
+async def test_catalog_fetches_share_the_refresh_memo(catalog, monkeypatch, tmp_path):
     # Two owner fetches and one non-owner fetch over unchanged agents
-    # directories: one scan, and the heal on each owner fetch.
+    # directories: the real refresh on each fetch, one scan between them, and
+    # the heal on each owner fetch.
     from kiro_crew import agent_discovery
+    from kiro_crew.config import loader
 
     monkeypatch.setattr(agent_discovery, "AGENTS_DIR_MEMO_ENABLED", True)
-    monkeypatch.setattr(agent_catalog, "kiro_agents_dir", lambda: tmp_path / "no-agents")
-    monkeypatch.setattr(agent_catalog, "mate_agents_dir", lambda: tmp_path / "no-mates")
+    monkeypatch.setattr(loader, "kiro_agents_dir", lambda: tmp_path / "no-agents")
+    monkeypatch.setattr(loader, "mate_agents_dir", lambda: tmp_path / "no-mates")
+    scans: list[Path] = []
+    real_scan = loader._scan_materialized_index
+
+    def counted(agents_dir: Path):
+        scans.append(agents_dir)
+        return real_scan(agents_dir)
+
+    monkeypatch.setattr(loader, "_scan_materialized_index", counted)
+    catalog.refresh.side_effect = loader.refresh_materialized_agents
     async with TestClient(TestServer(catalog.app)) as client:
         assert (await client.get("/api/agents/catalog")).status == 200
         assert (await client.get("/api/agents/catalog")).status == 200
         catalog.caller.user = "another-user"
         assert (await client.get("/api/agents/catalog")).status == 200
-    assert catalog.refresh.call_args_list == [call(heal_default=False)]
+    assert catalog.refresh.call_args_list == [call(heal_default=False)] * 3
+    assert scans == [tmp_path / "no-agents", tmp_path / "no-mates"]
     assert catalog.heal.call_count == 2
 
 

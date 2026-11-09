@@ -408,7 +408,9 @@ class TestToLlmEventFieldParity:
     # ``AcpSessionHandle._run_turn`` before the event leaves the ACP layer. By
     # then the held chunk has been delivered as ordinary text or turned into the
     # turn's error, so no provider consumer has a decision left to make with it.
-    _INTENTIONALLY_DROPPED: set[str] = {"unattributed"}
+    # connection_mcp_identity: read only by the Connection approval mint, which takes
+    # the AcpEvent itself on both transports, never the provider's LlmEvent.
+    _INTENTIONALLY_DROPPED: set[str] = {"unattributed", "connection_mcp_identity"}
 
     @staticmethod
     def _distinguishable(field: "dataclasses.Field") -> object | None:
@@ -1085,6 +1087,31 @@ class TestStartKiroRuntimeResume:
         handle, _runtime = await self._run_start(provider, "", file_exists=True)
         assert handle.set_model.await_args_list == [call("global.anthropic.claude-opus-4-8[1m]")]
         assert provider._client._handle is handle
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("backend", "pin", "noticed"),
+        [
+            ("kas", "auto", True),
+            ("kas", "", True),
+            ("kas", "claude-opus-4.6", False),
+            ("", "auto", False),
+        ],
+    )
+    async def test_an_unpinned_kas_start_names_kiro_cli_chat_default_model(
+        self, monkeypatch, backend, pin, noticed
+    ):
+        """KAS ignores chat.defaultModel and Crew does not apply it: an
+        unpinned KAS start records a notice naming it and sends no extra model."""
+        from kiro_crew.providers import acp_runtime_start
+
+        monkeypatch.setattr(acp_runtime_start, "default_model_notice", lambda cwd: "names it")
+        provider = self._kiro_provider(model=pin)
+        provider._client.backend = backend
+        handle, _runtime = await self._run_start(provider, "", file_exists=True)
+        assert provider._client.kas_default_model_notice == ("names it" if noticed else "")
+        expected = [call(pin)] if pin not in ("", "auto") else []
+        assert handle.set_model.await_args_list == expected
 
     @pytest.mark.asyncio
     async def test_default_model_does_not_call_set_model(self):

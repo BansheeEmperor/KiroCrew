@@ -4,7 +4,7 @@ import { X } from 'lucide-react'
 import Clickable from '../Clickable'
 import Glass from '../Glass'
 import type { Notification } from '../../types'
-import { KIND_META, DEFAULT_META, notePriority, stripMd, fmtRelativeMinute, MAC_ACTION_BTN_CLASS } from './notifMeta'
+import { KIND_META, DEFAULT_META, notePriority, noteText, stripMd, fmtRelativeMinute, MAC_ACTION_BTN_CLASS } from './notifMeta'
 import { CrewmateNoteFace, CrewmateNoteName, noteMember } from './CrewmateNoteFace'
 
 /** Corner radius of every notification pane (the card, a deck shell, the
@@ -43,6 +43,8 @@ export interface NotificationCardProps extends Omit<HTMLAttributes<HTMLDivElemen
   actionsAlign?: 'start' | 'end'
   /** Extra content under the timestamp (the feed's muted label / stack count). */
   trailing?: ReactNode
+  /** A word on the time's own line, before the time (the feed's "edited" label). */
+  timeNote?: ReactNode
   /** Selected in a host that owns selection (the feed): the pane steps onto
    *  the accent tint (`glass-accent`) and its content stays undimmed. */
   active?: boolean
@@ -90,25 +92,33 @@ export interface NotificationCardProps extends Omit<HTMLAttributes<HTMLDivElemen
  */
 export default function NotificationCard({
   n, onOpen, openLabel, onDismiss, dismissLabel, dismissTestId, dismissVisible = false,
-  actions = [], actionsAlign = 'start', trailing, active = false, muted = false, settled = false, footer, body: bodyOverride, className = '', ...rest
+  actions = [], actionsAlign = 'start', trailing, timeNote, active = false, muted = false, settled = false, footer, body: bodyOverride, className = '', ...rest
 }: NotificationCardProps) {
   const km = KIND_META[n.kind] || DEFAULT_META
   const prio = notePriority(n)
   const member = noteMember(n)
+  const { title, body: noteBody } = noteText(n)
   const dim = muted ? 'opacity-50' : ((n.acked || settled) && !active) || prio === 'passive' ? 'opacity-55' : ''
   const kindIcon = <span className={`w-[26px] h-[26px] rounded-[8px] flex items-center justify-center shrink-0 text-[13px] ${km.color}`}>{km.icon}</span>
   const body = (
     <>
       {member ? <CrewmateNoteFace member={member} size={26} fallback={kindIcon} /> : kindIcon}
       <div className="flex-1 min-w-0">
-        {member && <CrewmateNoteName member={member} title={n.title} className="block text-[11px] text-muted truncate leading-tight mb-0.5" />}
-        <div className={`text-[13px] font-semibold truncate leading-tight ${muted ? 'text-muted font-normal' : 'text-text-strong'}`}>{n.title}</div>
+        {member && <CrewmateNoteName member={member} title={title} className="block text-[11px] text-muted truncate leading-tight mb-0.5" />}
+        <div className={`text-[13px] font-semibold truncate leading-tight ${muted ? 'text-muted font-normal' : 'text-text-strong'}`}>{title}</div>
         {bodyOverride !== undefined
           ? bodyOverride
-          : <div className="text-[12px] text-muted mt-0.5 line-clamp-2 leading-snug">{stripMd(n.body || '').slice(0, 140)}</div>}
+          : <div className="text-[12px] text-muted mt-0.5 line-clamp-2 leading-snug">{stripMd(noteBody || '').slice(0, 140)}</div>}
       </div>
       <div className="flex flex-col items-end gap-0.5 shrink-0">
-        <span className="text-[11px] text-muted">{fmtRelativeMinute(n.ts)}</span>
+        {timeNote ? (
+          <div className="flex items-center gap-1">
+            {timeNote}
+            <span className="text-[11px] text-muted">{fmtRelativeMinute(n.ts)}</span>
+          </div>
+        ) : (
+          <span className="text-[11px] text-muted">{fmtRelativeMinute(n.ts)}</span>
+        )}
         {trailing}
         {!muted && !n.acked && !settled && (
           <span className={`w-1.5 h-1.5 rounded-full animate-dot-breathe ${prio === 'critical' ? 'bg-danger' : 'bg-accent'}`} data-priority={prio} />

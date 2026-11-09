@@ -140,9 +140,11 @@ _MOVED: dict[str, tuple[str, ...]] = {
         _DARWIN_PBI_START_TVUSEC_OFFSET ProcessStartIdentity _DARWIN_PROC_PIDTASKINFO
         _DARWIN_PROC_TASKINFO_SIZE _DARWIN_PTI_TOTAL_USER_OFFSET _DARWIN_PTI_TOTAL_SYSTEM_OFFSET
         _DARWIN_RUSAGE_INFO_V2 _DARWIN_RUSAGE_INFO_V2_SIZE _DARWIN_RI_PHYS_FOOTPRINT_OFFSET
+        _DARWIN_RI_PAGEINS_OFFSET
         _darwin_libproc _darwin_libproc_loaded _darwin_libproc_handle _darwin_process_cwd
         _darwin_process_start_identity _darwin_process_phys_footprint_bytes
-        proc_phys_footprint_bytes_for_pid darwin_libproc_available darwin_footprint_tree_mb
+        _darwin_process_pageins
+        proc_phys_footprint_bytes_for_pid proc_pageins_for_pid darwin_libproc_available darwin_footprint_tree_mb
         _darwin_process_start_microtime _darwin_process_cpu_nanos _DARWIN_PBI_STATUS_OFFSET
         _DARWIN_SZOMB _DARWIN_PIDPATH_MAXSIZE _DARWIN_CTL_KERN _DARWIN_KERN_PROCARGS2
         _DARWIN_PROCARGS_BUFSIZE _DARWIN_PROCARGS_ENV_BUFSIZE _DARWIN_KERN_PROC
@@ -179,7 +181,8 @@ _MOVED: dict[str, tuple[str, ...]] = {
         execv_target_available _POST_DRAIN_EXEC_FAILURE_EXIT _EXIT_FLUSH_DEADLINE_SECS
         exit_after_failed_restart_exec _drain_event_log_for_exit _WINDOWS_ARM_MACHINES
         is_windows_on_arm BUNDLED_BACKEND_DIST_DIRNAME is_bundled_interpreter
-        _PYTHON_OPTIONS_WITH_VALUES isolated_python_argv ensure_utf8_console
+        _PYTHON_OPTIONS_WITH_VALUES isolated_python_argv _soften_non_unicode_posix_streams
+        ensure_utf8_console
         ensure_line_buffered_stdout _is_windows_store_python_stub find_python_interpreter
         process_alarm_available arm_process_alarm boottime_now awake_now process_start_boot_secs
         process_age_secs strftime raise_nofile_soft_limit nofile_soft_limit python_launcher_hops
@@ -200,6 +203,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
         open_file_no_reparse _WIN_FILE_LIST_DIRECTORY
         _WIN_OPEN_ALWAYS _WIN_FILE_ATTRIBUTE_TAG_INFO win_fd_is_link _win_reparse_refused
         win_open_no_reparse open_create_no_reparse names_a_verbatim_only_file
+        _win_check_within _win_final_path _win_unlink_within _WIN_FILE_READ_ATTRIBUTES
         """.split()),
     "kiro_crew.platform_compat_files": tuple("""
         _RENAME_NOREPLACE_FN _RENAME_NOREPLACE_FLAG _SYS_RENAMEAT2_BY_MACHINE
@@ -209,6 +213,8 @@ _MOVED: dict[str, tuple[str, ...]] = {
         chmod_safe
         claude_code_managed_settings_dir
         _clear_readonly_and_retry rmtree_force _WIN_FILE_SHARE_READ_WRITE_DELETE
+        _SHARING_VIOLATION_WINERRORS _RMTREE_MAX_ATTEMPTS _RMTREE_BACKOFF_SECONDS
+        remove_with_retry
         open_log_file_for_tail open_lock_file_for_sweep path_volume_is_remote
         _WINDOWS_RUNNABLE_HOOK_SUFFIXES is_executable_file is_readonly_filesystem
         ensure_owner_rwx_dirs _SYS_STATX_BY_MACHINE _AT_FDCWD _AT_EMPTY_PATH _STATX_INO
@@ -282,7 +288,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
         _JOB_OBJECT_LIMIT_ACTIVE_PROCESS _JOB_OBJECT_LIMIT_JOB_MEMORY
         _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS apply_job_limits _TH32CS_SNAPTHREAD
         _THREAD_SUSPEND_RESUME _INVALID_HANDLE_VALUE _RESUME_THREAD_FAILED
-        resume_process_main_thread
+        resume_process_main_thread _adopt_job
         """.split()),
     "kiro_crew.platform_compat_wintree": tuple("""
         _WINDOWS_TERMINATE_REFUSAL_WAIT_MS terminate_process_handle process_handle_active
@@ -291,6 +297,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
         WindowsTreeDrainPending _PendingWindowsTreeCleanup _PENDING_WINDOWS_TREE_CLEANUPS
         _PENDING_WINDOWS_TREE_CLEANUPS_LOCK _WINDOWS_TREE_ADMISSIONS
         reserve_windows_tree_cleanup release_windows_tree_reservation _manual_windows_tree
+        adopt_windows_tree_job _terminate_windows_tree_job
         _bind_windows_cleanup_process create_windows_cleanup_owned_process
         finish_windows_cleanup_owned_spawn _drain_windows_process_tree
         _advance_owned_windows_tree terminate_windows_process_tree_owned
@@ -299,10 +306,12 @@ _MOVED: dict[str, tuple[str, ...]] = {
         """.split()),
     "kiro_crew.platform_compat_kill": tuple("""
         pgroup_exists _raise_taskkill_error kill_pid kill_process_group _killpg kill_process_tree
-        kill_process_tree_pinned kill_pid_pinned kill_pid_async kill_process_tree_async
+        kill_process_tree_pinned kill_pid_pinned terminate_pids_pinned kill_pid_async
+        kill_process_tree_async
         REAP_TIMEOUT_SECS _shares_own_process_group kill_popen_tree kill_and_reap
         _run_cleanup_shielded _isolated_group_of_live_child _discard_output_until_exit
         terminate_and_reap terminate_and_reap_sync
+        _POST_KILL_DRAIN_SECS _STDLIB_RUN run_killing_tree_on_timeout
         """.split()),
     "kiro_crew.platform_compat_metrics": tuple("""
         _MACH_TASK_BASIC_INFO _MachTimeValue _MachTaskBasicInfo _MACH_TASK_BASIC_INFO_COUNT
@@ -313,8 +322,10 @@ _MOVED: dict[str, tuple[str, ...]] = {
         HEAP_TRIM_LOG_THRESHOLD_BYTES HEAP_TRIM_TIMEOUT_SECONDS _malloc_trim _M_ARENA_MAX
         GATEWAY_MALLOC_ARENA_MAX MALLOC_ARENA_MAX_ENV _glibc_mallopt MallocArenaCap
         limit_malloc_arenas log_malloc_arena_cap trim_heap_if_needed HeapTrimMaintainer
-        proc_peak_rss_bytes _FD_DIRS count_open_fds proc_rss_bytes_for_pid _SUBTREE_MAX_PROCS
+        proc_peak_rss_bytes _FD_DIRS count_open_fds _windows_handle_count proc_rss_bytes_for_pid
+        _SUBTREE_MAX_PROCS
         proc_cpu_nanos_for_pid SubtreeSample _proc_pss_kb proc_subtree_sample
+        proc_handle_count_for_pid
         proc_rss_tree_mb_for_pid proc_cpu_seconds _prev_win_sys_cpu system_memory
         system_cpu_percent _MIB_BYTES _NATURAL_T _HOST_VM_INFO64 _VMStatistics64
         _EXTERNAL_PAGE_COUNT_ELEMENTS macos_vm_statistics _macos_available_mib

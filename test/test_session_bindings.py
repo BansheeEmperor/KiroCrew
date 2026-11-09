@@ -42,7 +42,10 @@ from kiro_crew.session_parts.state_views import StateProperty
 
 pytestmark = pytest.mark.xdist_group(name="tree_scan_session_bindings")
 
-SHARED_BINDINGS_CHECKS = ("the_field_scan_counts_every_read_and_write_shape",)
+SHARED_BINDINGS_CHECKS = (
+    "the_field_scan_counts_every_read_and_write_shape",
+    "the_class_only_scan_can_fail",
+)
 
 #: Member -> (kind, coroutine, signature digest, owning module). Frozen at the split: the
 #: kind, coroutine flag and signature are BASE's; the owner is where the member lives now
@@ -53,6 +56,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "_POOL_DISCARD_TIMEOUT": ("data", False, "", "runtimes"),
     "_POOL_HEALTH_INTERVAL": ("data", False, "", "runtimes"),
     "__init__": ("function", False, "6e578750eb89", "session"),
+    "_acquire_after_identity_check": ("function", False, "32919eb17bc7", "claims"),
     "_active_dashboard_slots": ("property", False, "9b594013b706", "state_views"),
     "_advance_session_generation": ("function", False, "028659ce42ac", "claims"),
     "_agent_model_cache": ("data", False, "", "session"),
@@ -145,6 +149,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "_recycling": ("property", False, "5c9a1a8aab23", "state_views"),
     "_registry_state": ("function", False, "21fce5dd2c88", "state_views"),
     "_released_sessions_hook": ("function", True, "b60c5fea256e", "sweeps"),
+    "_remove_pooled_providers_by_pid": ("function", False, "21d703fae534", "runtimes"),
     "_reset_still_critical": ("function", True, "14f70d097513", "turn_context"),
     "_resolve_agent_model": ("staticmethod", False, "f2204edfe0d1", "session"),
     "_retire_kiro_bg_runtime": ("function", True, "b3a488b20d12", "teardown"),
@@ -158,8 +163,8 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "_send_abort_for_session": ("function", True, "a6707a152144", "teardown"),
     "_sessions": ("property", False, "5c9a1a8aab23", "state_views"),
     "_settle_compact_cooldown": ("function", False, "782a54a66452", "turn_context"),
+    "_spare_pid_providers": ("function", False, "c8959ffb01ed", "runtimes"),
     "_spawn_in_flight": ("function", False, "4b576121a346", "claims"),
-    "_start_cleanup_for_waiting_deletes": ("function", True, "b60c5fea256e", "runtimes"),
     "_start_sem": ("property", False, "1f1197566c49", "state_views"),
     "_starting_pids": ("property", False, "d657ba783a38", "state_views"),
     "_stuck_reported": ("property", False, "b00f42b34605", "state_views"),
@@ -182,6 +187,8 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "allocation_predecessor": ("function", False, "f1d40e624ae4", "claims"),
     "allocation_requested_model": ("function", False, "f1d40e624ae4", "claims"),
     "any_active_turn": ("function", False, "a6632a57e602", "claims"),
+    "approval_revocation": ("function", False, "028659ce42ac", "claims"),
+    "aprepare_cwd_clear": ("function", True, "b60c5fea256e", "session"),
     "await_replay_gap": ("function", True, "958babeb61c8", "teardown"),
     "aws_profile_differs_from_parent": ("function", False, "76593e568eac", "claims"),
     "aws_profile_split_possible": ("function", False, "3780bd272b7a", "claims"),
@@ -232,6 +239,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "find_mirror_sessions": ("function", False, "7b7ff4cef714", "links"),
     "first_turn_history_owed_pending": ("function", False, "1eda252b53bd", "turn_context"),
     "flag_identity_stamp_mismatches": ("function", True, "946212e80718", "teardown"),
+    "holds_kiro_process_of_unknown_account": ("function", False, "542f3ac72725", "teardown"),
     "forget_conversation": ("function", False, "4b576121a346", "claims"),
     "forget_conversation_if_sid": ("function", False, "70e3d61c5764", "claims"),
     "fresh_start_unclaimed": ("function", False, "1eda252b53bd", "claims"),
@@ -241,7 +249,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "get_bg_session": ("function", True, "c8c03f90e44b", "runtimes"),
     "get_channel": ("function", False, "4b576121a346", "links"),
     "get_mirror_link": ("function", False, "cdc6a6d31d8b", "links"),
-    "get_or_create": ("function", True, "c9826b33d6da", "claims"),
+    "get_or_create": ("function", True, "bd03b7b05fd0", "claims"),
     "get_origin_link": ("function", False, "cdc6a6d31d8b", "links"),
     "get_pid": ("function", False, "1290edeed1b6", "claims"),
     "get_provider": ("function", False, "c66f77f7d253", "claims"),
@@ -259,6 +267,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "is_continuable": ("function", False, "1eda252b53bd", "claims"),
     "is_mirror_paused": ("function", False, "8f19901e86b9", "links"),
     "is_provider_alive": ("function", True, "5ccb54f56604", "claims"),
+    "is_retiring": ("function", False, "1eda252b53bd", "claims"),
     "is_session_sharing_eligible": ("function", False, "3780bd272b7a", "claims"),
     "is_slack_paused": ("function", False, "1eda252b53bd", "links"),
     "mapped_session_keys": ("function", False, "602c14087aa8", "claims"),
@@ -274,6 +283,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "mirror_claim_blockers": ("function", False, "1d8651fc9ebe", "links"),
     "mirror_link_nonce": ("function", False, "f1d40e624ae4", "links"),
     "mirror_opt_out": ("function", False, "1eda252b53bd", "links"),
+    "note_provider_switch_replay_delivered": ("function", False, "721800ecea8c", "turn_context"),
     "note_stop": ("function", False, "1eda252b53bd", "teardown"),
     "note_turn_landed": ("function", False, "958babeb61c8", "claims"),
     "open_replay_gap": ("function", False, "958babeb61c8", "teardown"),
@@ -282,7 +292,9 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "pause_turn_admission_for_update": ("function", True, "a6632a57e602", "claims"),
     "pending_identity_sweep_fingerprint": ("property", False, "bb418bb7ece8", "state_views"),
     "project_aws_profile": ("function", False, "cb2074e9df23", "claims"),
+    "provider_switch_replay_delivered": ("function", False, "721800ecea8c", "turn_context"),
     "provider_switch_replay_pending": ("function", False, "1eda252b53bd", "turn_context"),
+    "rearm_first_turn": ("function", False, "44a1bff78c26", "claims"),
     "record_effort_override": ("function", False, "44d509a50877", "claims"),
     "record_failure": ("function", True, "1eda252b53bd", "claims"),
     "record_success": ("function", False, "958babeb61c8", "claims"),
@@ -304,6 +316,8 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "resume_turn_admission_after_update": ("function", True, "a6632a57e602", "claims"),
     "retire_kiro_identity_sessions": ("function", True, "0929bcd2b0e5", "teardown"),
     "retire_turn_permit": ("function", False, "6dd7729a0f08", "teardown"),
+    "retract_cwd": ("function", False, "958babeb61c8", "session"),
+    "run_identity_check": ("function", True, "b60c5fea256e", "claims"),
     "runtime_pids": ("function", False, "2468fe0fd6a3", "claims"),
     "runtime_reconciler": ("function", False, "4a493fe5dab9", "sweeps"),
     "seed_conversation": ("function", False, "7b9b418f95e7", "claims"),
@@ -647,11 +661,6 @@ def _class_only_constructs(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[s
         if isinstance(spelled, str) and spelled.startswith("__") and not spelled.endswith("__"):
             found.append(spelled)
     return found
-
-
-def test_the_class_only_scan_can_fail() -> None:
-    tree = ast.parse("def f(self):\n    super().g()\n    return __class__, self.__hidden\n")
-    assert sorted(_class_only_constructs(tree.body[0])) == ["__class__", "__hidden", "super()"]
 
 
 @pytest.mark.parametrize("owner", session_mod._SESSION_OWNERS)

@@ -232,6 +232,8 @@ async def _route_action_to_session(
             route_pinned=pinned_slot is not None,
             start_priority=StartPriority.FOREGROUND,
             user_meta=user_meta,
+            # The label is model-authored: it is the answer, never a command.
+            interpret_commands=False,
         )
     )
     _orch._handler_tasks.add(t)
@@ -242,6 +244,11 @@ class ChannelAgentMismatchError(Exception):
     """The thread's channel is served by a different agent than the import's slot."""
 
 
+IMPORT_CODE_CHANNEL_NOTICE = (
+    "This thread is a Slack code channel's own session, so it cannot be imported"
+    " into another dashboard session. Open the code channel's session instead."
+)
+
 IMPORT_AGENT_MISMATCH_NOTICE = (
     "This channel is served by its own agent, so its threads cannot be imported"
     " into a dashboard session on another agent. Open a dashboard session on this"
@@ -249,10 +256,21 @@ IMPORT_AGENT_MISMATCH_NOTICE = (
 )
 
 
+def import_refusal(exc: Exception) -> tuple[str, str]:
+    """``(notice, audit reason)`` for an import refused by an anchor or agent guard."""
+    if isinstance(exc, ChannelAgentMismatchError):
+        return IMPORT_AGENT_MISMATCH_NOTICE, "channel_agent_mismatch"
+    return IMPORT_CODE_CHANNEL_NOTICE, "code_channel_anchor"
+
+
 async def _import_thread_to_slot(slack: Any, ds: Any, channel: str, thread_ts: str) -> Any:
     """Fetch a Slack thread, redact messages, and import into a new dashboard slot."""
     from kiro_crew.dashboard.chat_persistence import save_slot_off_loop
     from kiro_crew.slack.handler import (
+        _SLACK_TS_META,
+        _THINKING,
+        _THINKING_PLACEHOLDER,
+        _WORKING,
         channel_agent_mismatch,
         channel_pinned_agent,
         link_agent_mismatch,
@@ -285,14 +303,30 @@ async def _import_thread_to_slot(slack: Any, ds: Any, channel: str, thread_ts: s
     if existing:
         return existing
 
+    # A code channel's anchor thread is its binding's own session: never
+    # imported into a new slot (``link_slack`` would refuse it after the slot
+    # exists). The store is loaded off the loop before the thread is read, so
+    # nothing awaits between the read and the link: a turn that ended there
+    # would find no slot to give its answer to (``_backfill_late_link``). One
+    # that ends during the read itself leaves its reply as the read saw it.
+    from kiro_crew.slack.code_channels.binding import check_anchor_handoff, load_store_for_links
+
+    await load_store_for_links("slack.import_thread")
     msgs = await slack.fetch_thread_replies(channel, thread_ts)
     if not msgs:
         return None
-    # Pre-filter: drop empty text and !link-to-dashboard messages
+    bot_id = getattr(ds, "_self_bot_id", None) or ""
+    # Pre-filter: drop empty text and !link-to-dashboard messages, and the
+    # placeholders of a turn still running (it replaces or removes them as it ends).
     msgs = [
         m
         for m in msgs
-        if m.get("text", "").strip() and not m.get("text", "").startswith("!link-to-dashboard")
+        if m.get("text", "").strip()
+        and not m.get("text", "").startswith("!link-to-dashboard")
+        and not (
+            m.get("text") in (_WORKING, _THINKING, _THINKING_PLACEHOLDER)
+            and (m.get("bot_id") or m.get("user") == bot_id)
+        )
     ]
     if not msgs:
         return None
@@ -300,6 +334,7 @@ async def _import_thread_to_slot(slack: Any, ds: Any, channel: str, thread_ts: s
     truncated = len(msgs) > 50
     if truncated:
         msgs = msgs[-50:]
+    check_anchor_handoff(thread_ts, "")
     # The thread fetch awaited: read the channel's agent again before any slot.
     if channel_agent_mismatch(channel, "", "") is not None:
         raise ChannelAgentMismatchError(channel)
@@ -312,14 +347,20 @@ async def _import_thread_to_slot(slack: Any, ds: Any, channel: str, thread_ts: s
         slot.agent = pinned
         slot.agent_kind = "template"
     slot.title = f"Slack thread {thread_ts[:10]}" + (" (truncated)" if truncated else "")
-    bot_id = getattr(ds, "_self_bot_id", None) or ""
     for m in msgs:
         is_bot = bool(m.get("bot_id")) or m.get("user") == bot_id
         role = "assistant" if is_bot else "user"
         text_content = m.get("text", "")
         text_content, _ = redact_exfiltration_urls(text_content)
         text_content, _ = redact_credentials(text_content)
-        slot.append(role, text_content, f"msg msg-{'a' if is_bot else 'u'}")
+        # Each row names its Slack message, so a turn still running when the thread
+        # was read can give the slot its answer (``_backfill_late_link``).
+        slot.append(
+            role,
+            text_content,
+            f"msg msg-{'a' if is_bot else 'u'}",
+            meta={_SLACK_TS_META: m.get("ts", "")},
+        )
     ds.link_slack(slot.key, thread_ts, channel)
     await save_slot_off_loop(ds, slot)
     ds.push_slots_update()
@@ -674,6 +715,8 @@ async def _answer_options(
             asker_key=_asker_key,
             start_priority=StartPriority.FOREGROUND,
             user_meta=user_meta,
+            # The choice is model-authored: it is the answer, never a command.
+            interpret_commands=False,
         )
     )
     _orch._handler_tasks.add(t)

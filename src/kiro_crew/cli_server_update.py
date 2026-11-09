@@ -32,6 +32,7 @@ from kiro_crew.cli_server_peer import (
     _owner_verified_secret_urlopen,
 )
 from kiro_crew.config.loader import read_local_secret
+from kiro_crew.env import node_augmented_path, node_bin_dirs
 from kiro_crew.frontend import build_frontend_sync
 from kiro_crew.git_divergence import (
     UNREADABLE_UNPARSEABLE,
@@ -583,6 +584,11 @@ def _update(force: bool = False) -> None:
 
     print("  🔄 Checking Node.js…")
     _ensure_node(proj)
+    # ensure-node.sh records the node it chose in <data home>/node-bin-dir but
+    # cannot change this process's PATH. Put the node dirs first, so the build's
+    # npm lookup and npm's own `node` both resolve that toolchain.
+    node_bin_dirs.cache_clear()
+    os.environ["PATH"] = node_augmented_path(os.environ.get("PATH", ""))
 
     # Build the dashboard frontend assets (npm), then reinstall the package. A
     # failed build does not skip the install (the tree has already moved, and
@@ -742,13 +748,19 @@ def _update_wheel(layout) -> None:
     from kiro_crew import __version__ as local_version
     from kiro_crew.platform import wheel_apply
     from kiro_crew.platform.update_layout import (
+        channel_is_published,
         non_managed_pip_update_hint,
         release_channel,
+        unpublished_channel_note,
         wheel_update_command,
     )
     from kiro_crew.platform.wheel_engine import running_from_managed_venv, running_from_pipx
 
     channel = release_channel()
+    if not channel_is_published(channel):
+        # No feed to read, and cli.sh would refuse the channel (update_layout).
+        print(f"  ℹ  {unpublished_channel_note(channel)}")
+        sys.exit(1)
     # The one preflight every apply route runs, in its one order: the policy
     # source pin on both CDN bases (a pinned fleet's wheel installs cannot bypass
     # the ceiling), then the shape of the operator-set KIROCREW_CDN_BASE, which

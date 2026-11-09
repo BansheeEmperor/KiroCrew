@@ -106,7 +106,7 @@ trades that for hiding the stores from every subprocess.
 spelling are reached by internal callers and by the governance `sandbox.min_level`
 ordinal floor
 (`_ORDINAL_SCALES["sandbox"] = ("off", "standard", "cc", "strict")`), which clamps
-a requested mode **up** before resolution, so an enterprise floor confines even a
+a requested mode **up** before resolution, so an LTS floor confines even a
 `mode="off"` call. Those two are not values an operator writes into `agent.sandbox`.
 Per-tier hidden paths, the empirical backend probes, the nested-passthrough rule
 and the fail-closed/fail-open flags are specified in
@@ -223,6 +223,17 @@ the next agent that starts picks it up. It applies to every agent whose
 sandbox hides `~/.ssh`. When a spawn starts without the socket for lack of this
 consent, the gateway log carries one warning per harness that names the file and
 this remedy, and `kirocrew doctor` lists those harnesses under Sandbox.
+
+A Kerberos `KEYRING:persistent:` or `KEYRING:user:` ticket cache does not
+cross into the sandbox: the Linux launcher enters a new user namespace, and the
+kernel keeps those keyrings per user namespace, so the child resolves an empty
+keyring of the same name. `env.resolve_krb5_ccname` points children at a
+uid-owned `/tmp/krb5cc_<uid>` (or `/tmp/krb5cc_<user>`) FILE cache when one
+exists; when none does and the cache a child would use is one of those keyring
+kinds, it logs one warning per process and `kirocrew doctor` prints an advisory
+Credentials row naming the remedy. The check opens only regular files (and
+lists the directories `includedir` names), and no ticket is copied or moved
+across the boundary.
 
 ## Layer 1: Filesystem gate (`security/` package + `hooks.py`)
 

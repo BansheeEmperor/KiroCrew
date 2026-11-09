@@ -42,6 +42,8 @@ from kiro_crew.mcp_gateway.backend import Backend
 
 pytestmark = pytest.mark.xdist_group(name="tree_scan_backend_bindings")
 
+SHARED_BINDINGS_CHECKS = ("the_class_only_scan_can_fail",)
+
 #: Member -> (kind, coroutine, signature digest, owning module). Frozen at the split: the
 #: kind, coroutine flag and signature are BASE's; the owner is where the member lives now.
 #: A dataclass field is "data" when it has a plain default (a class attribute) and
@@ -175,8 +177,9 @@ _BASE_STAR_NAMES = frozenset("""
     Any Awaitable Backend BackendGone CALLER_CAPABILITY_KEY CALLER_META_KEY
     CANONICAL_TEMP_KEYS CallerContext HARD_WEDGE_CEILING_SECS HEARTBEAT_PING_ID
     HEARTBEAT_TIMEOUT_SECS ID_PROBE_BYTES INFLIGHT_CAPABILITY_KEY INFLIGHT_NOTIFICATION
-    INTERNAL_STUB_PREFIXES KIROCREW_SPAWNED_ENV KIROCREW_SPAWNED_VALUE MCP_APPS_ENV_FALSE
-    MCP_APPS_ENV_FLAG MCP_APPS_ENV_TRUE MCP_APPS_EXTENSION_KEY MCP_APPS_MIME_TYPE Mapping
+    INITIALIZE_DEADLINE_REASON INTERNAL_STUB_PREFIXES KIROCREW_SPAWNED_ENV
+    KIROCREW_SPAWNED_VALUE MCP_APPS_ENV_FALSE MCP_APPS_ENV_FLAG MCP_APPS_ENV_TRUE
+    MCP_APPS_EXTENSION_KEY MCP_APPS_MIME_TYPE Mapping
     Optional PING_STALE_SECS POOLED_BACKEND_ENV POOLED_BACKEND_VALUE
     POOLED_RESPAWN_COMMAND_ENV PROGRESS_WEDGE_CEILING_SECS Path READ_BUFFER_LIMIT_BYTES
     RESPONSE_SPILL_THRESHOLD_BYTES SUBAGENT_TIMEOUT_SECS SecurityEventLog TENANT_META_KEY
@@ -290,11 +293,6 @@ def _class_only_constructs(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[s
         if isinstance(spelled, str) and spelled.startswith("__") and not spelled.endswith("__"):
             found.append(spelled)
     return found
-
-
-def test_the_class_only_scan_can_fail() -> None:
-    tree = ast.parse("def f(self):\n    super().g()\n    return __class__, self.__hidden\n")
-    assert sorted(_class_only_constructs(tree.body[0])) == ["__class__", "__hidden", "super()"]
 
 
 @pytest.mark.parametrize("owner", backend_mod._BACKEND_OWNERS)

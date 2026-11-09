@@ -299,6 +299,43 @@ def test_a_crewmate_off_kas_is_refused_a_template_with_a_policy(home, monkeypatc
     assert _file(mates) == before
 
 
+def test_a_bot_following_claude_takes_a_template_with_a_policy_on_kas(home, monkeypatch):
+    """Judged on the spec being written: an unpinned Bot that follows claude and gains
+    hooks runs on KAS (``crewmate_harness.worker_backend_for_spec``), so the add
+    succeeds as it did when every Bot ran on KAS."""
+    from kiro_crew.config import loader_builders
+    from kiro_crew.config.loader import KiroCrewAgentConfig
+    from kiro_crew.crewmate_harness import worker_backend_for_spec
+
+    _, mates = home
+    agent = SimpleNamespace(acp_backend="claude", member_acp_backend="claude", kas_bundle=False)
+    loader_builders.mark_member_backend_inherited(agent, True)
+    cfg = SimpleNamespace(
+        agent=agent, agents={"pixel": KiroCrewAgentConfig(member_id="pixel", kiro_agent="pixel")}
+    )
+    monkeypatch.setattr("kiro_crew.config.loader.KiroCrewConfig.load", staticmethod(lambda: cfg))
+    monkeypatch.setattr(
+        mate_worker_kit,
+        "_crewmate_backend",
+        lambda member, held: worker_backend_for_spec(cfg, member, bool(held)),
+    )
+    assert worker_backend_for_spec(cfg, "pixel", False) == "claude"
+    assert worker_backend_for_spec(cfg, "pixel", True) == ACP_BACKEND_KAS
+    preview = mate_worker_kit.preview("pixel", {"template": "release-bot"})
+    mate_worker_kit.apply("pixel", {"template": "release-bot", "revision": preview["revision"]})
+    assert _file(mates)["hooks"] == TEMPLATE["hooks"]
+    # A pin to claude keeps the refusal: the person chose that harness.
+    pinned = SimpleNamespace(
+        agent=agent,
+        agents={
+            "pixel": KiroCrewAgentConfig(
+                member_id="pixel", kiro_agent="pixel", acp_backend="claude"
+            )
+        },
+    )
+    assert worker_backend_for_spec(pinned, "pixel", True) == "claude"
+
+
 def test_a_template_setting_the_worker_base_sets_differently_is_refused_by_name(home):
     user, mates = home
     base = {**WORKER_BASE, "toolsSettings": {"execute_bash": {"deniedCommands": ["sudo .*"]}}}
@@ -444,6 +481,11 @@ _UNCARRIED_SETTINGS = {
         ({"use_aws": {"allowedServices": ["s3"]}}, "toolsSettings.use_aws.allowedServices"),
         ({"use_aws": {}}, "toolsSettings.use_aws"),
         ({"execute_bash": "deny"}, "toolsSettings.execute_bash"),
+        # Read over ASCII by Crew, over Unicode by kiro-cli: not exact, so refused.
+        (
+            {"execute_bash": {"allowedCommands": ["make \\w+"]}},
+            "toolsSettings.execute_bash.allowedCommands",
+        ),
     ],
 }
 
@@ -549,7 +591,7 @@ def test_a_carried_allowed_command_is_answered_by_crews_gate():
 
 def test_an_allowed_command_crews_gate_cannot_answer_is_refused():
     """A listed grant must take effect too: an unusable entry is refused."""
-    settings = {"execute_bash": {"allowedCommands": ["make -j\\d+"]}}
+    settings = {"execute_bash": {"allowedCommands": ["make -j\\D+"]}}
     with pytest.raises(SpecPolicyUncarried) as caught:
         mate_spec_policy.layer_policy({}, {"toolsSettings": settings})
     assert "toolsSettings.execute_bash.allowedCommands" in caught.value.fields
@@ -951,3 +993,93 @@ def test_a_carried_allow_does_not_restore_a_grant_the_merge_took_away(file_entry
     }
     merged = mate_worker.merge_worker_spec(base, mate_worker.worker_additions(base, mate_file))
     assert merged["allowedTools"] == WORKER_BASE["allowedTools"]
+
+
+# --- the preview counts what a carried allow grants ---------------------------------
+
+
+def _jira_template(rules: list[dict]) -> dict:
+    return {
+        "name": "release-bot",
+        "prompt": "",
+        "tools": ["@jira"],
+        "mcpServers": {"jira": {"command": "jira-mcp"}},
+        "permissions": {"rules": rules},
+    }
+
+
+def test_an_mcp_allow_previews_as_the_approval_the_worker_gains(home):
+    """The worker merge writes ``jira/*`` as ``@jira`` into the worker's list, so the
+    preview lists that row and says the new tools run without asking."""
+    user, mates = home
+    rule = {"capability": "mcp", "effect": "allow", "match": ["jira/*"]}
+    _use(user, _jira_template([rule]))
+    preview = mate_worker_kit.preview("pixel", {"template": "release-bot"})
+    assert preview["runs_unasked"] is True
+    assert {"section": "allowedTools", "id": "@jira", "change": "added"} in preview["changes"]
+    mate_worker_kit.apply("pixel", {"template": "release-bot", "revision": preview["revision"]})
+    merged = mate_worker.merge_worker_spec(
+        WORKER_BASE, mate_worker.worker_additions(WORKER_BASE, _file(mates))
+    )
+    assert "@jira" in merged["allowedTools"]
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"capability": "shell", "effect": "allow"},
+        {"capability": "fs_read", "effect": "allow"},
+        ALLOW,
+    ],
+    ids=["shell", "fs_read", "mcp-with-exclude"],
+)
+def test_an_allow_with_no_allowed_tools_form_previews_as_running_unasked(home, rule):
+    """Crew's gate answers an unscoped shell or file allow itself, and KAS keeps an
+    excluded one in the block: each runs without a prompt, with no ref to list."""
+    user, _mates = home
+    _use(user, _jira_template([rule]))
+    preview = mate_worker_kit.preview("pixel", {"template": "release-bot"})
+    assert preview["runs_unasked"] is True
+
+
+@pytest.mark.parametrize("effect", ["deny", "ask"])
+def test_a_deny_or_ask_rule_previews_as_asking(home, effect):
+    user, _mates = home
+    _use(user, _jira_template([{"capability": "mcp", "effect": effect, "match": ["jira/*"]}]))
+    preview = mate_worker_kit.preview("pixel", {"template": "release-bot"})
+    assert preview["runs_unasked"] is False
+    assert not [row for row in preview["changes"] if row["section"] == "allowedTools"]
+
+
+def test_an_allow_the_worker_base_already_grants_adds_no_approval(home):
+    """The merge carries nothing for a grant the base holds: no row lists it (so
+    applying the add clears no revocation of it), and nothing newly runs unasked."""
+    user, mates = home
+    base = {**WORKER_BASE, "allowedTools": ["fs_read", "@jira"]}
+    (mates / "kirocrew-mate-worker.json").write_text(json.dumps(base), encoding="utf-8")
+    rule = {"capability": "mcp", "effect": "allow", "match": ["jira/*"]}
+    _use(user, {"name": "release-bot", "prompt": "", "permissions": {"rules": [rule]}})
+    preview = mate_worker_kit.preview("pixel", {"template": "release-bot"})
+    assert any(row["section"] == "permissions" for row in preview["changes"])
+    assert not [row for row in preview["changes"] if row["section"] == "allowedTools"]
+    assert preview["runs_unasked"] is False
+
+
+def test_an_unreadable_base_at_apply_restores_no_revoked_approval(home, monkeypatch):
+    """The preview judged the allow against a base that grants ``@jira``, so it
+    listed no row for it. A base that cannot be read when the add lands cannot show
+    that, so the owner's revocation of ``@jira`` stays."""
+    from kiro_crew import mate_approval_revocations as revocations
+
+    user, mates = home
+    base = {**WORKER_BASE, "allowedTools": ["fs_read", "@jira"]}
+    (mates / "kirocrew-mate-worker.json").write_text(json.dumps(base), encoding="utf-8")
+    rule = {"capability": "mcp", "effect": "allow", "match": ["jira/*"]}
+    _use(user, {"name": "release-bot", "prompt": "", "permissions": {"rules": [rule]}})
+    revocations.record("pixel", ["@jira"], [])
+    preview = mate_worker_kit.preview("pixel", {"template": "release-bot"})
+    assert not [row for row in preview["changes"] if row["section"] == "allowedTools"]
+    monkeypatch.setattr(mate_worker_kit, "_worker_base_or_none", lambda: None)
+    mate_worker_kit.apply("pixel", {"template": "release-bot", "revision": preview["revision"]})
+    assert _file(mates)["permissions"] == {"rules": [rule]}
+    assert revocations.revoked("pixel") == ["@jira"]

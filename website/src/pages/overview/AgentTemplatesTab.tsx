@@ -23,6 +23,7 @@ import { parseErrorCode, parseErrorField } from '../../utils/errorReport'
 import { defaultLookFor } from '../../lib/avatarPoses'
 import { errMessage } from '../../utils/thunkError'
 import { templateSourceKind } from '../../lib/templateSource'
+import { queryReadFailed } from '../../utils/queryReadFailed'
 import { i18nT } from '../../i18n/t'
 
 /** One row of `GET /api/agents/templates`: the discovery record plus the two
@@ -655,7 +656,7 @@ export default function AgentTemplatesTab() {
           ? <span className="text-[11px] text-muted truncate">{i18nT('pages.overview.agentTemplatesTab.override_line', { crew: r.private_to, template: r.forked_from })}</span>
           : r.description && <span className="text-[11px] text-muted truncate">{r.description}</span>}
         <div className="flex flex-wrap gap-1 mt-0.5">
-          <Badge variant="muted" title={r.model ? i18nT('pages.overview.agentTemplatesTab.model') : `${i18nT('pages.overview.agentTemplatesTab.model')}: ${i18nT('pages.overview.agentTemplatesTab.model_auto')}`}><span className="font-mono">{i18nT('pages.overview.agentTemplatesTab.model_badge', { model: r.model || 'auto' })}</span></Badge>
+          <Badge variant="muted" title={r.model ? i18nT('pages.overview.agentTemplatesTab.model') : i18nT('pages.overview.agentTemplatesTab.model_auto_title')}><span className="font-mono">{i18nT('pages.overview.agentTemplatesTab.model_badge', { model: r.model || 'auto' })}</span></Badge>
           {/* Muted like its siblings: a colored pill worded like the usage line's
               link reads as a second control. */}
           {crews > 0 && <Badge variant="muted">{i18nT('pages.overview.agentTemplatesTab.crewmates_count', { count: crews })}</Badge>}
@@ -821,9 +822,13 @@ export default function AgentTemplatesTab() {
             onDismiss={defaultPickError ? () => setDefaultPickError('') : undefined}
           />
           {/* ErrorNotice has no action slot, so the read's retry sits beside it
-              in the same row; the picker stays disabled until the read lands. */}
-          {!!defaultReadout.error && !defaultPickError && (
-            <Btn onClick={() => void queryClient.invalidateQueries({ queryKey: defaultAgentQuery.queryKey })} disabled={defaultReadout.isFetching}>
+              in the same row; the picker stays disabled until the read lands.
+              queryReadFailed, not `.error`: a retry with nothing cached clears
+              `error` and returns to pending, which would unmount this Retry --
+              and the keyboard focus on it -- for the whole retry. aria-disabled,
+              not native `disabled`, keeps it in the tab order while busy. */}
+          {queryReadFailed(defaultReadout) && !defaultPickError && (
+            <Btn busy={defaultReadout.isFetching} onClick={() => void queryClient.invalidateQueries({ queryKey: defaultAgentQuery.queryKey })}>
               {i18nT('pages.overview.agentTemplatesTab.default_template_retry')}
             </Btn>
           )}

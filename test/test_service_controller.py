@@ -87,6 +87,27 @@ class TestControllerDispatch:
         assert rc == 0
         assert "linger" not in capsys.readouterr().out
 
+    @pytest.mark.parametrize("plat", [Platform.SYSTEMD, Platform.LAUNCHD])
+    def test_install_success_says_how_to_open_the_dashboard(self, plat, capsys):
+        """A service never opens a browser, so the success block must name
+        ``kirocrew token`` -- the one command that prints the sign-in link."""
+        from kiro_crew.service import apparmor, controller
+        from kiro_crew.service import linux as svc_linux
+        from kiro_crew.service import macos as svc_macos
+
+        with (
+            patch("kiro_crew.service.controller.current_platform", return_value=plat),
+            patch.object(svc_linux, "install", return_value=apparmor.ProfileOutcome(False, "")),
+            patch.object(svc_linux, "linger_warning_for_service_account", return_value=None),
+            patch.object(svc_macos, "install"),
+            patch.object(controller, "_print_headless_auth_warning"),
+        ):
+            rc = controller.install_service()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Open:   kirocrew token" in out
+        assert out.index("Open:") < out.index("Status:")
+
     def test_uninstall_unsupported_returns_2(self):
         from kiro_crew.service import controller
 
@@ -923,6 +944,26 @@ class TestInstalledUnitPath:
         monkeypatch.setattr(controller, "current_platform", lambda: Platform.LAUNCHD)
         monkeypatch.setattr(controller.macos, "PLIST_PATH", plist)
         assert controller.installed_unit_path() == plist
+
+    @pytest.mark.parametrize(
+        "system_id, ours",
+        [("kirocrew.service", True), ("other.service", False)],
+        ids=["our-unit", "alias-of-another-unit"],
+    )
+    def test_system_unit_is_ours_only_when_its_canonical_id_is(
+        self, monkeypatch, tmp_path, system_id, ours
+    ):
+        # The system unit file is stat'ed through any symlink, so an alias of a
+        # stopped unrelated unit looks installed; only the manager's Id says.
+        unit = tmp_path / "kirocrew.service"
+        monkeypatch.setattr(controller.linux, "UNIT_PATH", unit)
+        run = _fake_systemctl(system=_DEAD, system_id=system_id)
+        with patch("kiro_crew.service.linux.subprocess.run", side_effect=run):
+            assert controller.unit_is_ours(unit) is ours
+
+    def test_a_non_system_definition_is_ours_as_returned(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(controller.linux, "UNIT_PATH", tmp_path / "kirocrew.service")
+        assert controller.unit_is_ours(tmp_path / "user.service") is True
 
     def test_absent_definition_is_not_installed(self, monkeypatch, tmp_path):
         monkeypatch.setattr(controller, "current_platform", lambda: Platform.SYSTEMD)

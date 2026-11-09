@@ -413,6 +413,10 @@ X_FEATURE_SETS: dict[str, frozenset[str] | None] = {
     # kiro-cli 2.35.1 / KAS 0.66.70 / codex-acp 2.2.2: each member's teardown
     # verb is captured live, the same id answered before and 'not found' after.
     "ACP_BACKENDS_SESSION_EVICTION": None,
+    "ACP_BACKENDS_CREW_OAUTH_BRIDGE": None,
+    # claude-agent-acp 0.94.0: a second session/new and a session/close on one
+    # process; the closed id answers 'Session not found', the new one still answers.
+    "ACP_BACKENDS_CLIENT_NEW_CONVERSATION": None,
     # KAS 0.66.70: the settings channel's neverDefer flips the probe tool's
     # toolOrigin to "client".
     "ACP_BACKENDS_CLIENT_META_SETTINGS": None,
@@ -437,6 +441,7 @@ X_FEATURE_SETS: dict[str, frozenset[str] | None] = {
     # claude-agent-acp 0.94.0: a `/compact` prompt run as the SDK's own command
     # inside session/prompt.
     "ACP_BACKENDS_HARNESS_OWNED_SLASH_COMMANDS": None,
+    "ACP_BACKENDS_NATIVE_WORKFLOWS": None,
 }
 
 # Coverage is opt-out: every ``ACP_BACKENDS_*`` set is in X_FEATURE_SETS, here, or

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { Trans } from 'react-i18next'
 import { shallowEqual } from 'react-redux'
 import { useAppSelector, type useAppDispatch } from '../../store'
 import { pendingQuestionFor, resolveByApprovalId, openActivityToTool, openActivityToTab, selectSlotPendingApproval, selectSlotPendingSpawnApprovals, selectSlotSubagents, isSpawnApprovalGone, markSubagentApproving, markSubagentApprovalGone, reconcileGoneSubagent, sseSubagentDone } from '../../store/chatSlice'
@@ -23,6 +24,7 @@ import { useSharedCrewViewer, useTeamAttribution } from '../../hooks/sharedCrew/
 import { isUnknownPrincipal } from '../../api/sharedCrewUi'
 import { useResolvedElsewhere } from './useResolvedElsewhere'
 import { useRaisedBy } from '../../pages/chat/shared-crew/useRaisedBy'
+import { REJECT_APPROVAL_EVENT } from '../../pages/chat/composerFocus'
 
 /* The slot's approval chrome as state: the pending tool approval (its
    decision submit, the approval-mode discovery hint and nudge, the ghost
@@ -111,7 +113,7 @@ export function useToolApproval({ slotId, slotApprovalChrome, approvalMode, disp
   const hideApprovalNudge = useCallback(() => setApprovalNudgeSlot(null), [])
   // Non-null while the last approval decision failed. Rendered as a one-line
   // strip under the composer; auto-clears so it cannot become permanent chrome.
-  const [approvalNotice, setApprovalNotice] = useState<string | null>(null)
+  const [approvalNotice, setApprovalNotice] = useState<ReactNode>(null)
   // The same notice slot carries two different things: STATUS about an
   // approval that expired (nothing failed on our side) and a FAILED decision
   // submit (a rejected request). Only the latter is an error surface.
@@ -166,6 +168,9 @@ export function useToolApproval({ slotId, slotApprovalChrome, approvalMode, disp
    *  a card that could still take a session grant offered allow-once and reject
    *  alone. */
   const approvalTrustAllGrantable = approvalMeta?.trust_grantable === '1'
+  /** Server word that a reason typed with a rejection reaches the model (the
+   *  backend reads one). Without it the reject menu asks for none. */
+  const approvalTakesReason = approvalMeta?.rejection_reason_accepted === '1'
   /** Set when the card is a security-rule override (the server refused the
    *  command by this rule): the bar offers the override scopes and a reject,
    *  and no Allow once / Trust, which the server would read as a refusal. */
@@ -272,7 +277,7 @@ export function useToolApproval({ slotId, slotApprovalChrome, approvalMode, disp
     if (approvalToolCallId) dispatch(openActivityToTool(approvalToolCallId))
   }, [approvalToolCallId, dispatch])
 
-  const handleApprovalAction = useCallback((decision: string, pattern?: string, ttlSeconds?: number) => {
+  const handleApprovalAction = useCallback((decision: string, pattern?: string, ttlSeconds?: number, reason?: string) => {
     if (!approvalId) return
     setApprovalSubmitting(true)
     setApprovalNotice(null)
@@ -304,7 +309,11 @@ export function useToolApproval({ slotId, slotApprovalChrome, approvalMode, disp
         setApprovalNoticeKind('granted')
         setApprovalNotice(decision === 'trust_base'
           ? i18nT('components.chatInput.trusted_base_until', { base: baseCommandLabel(approvalBaseCommand), time })
-          : i18nT('components.chatInput.trusted_command_until', { cmd: truncateCommandLabel(approvalFullCommand, 80), time }))
+          // The command is the <mono/> chip's child, never a `values` entry.
+          : createElement(Trans, {
+            i18nKey: 'components.chatInput.trusted_command_until', values: { time },
+            components: { mono: createElement('span', { className: 'bg-bg-elevated px-1.5 py-0.5 rounded font-mono break-all border border-border' }, truncateCommandLabel(approvalFullCommand, 80)) },
+          }))
       }
       // B2: tally manual one-shot approvals per slot. Only 'approved' counts —
       // a trust grant already reduces future prompts, and a rejection is not
@@ -390,22 +399,37 @@ export function useToolApproval({ slotId, slotApprovalChrome, approvalMode, disp
       if (ttlSeconds !== undefined) extra.ttl_seconds = ttlSeconds
       api.approveChatSlot(activeSlot, decision, extra).then(finish).catch(fail)
     } else if (isNativeOneShot && activeSlot && clickedMid) {
-      api.approveChatSlot(activeSlot, decision, {
+      // A rejection's reason travels only on this route, the one the server takes it on.
+      const extra: Record<string, string> = {
         request_id: approvalId, response_id: responseId, origin: 'native', request_mid: clickedMid,
-      }).then(finish).catch(fail)
+      }
+      if (reason && decision !== 'approved') extra.reason = reason
+      api.approveChatSlot(activeSlot, decision, extra).then(finish).catch(fail)
     } else {
       api.resolveApproval(approvalId, toApiDecision(decision), undefined, responseId).then(finish).catch(fail)
     }
   }, [approvalId, approvalMid, approvalRegistry, activeSlot, approvalIsUnattended, approvalSource, approvalMode, approvalFullCommand, approvalBaseCommand, dispatch, teamAttribution, viewerId, markSettled])
 
+  // The reject-approval chord reaches this pane's bar as an event on its action
+  // row (`rejectPendingApproval`). State, not a ref: the row mounts with the
+  // approval. A layout effect, so no press reaches a replaced approval's handler.
+  const [approvalActionsRow, approvalActionsRef] = useState<HTMLDivElement | null>(null)
+  useLayoutEffect(() => {
+    if (!approvalActionsRow) return
+    const rejectOnce = () => handleApprovalAction('rejected_once')
+    approvalActionsRow.addEventListener(REJECT_APPROVAL_EVENT, rejectOnce)
+    return () => approvalActionsRow.removeEventListener(REJECT_APPROVAL_EVENT, rejectOnce)
+  }, [approvalActionsRow, handleApprovalAction])
+
   return {
     pendingApproval, hasApproval, approvalId, approvalSubmitting, approvalPickerSignal, setApprovalPickerSignal,
     approvalModeAdjusted, approvalNudgeActive, dismissApprovalNudge, hideApprovalNudge,
     approvalNotice, setApprovalNotice, approvalNoticeKind, showApprovalError,
-    approvalToolInput, approvalIsReadOnly, approvalFullCommand, approvalBaseCommand, approvalIsShell,
+    approvalToolInput, approvalIsReadOnly, approvalFullCommand, approvalBaseCommand, approvalIsShell, approvalTakesReason, approvalMid,
     approvalTrustCommandGrantable, approvalTrustBaseGrantable, approvalTrustAllGrantable, approvalIsUnattended, approvalTrustGrantable,
     approvalDenyRule, approvalDenyDetail, approvalDenyFamily, approvalDenyCommand,
     approvalLabelRaw, approvalToolCallId, approvalPurpose, approvalTs, approvalLabel, approvalRaisedBy, showGhost, showInChat, handleApprovalAction,
+    approvalActionsRef,
   }
 }
 

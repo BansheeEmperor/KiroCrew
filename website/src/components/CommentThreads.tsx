@@ -8,14 +8,14 @@
 //
 // Writes go through the gateway's owner-only mutations, which hold the provider
 // credential and re-verify that the thread belongs to this pull request.
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check, ChevronDown, ChevronRight, CornerDownRight, Loader2, MessageSquare,
   MessageSquarePlus, MessagesSquare, RotateCcw,
 } from 'lucide-react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 
-import { api } from '../api/client'
+import { usePullRequestClient } from './pullRequestClient'
 import MarkdownRenderer from './MarkdownRenderer'
 import type { PullRequestComment, PullRequestSource } from '../types'
 import { platformShortcut } from '../utils/platform'
@@ -160,10 +160,28 @@ function ReplyBox({
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
   const trimmed = text.trim()
+  // Closing unmounts the focused textarea, so focus goes back to the button
+  // that opened it instead of falling to the page. Only when focus is still in
+  // the box (or already on the page): a send can land after the user has moved
+  // on to another field, and that focus is theirs.
+  const openerRef = useRef<HTMLButtonElement>(null)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const refocusOpener = useRef(false)
+  const close = () => {
+    const active = document.activeElement
+    refocusOpener.current = !active || active === document.body || !!boxRef.current?.contains(active)
+    setOpen(false)
+  }
+  useEffect(() => {
+    if (open || !refocusOpener.current) return
+    refocusOpener.current = false
+    openerRef.current?.focus()
+  }, [open])
 
   if (!open) {
     return (
       <button
+        ref={openerRef}
         type="button"
         onClick={() => setOpen(true)}
         className="inline-flex items-center gap-1.5 self-start bg-transparent p-0 text-[12px] text-muted hover:text-accent cursor-pointer"
@@ -183,11 +201,11 @@ function ReplyBox({
       return
     }
     setText('')
-    setOpen(false)
+    close()
   }
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div ref={boxRef} className="flex flex-col gap-1.5">
       <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -198,7 +216,7 @@ function ReplyBox({
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
             if (ime.claimEnter(e)) void send()
           }
-          if (e.key === 'Escape') setOpen(false)
+          if (e.key === 'Escape') close()
         }}
         rows={3}
         autoFocus
@@ -226,7 +244,7 @@ function ReplyBox({
         </button>
         <button
           type="button"
-          onClick={() => { setText(''); setOpen(false) }}
+          onClick={() => { setText(''); close() }}
           className="rounded-md bg-transparent px-1.5 py-1 text-[12.5px] text-muted hover:text-text cursor-pointer"
         >
           {i18nT('components.commentThreads.cancel')}
@@ -254,6 +272,7 @@ export default function CommentThreads(
   },
 ) {
   const qc = useQueryClient()
+  const client = usePullRequestClient()
   const threads = useMemo(() => groupThreads(src.comments), [src.comments])
   const [showResolved, setShowResolved] = useState(false)
 
@@ -275,18 +294,18 @@ export default function CommentThreads(
   // Resolve button on threads it had nothing to do with.
   const reply = useMutation({
     mutationFn: ({ threadId, body }: { threadId: string; body: string }) =>
-      api.replyToPullRequestThread(src.url, threadId, body),
+      client.replyToThread(src.url, threadId, body),
     onSuccess: refresh,
   })
   const comment = useMutation({
-    mutationFn: (body: string) => api.commentOnPullRequest(src.url, body),
+    mutationFn: (body: string) => client.comment(src.url, body),
     onSuccess: refresh,
   })
   const setResolved = useMutation({
     mutationFn: ({ threadId, resolved }: { threadId: string; resolved: boolean }) =>
       resolved
-        ? api.resolvePullRequestThread(src.url, threadId)
-        : api.unresolvePullRequestThread(src.url, threadId),
+        ? client.resolveThread(src.url, threadId)
+        : client.unresolveThread(src.url, threadId),
     onSuccess: refresh,
   })
 

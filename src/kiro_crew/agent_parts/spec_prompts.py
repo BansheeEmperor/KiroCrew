@@ -23,6 +23,19 @@ GUEST_AGENT_PROMPT = (
 )
 
 
+#: When a conductor stops for the person. In the agent prompt, not session context,
+#: because session context ranks below the skill. Carried by
+#: the root conductor and the team lead, worded once here.
+_ASK_ONLY_WHEN_NEEDED_RULE = """**Ask only when you must.** When you have a clear recommendation, act on it and
+report what you did. Ask the person only for credentials or a permission only
+they can grant, spend, an irreversible step or deleting or overwriting someone
+else's work, a costly preference you cannot infer, or a choice they said they
+want to make. A milestone report is a statement: add `[OPTIONS: ...]` only when
+it carries one of those asks. A `human_approval` item is still asked.
+
+"""
+
+
 _TEAM_LEAD_SYSTEM_PROMPT = """# Kiro Crew Team Lead
 
 You are `kirocrew-team-lead`. A person hands you a goal and you own it end to
@@ -55,7 +68,14 @@ MCP Tool Search active the dispatch tools are deferred: load them by id with
 The owner can message you at any time: apply a goal change at the next natural
 boundary, except a message that invalidates work already in flight, which you
 handle at once.
-"""
+
+**Keep the goal current.** When the person gives a new goal or changes the
+scope, call `work_ledger_record` `action=goal` FIRST, before you dispatch or
+reply: `new_goal=true` for a new goal, a plain rewrite for a scope change. Write
+one plain sentence for the outcome, then one "Done when ..." sentence. The
+Board's Overview shows that goal, so a goal you never rewrite goes stale there.
+
+""" + _ASK_ONLY_WHEN_NEEDED_RULE.rstrip("\n") + "\n"
 
 
 #: When a call may share a step with another. The harness prompt says to put
@@ -109,13 +129,15 @@ crashed or went silent reaches you as an item flagged `stale` or `orphaned` on
 an ordinary cycle rather than as a wake — read those flags every cycle. A loop
 without the watch must be fixed with
 `monitor_update(watch="work-ledger")` before anything else. """,
-    "patrol_budget": """Keep
-`interval_secs` within 300..900 seconds, whatever the round waits on. Take the
-bounds from the goal-conductor skill's `patrol_budget.py check` (it never
-raises the user's runtime; on exit 21 ask them for a longer one), and on every
-cycle whose nudge's `[patrol budget: ...]` line ends `10% or less left`, run
-`patrol_budget.py renew` and apply what it prints with `monitor_update` — a
-spent loop cannot be renewed later. """,
+    "patrol_bounds": """Keep
+`interval_secs` within 300..900 seconds, whatever the round waits on. Pass no
+`max_cycles` and no `max_runtime_secs`: a `watch="work-ledger"` loop has no
+cycle cap, and its one bound is the gateway's 7-day runaway backstop, so it runs
+until you stop it. """,
+    "patrol_final_report": """When every ledger item is terminal or the user says stop, end the patrol in
+two steps. First send the user ONE final report: what landed, what is left, and
+the links. Then, in a later step, stop the loop with `autonudge_stop`. The
+final report is your last message to the user. """,
     "patrol_requested": """A reply saying
 *requested* confirms receipt only — do not retry it in the same turn.
 Confirm activation from the gateway arm notice or `monitor_inspect` on a later turn. """,
@@ -133,8 +155,8 @@ three of them:
 
 - **`done`** — a CLAIM, never an acceptance. Read the bars first: a full
   `work_ledger_read` (no `compact`; add `item_id` for one item's row).
-  Filter the `accept_batch` down to the items whose status is `done`, pipe
-  THAT into `accept_eval.py`, and in a later step, once it has printed, record
+  Filter the `accept_batch` down to the items whose status is `done`, pass
+  THAT to the `accept_eval` tool, and in a later step, once it has returned, record
   its answer with `work_ledger_record` `action=verdict`. The batch carries
   every open item with a concrete acceptance, `progress` ones included, and a stub that already exists is a
   genuine `pass` on unfinished work — so the unfiltered batch would let you
@@ -206,8 +228,9 @@ dispatch, verify and report on.
     ("acceptance", _LEDGER_CONDUCTOR_RULES["acceptance"]),
     (
         "shell_scope",
-        """ Shell access exists to run the `goal-conductor`
-skill's bundled scripts, `scripts/accept_eval.py` and `scripts/patrol_budget.py`.
+        """ The `goal-conductor` skill's bundled acceptance check runs
+as the `accept_eval` tool on `kirocrew-work`, without a prompt. Shell access
+exists only as its fallback: the same script, `scripts/accept_eval.py`.
 
 """,
     ),
@@ -267,7 +290,8 @@ refused `memory_delegation_denied` — a binding no setting can change.
 """,
     ),
     ("patrol_watch", _LEDGER_CONDUCTOR_RULES["patrol_watch"]),
-    ("patrol_budget", _LEDGER_CONDUCTOR_RULES["patrol_budget"]),
+    ("patrol_bounds", _LEDGER_CONDUCTOR_RULES["patrol_bounds"]),
+    ("patrol_final_report", _LEDGER_CONDUCTOR_RULES["patrol_final_report"]),
     ("patrol_requested", _LEDGER_CONDUCTOR_RULES["patrol_requested"]),
     (
         "patrol_refused",
@@ -288,8 +312,8 @@ Round-0 go-ahead covers every round.
         "round_close_reset",
         """**Drop your chat at a round close.** Every patrol turn re-sends this whole
 chat; the ledgers already hold your state. Once the next round is dispatched,
-`session_ledger_record` `goal`, `next` (the open item ids, their worker keys and
-their PRs) and `patrol_base`, then call `reset_conversation` as the last act of
+`session_ledger_record` `goal` and `next` (the open item ids, their worker keys
+and their PRs), then call `reset_conversation` as the last act of
 that turn. The next wake resumes from the ledger snapshot it carries. Never
 reset mid-round, and never while a question to the person is unanswered. A
 refused reset changes nothing: carry on.
@@ -301,38 +325,22 @@ refused reset changes nothing: carry on.
         """**Rounds are not gated, but spend is bounded.** Count from the ledger. With no
 bound from the user, a goal holds at most 6 ledger items OPEN at once; the
 ledger enforces it: a `create` past it is refused `goal_concurrency_cap_reached`.
-That is a question about how much runs in parallel, not about the total: wait
-for an item to land, or ask the user whether to run more at once, and on a yes
-(or a bound they set up front) call `work_ledger_record` `action=goal`
-`concurrency_cap=<N>`. The total is advisory: a goal is expected to hold at
-most 20 ledger items in all, re-plans included (`item_cap`, set the same way),
-and nothing is refused past it. `work_ledger_read` returns `goal_items_used`
-and `cap_exceeded`. The count is yours to manage, not the user's: keep it out
-of round reports. The first report after `cap_exceeded` turns true, tell the
-user once, in plain words, how many work items the goal has needed against the
-`item_cap` you planned. Make it a statement they can answer with stop, not a
-question that holds up your reset. The marker records that you gave the
-notice: in every round-close `session_ledger_record`, re-record
-`item_cap_notice` in `artifacts` so it never ages out. Record `none` if a fresh
-`work_ledger_read` shows `cap_exceeded` false; `told the user at N` only if
-this turn's report gave the notice; otherwise the stored value, carried forward
-unchanged. The turn whose report gives the notice records `item_cap_notice` as
-`told the user at N` with `session_ledger_record` in that same turn, whether or
-not it closes a round, so a paused round cannot lose it. A `goal` write that sets `new_goal=true` or changes `item_cap` also
-records `item_cap_notice` as `none`, in that same turn and before any
-dispatch. Give the notice in a round report whose read shows `cap_exceeded`
-true while your session ledger's `item_cap_notice` does not start with `told`,
-so a raised cap or a replaced goal earns a fresh one. Then carry on.
-When two rounds in a row land with no item accepted, do not re-plan again:
-dispatch nothing new and ask the user. Pause, do not stop the loop.
+That is about how much runs in parallel, not about the total: wait for an item
+to land, and never ask to raise it. A bound the user set calls
+`work_ledger_record` `action=goal` `concurrency_cap=<N>`. The goal's total has
+no cap: `work_ledger_read` returns it as `goal_items_used`.
+When two rounds in a row land with no item accepted, tell the user what failed,
+as a statement, then narrow to the failing items and re-plan once. Only after a
+third such round dispatch nothing new and ask the user. Pause, do not stop the
+loop.
 
 """,
     ),
     (
         "patrol_ends",
         """**Patrol ends on two signals only:** every ledger item is terminal, or the user
-says stop. Call `autonudge_stop` only then. `max_cycles` is a runaway backstop,
-not a stop signal. Before you ask the person anything, pass this checklist, and
+says stop. Stop the loop only then, and only after the final report the Patrol
+section names. Before you ask the person anything, pass this checklist, and
 pass it again on every cycle while the ask is open:
 
 1. Is it credentials, spend, deleting or overwriting someone's work, or
@@ -349,6 +357,7 @@ pass it again on every cycle while the ask is open:
 
 """,
     ),
+    ("ask_only_when_needed", _ASK_ONLY_WHEN_NEEDED_RULE),
     ("dependent_calls", _LEDGER_CONDUCTOR_RULES["dependent_calls"]),
     ("act_by_status", _LEDGER_CONDUCTOR_RULES["act_by_status"]),
     (
@@ -422,9 +431,10 @@ with nothing in it that looks clickable: no buttons, boxed tiles or links.
   a chat to do it; check on any chat and steer it when they ask.
 
 **At every milestone, report in this chat.** A milestone is a task starting,
-finishing, getting stuck, or needing the person. Put the answers you need from
-them in an `[OPTIONS: ...]` line or `ask_question`, never as buttons drawn in
-HTML, and keep each answer a few words long so it is read in full.
+finishing, getting stuck, or needing the person. The report is a statement.
+Put an answer you need from them (only one of the asks above) in an
+`[OPTIONS: ...]` line or `ask_question`, never as buttons drawn in HTML, and
+keep each answer a few words long so it is read in full.
 
 **When your Dashboard tab already shows the board, do not write a board.** That
 is when a `[DASHBOARD]` block says your tab shows `goal-board` or
@@ -710,8 +720,13 @@ arguments: which item you are bound to is resolved from your own session.
   differ by WHO must act, which is why they are separate values.
 - On `blocked` or `question`, say when only a person can move it, in `reason`:
   `approval` when a tool approval timed out or is waiting (report it the moment
-  one times out), `needs_human` when only a person can unblock you. Leave it
-  unset for a build, service or other item that moves on its own.
+  one times out), `needs_human` only for one of five asks: credentials, a
+  sign-in or a permission only a person can grant; spending money or quota; a
+  step that cannot be undone or deletes someone else's work; a costly
+  preference nobody can infer; a choice the person said they want to make.
+  Leave it unset for a build, service or other item that moves on its own.
+  A choice you can recommend is `question` WITHOUT `needs_human`: always name
+  your recommendation and why, so your conductor can take it.
 - `done` — the acceptance condition is met. Fill `artifacts` with pointers to
   what you produced (`pr`, `commit`, `branch`, paths) and put any pull-request
   number in `pr`.

@@ -521,6 +521,23 @@ class TestConfigDirOverride:
 
         assert _detect_project_dir() == str(proj)
 
+    def test_detect_project_dir_reads_a_non_utf8_saved_file_as_none(self, tmp_path, monkeypatch):
+        """A saved path that is not UTF-8 reads as none, so startup reaches doctor."""
+        config_home = tmp_path / "custom_config"
+        config_home.mkdir()
+        (config_home / "project_dir").write_bytes(b"/home/\xff\xfe/clone\n")
+        monkeypatch.setattr("kiro_crew.cli.config_dir", lambda: config_home)
+        # Marker-free CWD, pinned the same way as the test above.
+        monkeypatch.setattr(
+            Path,
+            "cwd",
+            classmethod(lambda cls: cls("/kc-detect-project-dir-has-no-markers/cwd")),
+        )
+
+        from kiro_crew.cli import _detect_project_dir
+
+        assert _detect_project_dir() is None
+
     def test_detect_project_dir_no_agents_dir(self, tmp_path, monkeypatch):
         """Detection works without a project-level agents/ dir (removed in bbbc1f6e).
 
@@ -681,15 +698,19 @@ class TestSetupChannelGating:
     into the guided Slack credential + slash-command steps.
     """
 
-    def _run_setup(self, monkeypatch, tmp_path, argv=None, **kwargs):
+    def _run_setup(self, monkeypatch, tmp_path, argv=None, install_wrote: bool = True, **kwargs):
         import kiro_crew.cli_setup as cs
 
         calls: list[str] = []
         monkeypatch.delenv("KIROCREW_PROJECT_DIR", raising=False)
+
+        def _install(clean=False, _wrote_out=None, **_):
+            if _wrote_out is not None:
+                _wrote_out.append(install_wrote)
+            return tmp_path / "agent.json"
+
         # Imported inside _setup_impl — patch at their source modules.
-        monkeypatch.setattr(
-            "kiro_crew.agent.install_agent", lambda clean=False: tmp_path / "agent.json"
-        )
+        monkeypatch.setattr("kiro_crew.agent.install_agent", _install)
         # Mirror the real signature (bin_dir, *, claim_existing): the setup path
         # passes claim_existing=True, and a stub that refused it would fail here
         # for a reason that has nothing to do with channel gating.
@@ -733,6 +754,17 @@ class TestSetupChannelGating:
         out = capsys.readouterr().out
         assert "Messaging Channels" in out
         assert "setup --slack" in out
+
+    def test_a_rebuild_that_did_not_write_is_not_reported_installed(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """An unreadable spec (or a refused shared home) is left as it was, and says so."""
+        self._run_setup(monkeypatch, tmp_path, install_wrote=False, agent_only=True)
+        out = capsys.readouterr().out
+        assert "Agent config left unchanged" in out
+        assert "Agent installed" not in out
+        self._run_setup(monkeypatch, tmp_path, agent_only=True)
+        assert "✅ Agent installed" in capsys.readouterr().out
 
     def test_slack_flag_opts_into_slack_steps(self, tmp_path, monkeypatch):
         """--slack runs the guided Slack credential + slash-command steps in order."""

@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 from kiro_crew.acp._dispatch import classify_notification
 from kiro_crew.acp.client import _is_safe_oauth_url
 from kiro_crew.acp.mcp_reattempt import MAX_ATTEMPTS as REATTEMPT_MAX
-from kiro_crew.acp.mcp_reattempt import is_recoverable_auth_failure
+from kiro_crew.acp.mcp_reattempt import is_recoverable_auth_failure, is_start_timeout_failure
 from kiro_crew.acp.mcp_session_report import (
     BUCKET_CAP,
     NAME_CAP,
@@ -176,11 +176,18 @@ _SENTINEL = object()
 #: How long a declared-governed start waits before it may start without Crew's
 #: managed servers: the same bound the init drain gives a first report.
 GOVERNED_SETTLE_SECS = 6.0
+#: Shared cap on the best-effort wait for mounted servers outside the required
+#: barrier (:func:`wait_mounted_mcp`). Measured: the GitHub Connection bridge
+#: reports 1.4-1.9 s after the first prompt would otherwise go out.
+MOUNTED_MCP_WAIT_SECS = 5.0
 #: Failure text on the MCP report for a managed server a governed start skipped.
 GOVERNED_DROP_REASON = (
     "not started by the host: registry mode is on and a governed MCP profile drops "
     "Crew's servers. This session runs without it."
 )
+#: The pending state a managed server re-attempted after a start timeout reads as
+#: in the readiness barrier until the host shows it acting on the reset.
+STATE_REATTEMPTING = "re-attempting"
 
 
 def _remote_flat_launches(self: AcpSessionHandle) -> dict[str, tuple[tuple[str, ...], ...]] | None:
@@ -336,9 +343,16 @@ async def wait_mcp_ready(
     wait: governed, the session starts as soon as every pending server is such a
     drop; undeclared, the start fails at once naming the servers and the
     setting, instead of spending *timeout* on servers that cannot come.
+
+    A required server that failed only because its start ran out of time is
+    re-attempted once on the same deadline (:func:`_reattempt_timed_out_start`)
+    before its failure ends the start.
     """
     readiness = KasMcpReadiness(self._session_id, required, tool_policy, injected)
     self._mcp_report.include_configured(required)
+    # Servers re-attempted after a start timeout, each mapped to whether a status
+    # snapshot since the reset has shown it in a state other than failed.
+    reattempted: dict[str, bool] = {}
     start = time.monotonic()
     deadline = start + timeout
     # The governed checkpoint: the first moment the never-named check may start
@@ -387,8 +401,10 @@ async def wait_mcp_ready(
             continue
         self._mcp_report.record_frame(msg, owned=self._owns_mcp_frame(msg))
         readiness.record(msg)
-        if readiness.failure:
-            raise AcpRuntimeError(f"KAS managed MCP initialization failed: {readiness.failure}")
+        _hold_reattempted(readiness, reattempted)
+        while readiness.failure:
+            if not _reattempt_timed_out_start(self, readiness, reattempted):
+                raise AcpRuntimeError(f"KAS managed MCP initialization failed: {readiness.failure}")
         if readiness.registry_filtered:
             # The host said its registry dropped these: no wait makes them start.
             if governed:
@@ -399,6 +415,70 @@ async def wait_mcp_ready(
                 raise AcpRuntimeError(_registry_filtered_message(readiness))
     for name in required:
         self._mcp_report.record_event(EVENT_MCP_SERVER_INITIALIZED, name)
+
+
+def _reattempt_timed_out_start(
+    handle: AcpSessionHandle, readiness: KasMcpReadiness, reattempted: dict[str, bool]
+) -> bool:
+    """Re-attempt the failing required server once if its start only ran out of time.
+
+    A cold start behind a restart can miss the gateway's first-``initialize``
+    deadline or the host's own connect timeout, and either leaves a ``failed``
+    status entry whose ``errorMessage`` reads as a timeout
+    (:func:`~kiro_crew.acp.mcp_reattempt.is_start_timeout_failure`). The
+    runtime's ``_kiro/mcp/resetServer`` re-attempt (``begin_mcp_reattempt``)
+    connects it again while this barrier keeps waiting on the same deadline.
+
+    False, sending nothing, for any other failure state or reason, for a server
+    this barrier already re-attempted, and on a host without the reset request;
+    the runtime's own refusal (a sign-in holds the slot, the session is not
+    registered) answers False too. The caller then fails the start.
+    """
+    name = readiness.failed_name
+    if (
+        not name
+        or name in reattempted
+        or readiness.states.get(name) != "failed"
+        or not is_start_timeout_failure(readiness.errors.get(name))
+        or not handle._session_id
+    ):
+        return False
+    # Read with getattr: a handle built without its runtime has no re-attempt.
+    runtime = getattr(handle, "_runtime", None)
+    begin = getattr(runtime, "begin_mcp_reattempt", None)
+    if begin is None or getattr(runtime, "reattempts_mcp_servers", False) is not True:
+        return False
+    if not begin(handle._session_id, name):
+        return False
+    reattempted[name] = False
+    readiness.states[name] = STATE_REATTEMPTING
+    logger.info(
+        "KAS managed MCP server %s on %s timed out starting; re-attempting it once",
+        sanitize_sink_text(name, NAME_CAP),
+        handle._session_id,
+    )
+    return True
+
+
+def _hold_reattempted(readiness: KasMcpReadiness, reattempted: dict[str, bool]) -> None:
+    """Read a re-attempted server's failure as pending until the host acts on the reset.
+
+    The reset goes out in the background, so a status snapshot the host sent
+    before it processed the reset still lists the old failure. Until a snapshot
+    lists the server in any other state (``connecting``, as the reset starts
+    it), a ``failed`` entry is that stale one and reads as
+    :data:`STATE_REATTEMPTING`, and so does a snapshot that does not list the
+    server, which says nothing about the reset. From then on a ``failed`` entry
+    is the re-attempt's own result and ends the start.
+    """
+    for name, acted_on in reattempted.items():
+        if acted_on:
+            continue
+        state = readiness.states.get(name)
+        if state in (None, "failed", STATE_REATTEMPTING):
+            readiness.states[name] = STATE_REATTEMPTING
+        elif state is not None:
+            reattempted[name] = True
 
 
 def _record_dropped(report: McpSessionReport, readiness: KasMcpReadiness, governed: bool) -> bool:
@@ -474,28 +554,56 @@ async def wait_for_declared_mcp(self: AcpSessionHandle, timeout: float) -> tuple
     seconds pass. Returns the declared servers that are not ready, in spec
     order; empty when all are.
     """
-    report = self._mcp_report
+    await _drain_until_reported(self, self._mcp_report.declared, timeout)
+    return self._mcp_report.declared_not_ready()
+
+
+async def wait_mounted_mcp(self: AcpSessionHandle, names: tuple[str, ...], timeout: float) -> None:
+    """Best effort: hold the first prompt until each of *names* has reported, or *timeout*.
+
+    For the servers outside the required barrier (Connections, user servers), so
+    turn 1's catalog has their tools. Never fails the start: a server still
+    unreported at *timeout* is logged and the session starts without it. Runtime
+    death still raises.
+    """
+    if await _drain_until_reported(self, names, timeout):
+        raise AcpRuntimeDead("Runtime exited while waiting for mounted MCP servers")
+    late = self._mcp_report.unreported(names)
+    if late:
+        logger.info(
+            "Session %s starts before MCP servers reported (%gs cap): %s",
+            self._session_id,
+            timeout,
+            ", ".join(late),
+        )
+
+
+async def _drain_until_reported(
+    handle: AcpSessionHandle, names: tuple[str, ...], timeout: float
+) -> bool:
+    """Drain init frames until every one of *names* has reported; True if the runtime died."""
+    report = handle._mcp_report
     deadline = time.monotonic() + max(0.0, timeout)
-    while report.declared_unreported():
+    while report.unreported(names):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         try:
-            msg = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+            msg = await asyncio.wait_for(handle._queue.get(), timeout=remaining)
         except asyncio.TimeoutError:
             break
         if msg is None:
             # Runtime died: re-poison so the turn that follows sees it.
-            await self._queue.put(None)
-            break
-        if consume_stale_compaction_status(self, msg):
+            await handle._queue.put(None)
+            return True
+        if consume_stale_compaction_status(handle, msg):
             continue
         try:
-            report.record_frame(msg, owned=self._owns_mcp_frame(msg))
-            self._apply_init_notification(msg, classify_notification(msg))
+            report.record_frame(msg, owned=handle._owns_mcp_frame(msg))
+            handle._apply_init_notification(msg, classify_notification(msg))
         except Exception:
             logger.debug("declared MCP wait: error processing init frame", exc_info=True)
-    return report.declared_not_ready()
+    return False
 
 
 def _note_mcp_sign_in_status(self: AcpSessionHandle, msg: JsonRpcMessage, *, offer: bool) -> None:
@@ -652,11 +760,15 @@ def text_names_mcp_server(text: str, name: str) -> bool:
 
     Each alias from :func:`mcp_server_aliases` matches with any run of
     separators between its words, and only between word boundaries, so
-    ``notion`` matches "sign in to Notion" and not "notional". Pure.
+    ``notion`` matches "sign in to Notion" and not "notional". A registry
+    provider whose slug is *name* adds its ``sign_in_words`` (``atlassian``:
+    "jira", "confluence"), matched the same way. Pure.
     """
+    from kiro_crew.connections.registry import sign_in_words
+
     if not text or not name:
         return False
-    for alias in mcp_server_aliases(name):
+    for alias in (*mcp_server_aliases(name), *sign_in_words(name)):
         pattern = r"[\s_.:/@-]+".join(re.escape(word) for word in alias.split(" "))
         if re.search(rf"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])", text, re.IGNORECASE):
             return True

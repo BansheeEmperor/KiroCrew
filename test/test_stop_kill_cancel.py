@@ -407,7 +407,7 @@ class TestTeardownUsesPortableSignalConstant:
                 "kiro_crew.platform_compat.kill_process_group", return_value=True
             ) as mock_group,
         ):
-            await manager._reap_orphaned_backends()
+            await manager._reap_orphaned_backends("test")
 
         assert mock_group.call_args.args == (111, 9)
         # The reap ran to its end: the record of the gone generation is removed.
@@ -451,7 +451,7 @@ class TestOrphanReapIsPlatformCorrect:
             patch("os.getpgid", side_effect=_forbid, create=True),
             patch("os.killpg", side_effect=_forbid, create=True),
         ):
-            await manager._reap_orphaned_backends()
+            await manager._reap_orphaned_backends("test")
 
         assert calls == [(111, True), (222, True)]
 
@@ -533,12 +533,20 @@ class TestDetachOnCancelFailure:
             def log_api_access(self, **_kwargs: Any) -> None: ...
 
         class _FakePool:
-            """Fork divergence: the lazy-spawn attach path releases its
-            hand-out reservation via ``pool.unreserve`` in a ``finally``
-            (absent upstream at this commit), so a bare ``object()`` would
-            raise AttributeError. Same double as test_mcp_gateway_claim."""
+            """Minimal pool double for the lazy-spawn attach path.
+
+            The attach path calls ``pool.unreserve`` via ``_release_reservation``
+            (non-exclusive stub), and ``_teardown_connection`` calls
+            ``pool.release_exclusive`` then ``pool.spawn_shutdown``.
+            All three are no-ops here: no real backend process is held."""
 
             def unreserve(self, _key: object) -> None:
+                pass
+
+            async def release_exclusive(self, _stub_uuid: str) -> None:
+                return None
+
+            def spawn_shutdown(self, _backend: object) -> None:
                 pass
 
         monkeypatch.setattr(gw, "SecurityEventLog", _FakeSEL)
@@ -576,7 +584,6 @@ class TestDetachOnCancelFailure:
                 hot_keys=None,
             ),
             "the connection handler returning",
-            timeout=5.0,
         )
 
         # The critical cleanup must run despite the cancel failure.

@@ -9,12 +9,14 @@ import ErrorNotice from '../../components/ErrorNotice'
 import { useTheme } from '../../hooks/useTheme'
 import { useSandboxDoc } from '../../hooks/useSandboxDoc'
 import { useFrameLinkBridge } from '../../hooks/useFrameLinkBridge'
+import { useFrameAliveRecovery } from '../../hooks/useFrameAliveRecovery'
 import { buildSrcdoc, readThemeVars } from '../../lib/widgetSrcdoc'
 import { startDashboardLoadTiming, type DashboardLoadTiming } from '../../lib/dashboardTiming'
 import { i18nT } from '../../i18n/t'
 import { useLanguage } from '../../i18n/LanguageProvider'
 import { MEMBER_DASHBOARD_QUERY_PREFIX, SESSION_DASHBOARD_QUERY_PREFIX, subscribeDashboardFields } from '../../hooks/useWebSocket'
 import CrewDashboardEmpty from './CrewDashboardEmpty'
+import CrewDashboardLoading from './CrewDashboardLoading'
 import CrewDashboardBehindBand from './CrewDashboardBehindBand'
 import CrewDashboardDownload from './CrewDashboardDownload'
 import { applyPushedRead, withIslandRead, type DashboardRead } from './dashboardDownloadFile'
@@ -84,6 +86,11 @@ const ACT_MESSAGE_TYPE = 'kirocrew-dashboard:act'
 const REFETCH_MESSAGE_TYPE = 'kirocrew-dashboard:refetch'
 /** Longest reply a page may put in the composer. Longer is refused, not cut. */
 const ACT_MAX_CHARS = 600
+/** A band's Retry while its re-ask is out: held with `aria-disabled` and a guard in
+ *  its handler, never native `disabled`, because disabling the button the reader
+ *  just pressed blurs it to `<body>` while the band stays on screen. These are the
+ *  values `Btn`'s own `disabled:` variants give. */
+const HELD_RETRY = 'aria-disabled:cursor-not-allowed aria-disabled:opacity-30'
 
 /** The text a page's act message may put in the composer, or null to refuse it. */
 export function actText(data: unknown): string | null {
@@ -748,6 +755,8 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
             // So does the desktop trackpad swipe that hides the panel, where
             // the host asks for it.
             relayWheel,
+            // Answers the host's ping, so a reload onto the spent url is re-minted.
+            aliveReply: true,
           })
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the page, see above
@@ -906,6 +915,10 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
     el.addEventListener('load', onFrameLoad)
     return () => el.removeEventListener('load', onFrameLoad)
   }, [url, grantKey, onFrameLoad])
+  // The browser can reload this frame by itself, and the reload finds its
+  // single-use url spent: a white frame. Re-mint when the document stops answering.
+  // A frame promoted from off screen already loaded there, and that load can be a 404.
+  useFrameAliveRecovery(frameRef, url, runsScript, retry, url !== null && preloadedRef.current?.url === url && preloadedRef.current.loaded)
   useEffect(() => {
     if (!staged) return
     const onMessage = (event: MessageEvent) => {
@@ -1129,12 +1142,10 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
   // a page already on screen stays mounted through it. Unmounting it here meant a
   // failed read for that key remounted the frame on its spent document url.
   if ((isLoading && !shown) || awaitingFirstPage) {
-    return (
-      <div className="p-4 space-y-1.5" data-testid="crew-dashboard-loading" aria-hidden>
-        <div className="h-3 rounded bg-bg-hover animate-pulse" />
-        <div className="h-3 w-2/3 rounded bg-bg-hover animate-pulse" />
-      </div>
-    )
+    // One loading treatment for the whole wait: the read and the mint below both
+    // draw this same skeleton, so a cold open reads as one load filling in rather
+    // than a sequence of unrelated placeholders.
+    return <CrewDashboardLoading />
   }
 
   // 404 `no_preview`: the staged page was applied or expired. Nothing is broken
@@ -1323,7 +1334,7 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
             className="flex-1 min-w-0"
             testId="crew-dashboard-kept"
           />
-          <Btn disabled={probe.pending} onClick={probe.retry} className="shrink-0">
+          <Btn aria-disabled={probe.pending || undefined} onClick={() => { if (!probe.pending) probe.retry() }} className={`shrink-0 ${HELD_RETRY}`}>
             <RotateCw className="lucide-inline" aria-hidden />
             {i18nT('pages.membersPage.webview_retry')}
           </Btn>
@@ -1349,7 +1360,7 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
             className="flex-1 min-w-0"
             testId="crew-dashboard-mint-error"
           />
-          <Btn disabled={pending} onClick={retry} className="shrink-0">
+          <Btn aria-disabled={pending || undefined} onClick={() => { if (!pending) retry() }} className={`shrink-0 ${HELD_RETRY}`}>
             <RotateCw className="lucide-inline" aria-hidden />
             {i18nT('pages.membersPage.webview_retry')}
           </Btn>
@@ -1375,7 +1386,7 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
             className="flex-1 min-w-0"
             testId="crew-dashboard-read-error"
           />
-          <Btn disabled={isFetching} onClick={() => void refetch()} className="shrink-0" data-testid="crew-dashboard-read-error-retry">
+          <Btn aria-disabled={isFetching || undefined} onClick={() => { if (!isFetching) void refetch() }} className={`shrink-0 ${HELD_RETRY}`} data-testid="crew-dashboard-read-error-retry">
             <RotateCw className="lucide-inline" aria-hidden />
             {i18nT('pages.membersPage.webview_retry')}
           </Btn>
@@ -1412,9 +1423,9 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
               behind, so a reader would watch the notice clear with the same stale
               values under it. */}
           <Btn
-            disabled={refetchPending}
-            onClick={askWholeRead}
-            className="shrink-0"
+            aria-disabled={refetchPending || undefined}
+            onClick={() => { if (!refetchPending) askWholeRead() }}
+            className={`shrink-0 ${HELD_RETRY}`}
             data-testid="crew-dashboard-refetch-retry"
           >
             <RotateCw className="lucide-inline" aria-hidden />
@@ -1480,7 +1491,10 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
           />
         ),
       ] : failed && !pending ? null : (
-        <div className="p-4 text-[11px] text-muted">{i18nT('pages.membersPage.dashboard_rendering')}</div>
+        // The mint is the last of the three serial waits (chunk, read, mint); it
+        // shows the same skeleton as the two before it so the wait stays one
+        // treatment up to the frame's first paint.
+        <CrewDashboardLoading />
       )}
       {probating && probe.url && (
         // The candidate, mounted OFF SCREEN so it can run and beacon. One pixel

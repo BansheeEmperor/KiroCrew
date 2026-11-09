@@ -43,6 +43,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
     from kiro_crew.dashboard.handlers.updates_apply import _repo_exec_config_refusal  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_apply import _resolve_restart_target  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_apply import _restart_gateway  # noqa: F401
+    from kiro_crew.dashboard.handlers.updates_apply import _restart_pending_refusal  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_apply import _run_tracked_policy_apply  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_apply import _snapshot_memory_or_refuse  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_apply import _user_excludes_file  # noqa: F401
@@ -65,6 +66,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
     from kiro_crew.dashboard.handlers.updates_check import _CLI_MANIFEST_SCHEMA  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_check import _FEED_MAX_BYTES  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_check import _FEED_TIMEOUT_SECS  # noqa: F401
+    from kiro_crew.dashboard.handlers.updates_check import _GIT_FETCH_TIMEOUT_S  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_check import _MIN_VERSION_RE  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_check import _PUB_DATE_RE  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_check import _UPDATE_CHECK_INTERVAL  # noqa: F401
@@ -83,8 +85,10 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
     from kiro_crew.dashboard.handlers.updates_check import _last_update_check  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_check import _release_update_check_task  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_check import _run_update_check  # noqa: F401
+    from kiro_crew.dashboard.handlers.updates_check import _update_policy_file  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_check import api_update_check  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_check import status_update_fields  # noqa: F401
+    from kiro_crew.dashboard.handlers.updates_step_up import _OFFERED_MAX_CHARS  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_step_up import _arm_packaged_app  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_step_up import _audit_update_event  # noqa: F401
     from kiro_crew.dashboard.handlers.updates_step_up import _loopback_peer  # noqa: F401
@@ -136,8 +140,10 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _effective_update_required,
         _refresh_auto_update_effect,
         _refresh_auto_update_effect_once,
+        _served_auto_update_effect,
         _start_auto_effect_refresh,
         _status_auto_update_effect,
+        _status_auto_update_manual_only,
         prime_status_auto_update_effect,
     )
 if TYPE_CHECKING:  # names it serves from outside the family, from their homes
@@ -157,6 +163,7 @@ if TYPE_CHECKING:  # names it serves from outside the family, from their homes
     from kiro_crew.config.loader import config_path  # noqa: F401
     from kiro_crew.config.loader import overlay_pins  # noqa: F401
     from kiro_crew.config.loader import update_config_locked  # noqa: F401
+    from kiro_crew.dashboard import restart_resume  # noqa: F401
     from kiro_crew.dashboard.chat_utils import run_config_write  # noqa: F401
     from kiro_crew.dashboard.handlers._shared import require_owner_dashboard_request  # noqa: F401
     from kiro_crew.dashboard.handlers._update_feed import fetch_feed_bytes  # noqa: F401
@@ -204,6 +211,7 @@ if TYPE_CHECKING:  # names it serves from outside the family, from their homes
     from kiro_crew.platform.update_governance import update_required  # noqa: F401
     from kiro_crew.platform.update_governance import upstream_remote_and_branch  # noqa: F401
     from kiro_crew.platform.update_layout import cdn_bases as _cdn_bases  # noqa: F401
+    from kiro_crew.platform.update_layout import channel_is_published  # noqa: F401
     from kiro_crew.platform.update_layout import detect_install_layout  # noqa: F401
     from kiro_crew.platform.update_layout import set_release_channel  # noqa: F401
     from kiro_crew.platform.update_layout import wheel_update_command  # noqa: F401

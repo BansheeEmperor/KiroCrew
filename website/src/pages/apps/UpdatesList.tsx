@@ -28,6 +28,11 @@ import { installedIcon } from '../../components/appstore/useHeroArt'
 import { i18nT } from '../../i18n/t'
 import type { LibraryApp } from './useAppsData'
 
+/** A button running the update it started is held with `aria-disabled`, never
+ *  native `disabled`, which would blur the pressed button to <body> while it
+ *  stays on screen. These are the `aria-disabled:` twins of `Btn`'s dimming. */
+const HELD = 'aria-disabled:cursor-not-allowed aria-disabled:opacity-30'
+
 export default function UpdatesList({
   rows, updatingAll, updatePending, onUpdate, onUpdateAll,
 }: {
@@ -44,18 +49,22 @@ export default function UpdatesList({
 }) {
   return (
     <div>
-      {/* Header: the same count line and Update All control the Library banner
-          carries (same i18n keys), so the two surfaces describe one worklist
-          in one voice. The progress label replaces the button text while the
-          batch runs — the disabled button IS the progress surface. */}
+      {/* Header: the same count sentence the Library hint row shows (same
+          plural key), so the two surfaces describe one worklist in one voice.
+          The progress label replaces the button text while the batch runs —
+          the disabled button IS the progress surface. */}
       <div className="flex items-center justify-between gap-3 mb-3">
         <h3 className="text-[17px] font-semibold text-text-strong">
-          {i18nT('pages.appsPage.update', { count: rows.length })} {i18nT('pages.appsPage.available')}
+          {i18nT('pages.appsPage.updates_hint', { count: rows.length })}
         </h3>
         <Btn
-          className="!bg-[var(--info)] !text-info-fg hover:!opacity-80"
-          onClick={onUpdateAll}
-          disabled={!!updatingAll}
+          className={`!bg-[var(--info)] !text-info-fg hover:!opacity-80 ${HELD}`}
+          onClick={() => { if (!updatingAll && !updatePending) onUpdateAll() }}
+          aria-disabled={!!updatingAll || undefined}
+          // A row's own update owns the single pending slot: a batch started
+          // now would post that app a second time. Nobody pressed this button
+          // for that run, so plain `disabled` drops no focus.
+          disabled={!updatingAll && !!updatePending}
         >
           {updatingAll
             ? i18nT('pages.appsPage.updating_progress', { done: updatingAll.done, total: updatingAll.total })
@@ -101,9 +110,12 @@ export default function UpdatesList({
                 </div>
               </div>
               <Btn
-                className="!bg-[var(--info)] !text-info-fg hover:!opacity-80 shrink-0"
-                onClick={() => onUpdate(app.name)}
-                disabled={busy}
+                className={`!bg-[var(--info)] !text-info-fg hover:!opacity-80 shrink-0 ${HELD}`}
+                onClick={() => { if (!busy) onUpdate(app.name) }}
+                // The pressed row is held rather than disabled, so it keeps
+                // focus while it runs and after a failed update leaves it here.
+                aria-disabled={updatePending === app.name || undefined}
+                disabled={busy && updatePending !== app.name}
                 title={i18nT('components.appstore.installedAppCard.update_to', { version: app._newVersion || app.version })}
               >
                 {/* In-flight form at the point of action: a slow registry

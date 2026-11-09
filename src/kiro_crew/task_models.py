@@ -77,6 +77,9 @@ class Task:
     superseded: bool = False
     requires_approval: bool = False
     force_approval: bool = False  # blocks even in YOLO mode
+    # A file, relative to the step's work directory, where the step reports its
+    # own outcome; a "failed" status there fails the step (task_status_file).
+    status_file: str = ""
     depends_on: list[int] = field(default_factory=list)
     priority: str = "medium"
     story_points: int = 0
@@ -151,6 +154,9 @@ class Project:
     memory: WorkingMemory = field(default_factory=WorkingMemory)
     task_id: str = ""
     name: str = ""  # human-readable name (optional, display label)
+    # The agent every session of this run opens with ("" = the default agent).
+    # Kept per run and persisted: one runner serves every run of the gateway.
+    agent: str = ""
     work_dir: str = ""
     last_task_time: float = 0.0
     branch_name: str = ""

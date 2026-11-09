@@ -12,8 +12,10 @@ import logging
 import os
 import stat as _stat
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kiro_crew import pinned_fs, platform_compat
+from kiro_crew.config import loosening_provenance
 from kiro_crew.config.paths import (
     _WORKSPACE_DIR_NAME,
     OUTBOX_DIR_NAME,
@@ -22,8 +24,10 @@ from kiro_crew.config.paths import (
     config_dir,
     config_package_dir,
 )
-from kiro_crew.config.sections import WorkspaceConfig
 from kiro_crew.user_json import strip_utf8_bom
+
+if TYPE_CHECKING:
+    from kiro_crew.config.sections import WorkspaceConfig
 
 logger = logging.getLogger("kiro_crew.config.loader")
 
@@ -196,6 +200,28 @@ def read_config_text(path: Path) -> str:
     return strip_utf8_bom(path.read_text(encoding="utf-8"))
 
 
+def read_endorsed_config_text(path: Path) -> str:
+    """:func:`read_config_text` as the loader reads the file at *path*.
+
+    For a reader whose answer feeds sandbox or security enforcement, or the read half
+    of a write: where the sandbox seals the protected leaves, a tampered, deleted or
+    unreadable one reads as its gateway-endorsed copy
+    (:func:`~kiro_crew.config.loosening_provenance.reconciled_bytes`), so the reader
+    agrees with the load. Any other path, and every path elsewhere, reads exactly as
+    :func:`read_config_text`. Raises ``FileNotFoundError`` when there is neither a file
+    nor a copy to serve.
+    """
+    leaf = loosening_provenance.leaf_for(path)
+    if leaf is None:
+        return read_config_text(path)
+    content = loosening_provenance.reconciled_bytes(
+        leaf, path, lambda p: read_config_text(p).encode("utf-8")
+    )
+    if content is None:
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
+    return strip_utf8_bom(content.decode("utf-8"))
+
+
 def read_merged_config_files(*paths: Path) -> dict:
     """The config documents at *paths*, each merged over the one before. Never raises.
 
@@ -205,15 +231,16 @@ def read_merged_config_files(*paths: Path) -> dict:
     and the whole documents merge with :func:`~kiro_crew.config.resolution._deep_merge`
     BEFORE any section is read, as the loader does, so an overlay ``"x": null``
     replaces the base section. A file that is absent, unreadable or not an object
-    contributes nothing.
+    contributes nothing. Each file reads as the load reads it
+    (:func:`read_endorsed_config_text`).
     """
     from kiro_crew.config.resolution import _deep_merge
 
     merged: dict = {}
     for path in paths:
         try:
-            document = json.loads(read_config_text(path))
-        except (OSError, ValueError):
+            document = json.loads(read_endorsed_config_text(path))
+        except (OSError, ValueError, RecursionError):
             continue
         if isinstance(document, dict):
             merged = _deep_merge(merged, document)
@@ -235,11 +262,12 @@ def overlay_pins(*key_path: str) -> bool:
     """
     try:
         path = config_local_path()
-        if not path.is_file():
-            return False
+        # Read as the load reads it, with no is_file() check first: a deleted
+        # overlay whose endorsed copy is in force still pins. FileNotFoundError
+        # (an OSError) means neither exists.
         # ValueError covers JSONDecodeError AND the UnicodeDecodeError a file
         # saved in a non-UTF-8 code page raises.
-        node: object = json.loads(read_config_text(path))
+        node: object = json.loads(read_endorsed_config_text(path))
     except (OSError, ValueError):
         return False
     for key in key_path[:-1]:
@@ -649,6 +677,10 @@ def workspace_dir_from_entry(entry: WorkspaceConfig | None) -> Path:
     silently fall back to the base directory for a workspace the first load
     had placed elsewhere.
     """
+    # Function-local: the schema stack is heavy, and the per-session Connection
+    # bridge imports this module only for :func:`read_local_secret`.
+    from kiro_crew.config.sections import WorkspaceConfig
+
     dirname = entry.dir if entry is not None and entry.dir else WorkspaceConfig().dir
     p = Path(dirname).expanduser()
     if p.is_absolute():

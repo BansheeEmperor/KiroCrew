@@ -316,6 +316,7 @@ class SshTunnelManager:
     _on_tunnel_healthy = _self_heal._on_tunnel_healthy
     _on_tunnel_exit = _self_heal._on_tunnel_exit
     _recover_after = _self_heal._recover_after
+    _retry_recovery = _self_heal._retry_recovery
     _rebuild = _self_heal._rebuild
     _mark_recovered = _self_heal._mark_recovered
     _recover = _self_heal._recover
@@ -373,9 +374,9 @@ class SshTunnelManager:
         # its own port but spawns the backend without passing it through — the
         # two disagree, the claim names a port the parent is not served on, and
         # the remote's ``frame-ancestors`` then blocks the iframe ("Pane failed
-        # to load"). The gateway already knows its real port (``app["port"]``,
-        # passed to ``_register_instances_hooks``), so it is threaded in here
-        # rather than re-derived.
+        # to load"). The gateway already knows its real port (the reserved
+        # socket's name, passed to ``_register_instances_hooks``), so it is
+        # threaded in here rather than re-derived.
         self._parent_port = parent_port if parent_port else _LOCAL_DASHBOARD_PORT
         self._allocator = PortAllocator(base_port=base_port)
         self._connect_timeout = connect_timeout_secs
@@ -454,6 +455,8 @@ class SshTunnelManager:
         # successful rebuild) + live recovery task refs (stored so they aren't
         # GC'd mid-flight; cancelled on shutdown).
         self._recover_attempts: dict[str, int] = {}
+        #: Monotonic time of the first failed recovery of the current outage, per instance.
+        self._recover_since: dict[str, float] = {}
         self._recovery_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
         # Same tasks, indexed by instance: a reconfiguration must cancel the
         # recovery in flight for ITS instance only, and a recovery that

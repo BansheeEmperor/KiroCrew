@@ -33,6 +33,7 @@ from kiro_crew.constants import (
     DENY_CAUSE_INVALID_NAME,
     DENY_CAUSE_POLICY,
     DENY_CAUSE_SURFACE_POLICY,
+    DENY_CAUSE_UNREADABLE_IDENTITY,
     STEER_NOTICE_BOUND_SECS,
 )
 from kiro_crew.deny_guidance import remediation_for, rule_id_for
@@ -54,7 +55,8 @@ logger = logging.getLogger(__name__)
 #: cause → (clause completing "The tool call you just made …", what to do next).
 _DENY_CAUSE_TEXT: dict[str, tuple[str, str]] = {
     DENY_CAUSE_POLICY: (
-        "was blocked by a Kiro Crew safety policy",
+        "was blocked by a Kiro Crew safety policy before any of it ran: if it "
+        "chained several shell commands, none of them ran, the earlier ones included",
         "use an allowed alternative (for a shell command, a read-only variant), use "
         "a different tool, or — if the block is correct and you genuinely cannot "
         "proceed — say so and stop with the reason.",
@@ -136,6 +138,15 @@ _DENY_CAUSE_TEXT: dict[str, tuple[str, str]] = {
         "approved, and the surface refused to run it unrecorded. Retrying the "
         "identical call is reasonable once; if it is refused again, say what "
         "happened rather than working around it silently.",
+    ),
+    DENY_CAUSE_UNREADABLE_IDENTITY: (
+        "was refused by the Kiro Crew gateway because the MCP tool identity the "
+        "backend reported for it could not be read, so the per-tool rules it is "
+        "under could not be checked",
+        "nothing judged the action itself, and the identity is the backend's "
+        "report, not part of the call you wrote, so the identical call would be "
+        "refused the same way. Do not retry it unchanged: reach the same result "
+        "with a different tool, or if none fits, say so and stop with the reason.",
     ),
 }
 

@@ -49,6 +49,15 @@ describe('formatShortcut', () => {
       expect(formatShortcut({ id: 't', key: 'ArrowLeft', alt: true, label: '', group: 'chat-navigation' })).toBe('Alt + \u2190')
     })
   })
+
+  it('shows Tab as ⇥ on macOS and as Tab elsewhere', () => {
+    const prev = navigator.platform
+    onTestFinished(() => setPlatform(prev))
+    setPlatform('MacIntel')
+    expect(formatShortcut({ id: 't', key: 'Tab', shift: true, group: 'actions' })).toBe('\u21e7\u21e5')
+    setPlatform('Win32')
+    expect(formatShortcut({ id: 't', key: 'Tab', shift: true, group: 'actions' })).toBe('Shift + Tab')
+  })
 })
 
 describe('DEFAULT_SHORTCUTS', () => {
@@ -340,6 +349,36 @@ describe('ShortcutsModal', () => {
     expect(screen.getByText('Toggle session panel').parentElement!).toHaveTextContent('Not set')
   })
 
+  // The handler returns before the panel map while a text field has focus, so
+  // Alt+C/N/P/S do nothing from the composer. The rows say so, the way the
+  // Alt+arrow rows do.
+  it('labels the Alt+C/N/P/S panel rows with their focus rule', () => {
+    renderWithProviders(<ShortcutsModal onClose={onClose} />)
+    const rows: [string, string][] = [
+      ['Chats panel (outside text fields)', 'C'],
+      ['Notifications panel (outside text fields)', 'N'],
+      ['Task Runner panel (outside text fields)', 'P'],
+      ['Schedule panel (outside text fields)', 'S'],
+    ]
+    for (const [label, key] of rows) {
+      const row = screen.getByText(label).parentElement!
+      expect(row).toHaveTextContent('Alt')
+      expect(row).toHaveTextContent(key)
+    }
+    expect(screen.queryByText('Chats panel')).toBeNull()
+  })
+
+  it('Alt+C opens the Chats panel from the page but not from a text field', () => {
+    renderHookWithProviders(() => useKeyboardShortcuts({ onToggleShortcutsModal: vi.fn(), onNewChat: vi.fn() }))
+    const altC = (target: EventTarget) =>
+      !target.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC', altKey: true, cancelable: true, bubbles: true }))
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    expect(altC(textarea)).toBe(false)
+    expect(altC(document)).toBe(true)
+    textarea.remove()
+  })
+
   it('renders the enable toggle checked by default', () => {
     renderWithProviders(<ShortcutsModal onClose={onClose} />)
     const toggle = screen.getByRole('switch')
@@ -420,6 +459,18 @@ describe('history-back / history-forward registry entries', () => {
     expect(matchShortcutEvent(ev('ArrowLeft', { ctrlKey: true }), resolveShortcuts({}, 'mac'), 'mac')).toBeNull()
     expect(matchShortcutEvent(ev('ArrowLeft', { metaKey: true, shiftKey: true }), resolveShortcuts({}, 'mac'), 'mac')).toBeNull()
     expect(matchShortcutEvent(ev('ArrowLeft', { metaKey: true, altKey: true }), resolveShortcuts({}, 'mac'), 'mac')).toBeNull()
+  })
+
+  // The handler leaves ⌘/Ctrl+←/→ to a focused text field (pinned under
+  // "route-history chord" below), so the shortcuts list must say so. The rows
+  // use list-only keys; the top-bar buttons keep the plain "Back"/"Forward"
+  // (NavHistoryArrows.test pins those names).
+  it('labels the Back/Forward rows with their focus rule in the shortcuts list', () => {
+    renderWithProviders(<ShortcutsModal onClose={vi.fn()} />)
+    expect(screen.getByText('Back (outside text fields)').parentElement!).toHaveTextContent('←')
+    expect(screen.getByText('Forward (outside text fields)').parentElement!).toHaveTextContent('→')
+    expect(screen.queryByText('Back')).toBeNull()
+    expect(screen.queryByText('Forward')).toBeNull()
   })
 })
 

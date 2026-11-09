@@ -11,6 +11,7 @@ const {
   bindGlobalHotkey: bindStoredGlobalHotkey,
   unregisterGlobalHotkey,
   currentGlobalHotkey,
+  requestedGlobalHotkey,
   setGlobalHotkeyLogger,
 } = require("./global-hotkey");
 const { initAutoUpdate } = require("./auto-update");
@@ -20,6 +21,11 @@ const { detectWsl2 } = require("./wsl-detection");
 const { crashNoticeSummary } = require("./crash-collector");
 const { PREFIX: PANE_ASSETS_PREFIX, purgeableOrigin } = require("./pane-asset-journal");
 const { safeFilename } = require("./download-handler");
+const { saveThemeSplash } = require("./theme-splash");
+const { createRelayCrewOpener, isEndpointId } = require("./relay-crew-open");
+const { requestRelayCrewToken } = require("./relay-crew-client");
+const { openRelayCrewWindow, createTokenHolder } = require("./relay-crew-window");
+const { createRelayCrewRenewal } = require("./relay-crew-renewal");
 
 /**
  * Register the Electron shell's renderer bridges without taking ownership of
@@ -57,6 +63,9 @@ function createIpcRegistrar({
   // build). See runtime/update/policy-channel.js.
   getRequiredChannel = requiredUpdateChannelFor(),
   clipboardImageTimeoutMs = 1000,
+  // The relay Crew opener behind `relay-crew:open`. Built on first use from the
+  // injected Electron when absent; tests pass a fake.
+  relayCrewOpenerOverride = null,
 } = {}) {
   if (!electron) throw new Error("createIpcRegistrar: electron is required");
   if (!store) throw new Error("createIpcRegistrar: store is required");
@@ -166,6 +175,24 @@ function createIpcRegistrar({
     }
   };
 
+  let relayOpener = relayCrewOpenerOverride;
+  const relayCrewOpener = () => {
+    if (!relayOpener) {
+      const { BaseWindow, WebContentsView, session } = electron;
+      const windowDeps = { BaseWindow, WebContentsView, session, shell, log };
+      relayOpener = createRelayCrewOpener({
+        requestToken: (endpointId, signInMarker) => requestRelayCrewToken({
+          backendUrl, endpointId, signInMarker, getSecret: readInternalSecret, fetchFn,
+        }),
+        openWindow: (opts) => openRelayCrewWindow(opts, windowDeps),
+        createRenewal: createRelayCrewRenewal,
+        createTokenHolder,
+        log,
+      });
+    }
+    return relayOpener;
+  };
+
   setGlobalHotkeyLogger(log);
   const summonDashboard = createSummonHandler({
     getWindow: () => (
@@ -235,15 +262,19 @@ function createIpcRegistrar({
       });
     }
 
-    // The shortcuts UI reports what is ACTUALLY bound. Registration may have
-    // fallen back to the default or degraded to no shortcut at all.
+    // The shortcuts UI reports what is ACTUALLY bound beside what was asked
+    // for. Registration may have fallen back to the default or degraded to no
+    // shortcut at all.
     ipcMain.handle("global-hotkey:get", () => ({
       accelerator: currentGlobalHotkey(),
+      requested: requestedGlobalHotkey(),
       default: DEFAULT_GLOBAL_HOTKEY,
     }));
 
     ipcMain.on("theme-accent-changed", (_event, hex) =>
       windows.chrome.setThemeAccent(hex));
+    ipcMain.on("theme-splash-changed", (_event, image) =>
+      saveThemeSplash(app.getPath("userData"), image));
     ipcMain.on("focus-mode-chrome", (event, visible) =>
       windows.chrome.focusMode(event.sender, visible));
     // Arm/disarm the off-window cursor poll that dismisses a focus-mode reveal.
@@ -409,12 +440,13 @@ function createIpcRegistrar({
       return detectWsl();
     });
 
-    // What the main window's close button does. Deliberately narrower than
-    // `assertLocalDashboard`, which would hide the row from a main window on a
-    // configured remote host and leave that user no way to change it. The
-    // sender must be the main window's top frame, still on its assigned
-    // dashboard origin. That trusts the main window's dashboard, local or
-    // remote, with a visible, reversible two-valued preference.
+    // What the main window's close button does, and whether the tray icon
+    // shows. Deliberately narrower than `assertLocalDashboard`, which would
+    // hide the rows from a main window on a configured remote host and leave
+    // that user no way to change them. The sender must be the main window's
+    // top frame, still on its assigned dashboard origin. That trusts the main
+    // window's dashboard, local or remote, with visible, reversible two-valued
+    // preferences.
     const assertMainWindowDashboard = (event, channel) => {
       const refuse = (why) => {
         log(`${channel} rejected: ${why}`);
@@ -446,6 +478,14 @@ function createIpcRegistrar({
     ipcMain.handle("close-action:set", async (event, value) => {
       assertMainWindowDashboard(event, "close-action:set");
       return windows.closeAction.set(value);
+    });
+    ipcMain.handle("tray-icon:get", async (event) => {
+      assertMainWindowDashboard(event, "tray-icon:get");
+      return windows.trayIcon.get();
+    });
+    ipcMain.handle("tray-icon:set", async (event, show) => {
+      assertMainWindowDashboard(event, "tray-icon:set");
+      return windows.trayIcon.set(show);
     });
 
     // Open a file the chat referenced in the user's own editor, by handing its
@@ -657,6 +697,23 @@ function createIpcRegistrar({
         fetchFn,
         log,
       });
+    });
+
+    // Open a remote Crew reached through the Kiro relay, in its own window
+    // (relay-crew-open.js). The renderer sends only the endpoint ID; main asks
+    // this shell's own gateway for the access token with the local secret, so
+    // neither the token nor the Crew URL crosses the bridge. Gated like
+    // `external-terminal:open`, because a connection window pointed at a
+    // remote gateway shares this preload. Never rejects: the dashboard gets
+    // `{ ok }` or `{ ok: false, error }`.
+    ipcMain.handle("relay-crew:open", async (event, endpointId) => {
+      if (!isEndpointId(endpointId)) return { ok: false, error: "INVALID_ENDPOINT" };
+      try {
+        await assertLocalDashboard(event, "relay-crew:open");
+      } catch {
+        return { ok: false, error: "UNAVAILABLE" };
+      }
+      return relayCrewOpener().open(endpointId);
     });
 
     ipcMain.handle("zoom:get", (event) =>
@@ -896,8 +953,9 @@ function createIpcRegistrar({
               // On other platforms the app exits when the last window closes,
               // so clearing is safe. Only clear when another window is open
               // or we're not on macOS.
-              const { BrowserWindow } = electron;
-              const anyOpen = BrowserWindow && BrowserWindow.getAllWindows().length > 0;
+              // Dashboard windows are BaseWindows; BrowserWindow.getAllWindows() lists none of them.
+              const { BaseWindow } = electron;
+              const anyOpen = BaseWindow && BaseWindow.getAllWindows().length > 0;
               if (anyOpen || process.platform !== "darwin") {
                 const wasGoverned = policyGoverned;
                 policyGoverned = governanceSenders.size > 0;

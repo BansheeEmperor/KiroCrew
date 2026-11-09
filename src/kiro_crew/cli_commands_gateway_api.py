@@ -6,7 +6,8 @@ secret ``_internal_secret`` reads. Every request goes through
 that very connection is proven to be this install's recorded gateway. ``_spawn`` lists subagents or
 starts one (``_spawn_run``, which waits for the result unless told not to);
 ``_artifact`` lists, saves, shows, updates and deletes artifacts and lists an
-artifact's versions.
+artifact's versions. ``_create_cron_folder`` creates the missing Schedule-page
+folder a ``kirocrew cron add/update --folder`` names, through the dashboard.
 
 An owner of the mirror facade ``kiro_crew.cli_commands``: callers and tests reach every
 name here as ``kiro_crew.cli_commands.<name>``, and a patch through the facade reaches
@@ -76,6 +77,63 @@ def _peer_refusal() -> type[Exception]:
     return _GatewayPeerRefused
 
 
+def _create_cron_folder(name: str) -> dict[str, object]:
+    """Create a Schedule-page cron folder through the running gateway; never locally.
+
+    The CLI's ``create`` leg for ``mcp_cron._resolve_cron_folder_via``: POSTs
+    ``{"name": name}`` to the dashboard's own ``/api/cron-folders`` -- the
+    handler that creates a folder under the folder lock and persists it through
+    ``DashboardState.create_cron_folder`` -- exactly as the ``cron_add`` tool
+    does. ``cron_folders.json`` is owned by the dashboard, which rewrites it
+    wholesale, so a create written here would be lost on its next save; with no
+    gateway there is simply no create.
+
+    Returns the endpoint's JSON (``{"id": ..., "name": ...}``) or
+    ``{"error": ...}``. The port is resolved instance-aware, as ``cron trigger``
+    resolves it, so a ``--port auto`` sibling never receives the secret.
+    """
+    # In-function: a module-scope import would surface on the cli_commands facade.
+    from kiro_crew.loopback_http import deadline_expired
+    from kiro_crew.port_resolution import resolve_client_port_ex
+
+    port, _evidence_backed = resolve_client_port_ex(None)
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/cron-folders",
+        data=json.dumps({"name": name}).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "X-Internal-Secret": _internal_secret(port),
+        },
+        method="POST",
+    )
+    try:
+        with _gateway_send(req, port, 10, "cli_cron_folder_create") as resp:
+            raw = resp.read()
+            made = json.loads(raw) if raw else {}
+    except _peer_refusal() as exc:
+        return {"error": f"gateway ownership not verified: {exc}"}
+    except urllib.error.HTTPError as exc:
+        try:
+            return {"error": str(json.loads(exc.read()).get("error") or f"{exc.code} {exc.reason}")}
+        except Exception:
+            return {"error": f"{exc.code} {exc.reason}"}
+    except (urllib.error.URLError, OSError) as exc:
+        if deadline_expired(exc):
+            # Something took the request, so the folder may exist now: say so
+            # rather than inviting a retry that could make a second one.
+            return {
+                "error": f"gateway on port {port} is up but busy; the folder may have been "
+                "created -- check `kirocrew cron list` or the Schedule page before retrying"
+            }
+        return {
+            "error": f"gateway not running (cannot reach dashboard on port {port}): "
+            "start it or pass an existing folder"
+        }
+    except ValueError:
+        return {"error": "gateway returned an unreadable answer"}
+    return made if isinstance(made, dict) else {"error": "gateway returned an unreadable answer"}
+
+
 def _spawn_row_text(row: dict[str, object]) -> str:
     """A ``spawn list`` row's id and task, as one terminal line.
 
@@ -85,6 +143,25 @@ def _spawn_row_text(row: dict[str, object]) -> str:
     row_id = safe_terminal_line(str(row["id"]))
     task = safe_terminal_line(str(row.get("task") or ""))[:60]
     return f"{row_id}  {task}"
+
+
+def _spawn_done_status(row: dict[str, object]) -> tuple[str, str]:
+    """A finished ``spawn list`` row's icon and note, read from its ``outcome``.
+
+    ``outcome`` is the run's terminal classification; an empty ``error`` does
+    not mean success, since a user-stopped run carries none. The success icon
+    is given to ``completed`` only, or to a row with neither ``outcome`` nor
+    ``error`` (a gateway that does not send ``outcome``); any other value shows
+    as a failure. The error is agent-influenced, so it is confined to one line.
+    """
+    outcome = row.get("outcome")
+    error = row.get("error")
+    if outcome == "completed" or (outcome is None and not error):
+        return "✅", ""
+    if outcome == "stopped":
+        return "⏹", "  (stopped)"
+    reason = safe_terminal_line(str(error or outcome or "failed"))[:80]
+    return "❌", f"  (failed: {reason})"
 
 
 def _client_port(cli_port: int | None) -> int:
@@ -156,7 +233,7 @@ def _spawn(args: argparse.Namespace) -> None:
             print("  (the queued list is partial; more spawns may be queued)")
         for a in agents:
             if a.get("done"):
-                status, note = "✅", ""
+                status, note = _spawn_done_status(a)
             elif a.get("awaiting_approval"):
                 # A distinct icon from the executing hourglass, so `spawn list`
                 # answers "is this working or waiting for me?".
@@ -273,8 +350,20 @@ def _spawn_run(args: argparse.Namespace, base: str) -> None:
         except _peer_refusal() as e:
             print(f"Error: gateway ownership not verified: {e}", file=sys.stderr)
             sys.exit(1)
-        except Exception:
-            print("Error: lost connection to gateway", file=sys.stderr)
+        except Exception as e:
+            # A timeout is a busy gateway, not a lost one, and the subagent it
+            # accepted may still be running. Imported in-function for the
+            # cli_commands facade, as in `spawn list`.
+            from kiro_crew.loopback_http import deadline_expired
+
+            if deadline_expired(e):
+                print(
+                    "Error: gateway on port %d is up but did not answer in time (busy); "
+                    "the subagent may still be running -- check `kirocrew spawn list`" % args.port,
+                    file=sys.stderr,
+                )
+            else:
+                print("Error: lost connection to gateway", file=sys.stderr)
             sys.exit(1)
         # Say WHY the wait is not progressing. A spawn with no parent session
         # raises its approval prompt unowned, so it appears only on the global
@@ -323,7 +412,21 @@ def _artifact(args: argparse.Namespace) -> None:
             except Exception:
                 return {"error": str(exc)}
         except Exception as exc:
-            return {"error": str(exc)}
+            # A timeout means the gateway may have taken the request and still be
+            # working: it is up but busy. A write may land after this client gives
+            # up, so its line asks for a check, not a re-run. Imported in-function
+            # for the cli_commands facade, as in `spawn list`.
+            from kiro_crew.loopback_http import deadline_expired
+
+            if not deadline_expired(exc):
+                return {"error": str(exc)}
+            busy = f"gateway on port {port} is up but did not answer in time (busy)"
+            if method == "GET":
+                return {"error": f"{busy}; try again in a moment"}
+            return {
+                "error": f"{busy}; the change may have been applied -- "
+                "check `kirocrew artifact list` before re-running"
+            }
 
     def _read_content(args: argparse.Namespace) -> str:
         if getattr(args, "content_file", None):

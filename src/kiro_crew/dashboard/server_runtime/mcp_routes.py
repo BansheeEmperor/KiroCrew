@@ -142,6 +142,11 @@ def _deferred_instances(handler_name: str) -> Callable:
 
 def _register_mcp_routes(app: web.Application) -> None:
     """Register API routes used by MCP tools (spawn, lessons, crons, etc.)."""
+    # Both entrypoints register this table, so both start reading the Ultra Mode
+    # pause file off-loop at startup; the hook returns at once.
+    from kiro_crew import crew_pause
+
+    app.on_startup.append(crew_pause.startup_preload)
     app.router.add_post("/api/spawn", handlers.api_spawn)
     app.router.add_post("/api/spawn/lost", handlers.api_spawn_lost)
     app.router.add_post("/api/spawn/mark-collected", handlers.api_spawn_mark_collected)
@@ -169,6 +174,7 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_get("/api/lessons", handlers.api_lessons)
     app.router.add_post("/api/lessons", handlers.api_lessons_create)
     app.router.add_delete("/api/lessons", handlers.api_lessons_delete)
+    app.router.add_patch("/api/lessons", handlers.api_lessons_update)
     app.router.add_get("/api/session-ledger", handlers.api_session_ledger_get)
     app.router.add_post("/api/session-ledger/record", handlers.api_session_ledger_record)
     app.router.add_get("/api/work-ledger", _deferred_work_ledger("api_work_ledger_get"))
@@ -191,6 +197,11 @@ def _register_mcp_routes(app: web.Application) -> None:
         "/api/mediated-secret-request",
         _deferred("mediated_secrets", "api_mediated_secret_request"),
     )
+    # Crew-owned Connection proxy (``dashboard.feature_previews.crew_oauth``): the in-session
+    # stdio bridge's only peer. Strict internal, Unix-socket only, off by default.
+    _connection_proxy = _deferred("connection_proxy", "api_connection_proxy")
+    app.router.add_post("/api/connection-proxy", _connection_proxy)
+    app.router.add_delete("/api/connection-proxy", _connection_proxy)
     # The Crew page's masked read of a conductor's work ledger (RFC Phase 4).
     # Deliberately NOT in ``_STRICT_INTERNAL_API_PATHS``: a browser is its only
     # caller, so it stays on cookie auth — the same split the agent-panel surface
@@ -459,6 +470,14 @@ def _register_mcp_routes(app: web.Application) -> None:
         "/api/chat/slots/{slot}/crew-workers/{worker}/recap",
         _deferred("crew_worker_recap", "api_crew_worker_recap"),
     )
+    # Ultra Mode "Pause all" / "Resume all": the Stop and Continue mechanisms over
+    # the root's whole crew, under the same owner-only, no-app gate.
+    app.router.add_post(
+        "/api/chat/slots/{slot}/crew-workers/pause", _deferred("crew_pause", "api_crew_pause")
+    )
+    app.router.add_post(
+        "/api/chat/slots/{slot}/crew-workers/resume", _deferred("crew_pause", "api_crew_resume")
+    )
     app.router.add_get("/api/crons", handlers.api_crons)
     app.router.add_post("/api/crons", handlers.api_crons_create)
     app.router.add_delete("/api/crons", handlers.api_cron_batch_delete)
@@ -493,6 +512,9 @@ def _register_mcp_routes(app: web.Application) -> None:
     # here (not the dashboard-only block) so headless --slack-only mode
     # serves it too; it is on _STRICT_INTERNAL_API_PATHS like send-message.
     app.router.add_post("/api/notifications/agent", handlers.api_notification_agent_push)
+    # dismiss_notification MCP tool; the strict-internal "/api/notifications/agent"
+    # prefix covers it.
+    app.router.add_post("/api/notifications/agent/dismiss", handlers.api_notification_agent_dismiss)
     # Session control. Registered here so the headless --slack-only server
     # serves the same MCP surface as the dashboard; all three are on
     # _STRICT_INTERNAL_API_PATHS, which test_session_control_routes_are_strict
@@ -607,6 +629,12 @@ def _register_mcp_routes(app: web.Application) -> None:
     # trust class as ``invoke``: loopback + ``X-Internal-Secret`` only, listed in
     # ``_STRICT_INTERNAL_API_PATHS``, no browser caller, headless server too.
     app.router.add_post("/api/browser/op", handlers.api_browser_op)
+    # The forwarding leg of a tool an installed app declares (manifest
+    # ``agentTools``): the ``kirocrew-core`` server posts the call, the handler hands it
+    # to the declaring app's own route. Same trust class as ``/api/browser/op``.
+    app.router.add_post(
+        "/api/app-tools/call", _deferred("app_agent_tools", "api_app_agent_tool_call")
+    )
     # The parked ``browser`` tool's hand-back poll while the person holds the browser.
     app.router.add_post("/api/browser/handback", handlers.api_browser_handback)
     # The parked ``ask`` op's poll: an outcome word, never what the person typed.
@@ -625,8 +653,20 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_post("/api/session-directive", handlers.api_session_directive)
     app.router.add_get("/api/session-tool-policy", handlers.api_session_tool_policy)
     app.router.add_post("/api/slack-profile", handlers.api_slack_profile)
+    app.router.add_post("/api/slack-history", handlers.api_slack_history)
+    # Slack code channels: the gateway leg of the code_channel_* MCP tools. STRICT
+    # (``_STRICT_INTERNAL_API_PATHS``); the handler refuses unless the transport
+    # attests the caller's session, and acts only on that session's own channel.
+    app.router.add_post(
+        "/api/slack/code-channel/tool",
+        _deferred("slack_code_channel_tools", "api_code_channel_tool"),
+    )
     app.router.add_get("/api/notifications", handlers.api_notifications)
     app.router.add_post("/api/notifications/push", handlers.api_push_notification)
+    # An app's own notes, for its backend (both entrypoints) and its page; the
+    # handlers scope every read and ack to the caller app's host-stamped source.
+    app.router.add_get("/api/notifications/own", handlers.api_own_notifications)
+    app.router.add_post("/api/notifications/own/ack", handlers.api_own_notification_ack)
     app.router.add_post("/api/notifications/clear", handlers.api_notifications_clear)
 
     # Auto-nudge (feature-flagged — returns 503 when KIROCREW_AUTONUDGE unset)
@@ -702,6 +742,7 @@ def _register_mcp_routes(app: web.Application) -> None:
     from kiro_crew.dashboard.handlers.workflows import (
         api_workflow_author,
         api_workflow_definition_get,
+        api_workflow_definition_remove,
         api_workflow_definition_run,
         api_workflow_definition_update,
         api_workflow_definitions,
@@ -712,6 +753,8 @@ def _register_mcp_routes(app: web.Application) -> None:
         api_workflow_run_intent,
         api_workflow_run_promote,
         api_workflow_run_rerun,
+        api_workflow_run_update_definition,
+        api_workflow_run_update_preview,
         api_workflow_runs,
     )
 
@@ -727,9 +770,18 @@ def _register_mcp_routes(app: web.Application) -> None:
     app.router.add_patch(
         "/api/workflows/definitions/{workflow_ref}", api_workflow_definition_update
     )
+    app.router.add_delete(
+        "/api/workflows/definitions/{workflow_ref}", api_workflow_definition_remove
+    )
     app.router.add_get("/api/workflows/runs", api_workflow_runs)
     app.router.add_get("/api/workflows/runs/{run_id}", api_workflow_run_get)
     app.router.add_post("/api/workflows/runs/{run_id}/promote", api_workflow_run_promote)
+    app.router.add_get(
+        "/api/workflows/runs/{run_id}/update-definition", api_workflow_run_update_preview
+    )
+    app.router.add_post(
+        "/api/workflows/runs/{run_id}/update-definition", api_workflow_run_update_definition
+    )
     app.router.add_post("/api/workflows/runs/{run_id}/cancel", api_workflow_run_cancel)
     app.router.add_post("/api/workflows/runs/{run_id}/rerun", api_workflow_run_rerun)
 

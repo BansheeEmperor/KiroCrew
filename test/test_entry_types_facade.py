@@ -75,19 +75,20 @@ _GOLDEN_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
         ("tool/completed", "5b49060395c2e7ff544a9861fd97f035"),
         ("approval/requested", "69ade2dd5394a25d578f8205938b4179"),
         ("approval/decided", "ef3d9661321ce2f3c680864495c31f1b"),
+        ("approval/bridged", "5e63753192118e89cdcf0a25a9dbb778"),
         ("model/selected", "3b6f12f703b6d53c5e20d98c3afccc27"),
         ("compaction/applied", "59e1ed367b9351f74b6789c68ddec2f6"),
         ("plan/updated", "7cd018ea037a3ceb9a538bf75dc79821"),
         ("subagent/spawned", "9a8a6655c888333f1432e016097898e0"),
         ("subagent/steered", "cbc89e1578be381a9422777246b13456"),
         ("subagent/dismissed", "cf8c93120ff10fc62430e1d01ff85877"),
-        ("subagent/completed", "3d9c7a881ccb9cc2d74d40d131e8d84e"),
-        ("subagent/failed", "36bcc7437227a19656db9cfeff419bca"),
+        ("subagent/completed", "2b16183f2a82b7687657477dfaa65398"),
+        ("subagent/failed", "e6a1b015742b2baa6733c7071dc4696e"),
         ("background/completed", "c2baf07274afb461f17f4254c09cf3a6"),
         ("ledger/recorded", "ce8a9e0246ca5f62f01fe4d9edaad4b9"),
         ("object/observed", "e7708ecf53c90b1b1e5e5340c59a97e0"),
         ("radar/recorded", "f5da674a52d214bb4b0e46b717ff3042"),
-        ("work/recorded", "f57d411b72324b94a218229ba1d16cba"),
+        ("work/recorded", "a28b36a21abf73df8d39373e2e7f7781"),
         ("work/charged", "dfafeefd53bcb426be1351ea831bb481"),
         ("panel/published", "3bed4520ab9f3b183255124dfa140c1e"),
         ("dashboard/instance_changed", "e89026634b8f99bc617fc02e0839cecc"),
@@ -102,6 +103,7 @@ _GOLDEN_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
         ("dashboard/waiting_changed", "c66ee05089867149eb2c7cdfa2e2d8a5"),
         ("dashboard/custom_value", "081599d743b2ec9d384eb75653350287"),
         ("dashboard/custom_failed", "144633a23583fc8f2eca57e14a8120b6"),
+        ("dashboard/stale_wake", "f41890e0a445d918431855c7c6f7c123"),
     ),
     KIND_CREW: (
         ("crew/dispatch", "5820b02abe6583c997f2cf40fb1465ff"),
@@ -112,7 +114,7 @@ _GOLDEN_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
 #: SHA-256 of ``render_markdown(kind)`` when the registry was split into owners. The
 #: member kind declares nothing here, so its digest is of the heading alone.
 _GOLDEN_RENDER: dict[str, str] = {
-    KIND_SESSION: "a8a35b893eddbe8797b3856d24c7d87321a5edef88fb7f2e48cbc7bd433b7a9c",
+    KIND_SESSION: "feb8c288b39e4440bb045c91db0c3eadfc8b770e4416dababcf072d82f25ed28",
     KIND_CREW: "b6938d4f70730ae5ffce4ec6983a609443976a9fca7b013c04152e426dd8be8e",
     "member": "5cb4ea02ed8121eb6b285806b4723251aed568df0aa54b9ac8505c9ad389fa8d",
 }

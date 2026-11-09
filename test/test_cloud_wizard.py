@@ -680,14 +680,10 @@ class TestLaunchResume:
         assert save_calls == []
 
     def test_a_record_that_cannot_be_written_does_not_abort_the_launch(self, monkeypatch):
-        """The deploy is BILLED by the time the record is written, so the write cannot fail
-        the command.
+        """The deploy is BILLED by the time the record is written, so the write cannot fail it.
 
-        This is the finding that moved the pointer out of ``cloud.json``: the post-deploy write
-        went into the operator's file, an unparseable one made it raise, and the command ended
-        there -- after the instance was running and before sign-in. The write is now to a file
-        the launch owns, and a failure on it warns and continues, because sign-in and the
-        dashboard tunnel matter more to the operator than a pointer.
+        A failed write warns and continues: sign-in and the dashboard tunnel matter more
+        to the operator than a pointer.
         """
         cfg = LaunchState(profile="dev", region="us-west-2", last_tag="")
         calls = _patch_post_launch(monkeypatch)
@@ -746,7 +742,7 @@ class TestLaunchResume:
         wizard.launch(profile="dev", region="us-west-2", assume_yes=True)
         assert ("dev", "us-west-2", "kc-new") in save_calls
 
-    def test_discovers_single_stack_when_local_tag_missing(self, monkeypatch, capsys):
+    def test_yes_keeps_no_stack_this_installation_has_no_record_of(self, monkeypatch, capsys):
         cfg = LaunchState(profile="dev", region="us-west-2", last_tag="")
         calls = _patch_post_launch(monkeypatch)
         save_calls: list[tuple[str, str, str]] = []
@@ -772,30 +768,67 @@ class TestLaunchResume:
                 }
             ],
         )
-        monkeypatch.setattr(
-            ec2,
-            "describe",
-            lambda tag, *_a, **_k: {
-                "tag": tag,
-                "exists": True,
-                "stack_name": "kirocrew-kc-found",
-                "stack_status": "CREATE_COMPLETE",
-                "instance_id": "i-found",
-                "region": "us-west-2",
-            },
-        )
+        monkeypatch.setattr(ec2, "live_instance_tags", lambda *_a, **_k: {"kc-found"})
         monkeypatch.setattr(
             ec2,
             "deploy",
             lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not deploy")),
         )
 
-        assert wizard.launch(profile="dev", region="us-west-2", assume_yes=True) == 0
-        assert calls["login"] and all(
-            x == "i-found" for x in calls["login"]
-        )  # sign-in + verify both check i-found
-        assert save_calls == [("dev", "us-west-2", "kc-found")]
-        assert "Resuming existing CloudFormation stack" in capsys.readouterr().out
+        assert wizard.launch(profile="dev", region="us-west-2", assume_yes=True) == 1
+        out = capsys.readouterr().out
+        assert "this installation has no record of (kc-found)" in out
+        assert "kirocrew cloud launch --new" in out
+        assert calls["login"] == []
+        assert save_calls == []
+
+    def test_a_found_stack_is_not_the_default(self, monkeypatch):
+        defaults: list[int] = []
+
+        def fake_choose(title, options, default_index=0):
+            defaults.append(default_index)
+            return default_index
+
+        monkeypatch.setattr(wizard.ui, "choose", fake_choose)
+        found = wizard._ExistingLaunch(tag="kc-found", stack_name="kirocrew-kc-found")
+        saved = wizard._ExistingLaunch(tag="kc-saved", stack_name="kirocrew-kc-saved", saved=True)
+
+        assert wizard._choose_existing_launch([found]) is None
+        assert wizard._choose_existing_launch([found, found]) is None
+        assert wizard._choose_existing_launch([saved]) == saved
+        assert defaults == [1, 2, 0]
+
+    def test_discovery_offers_only_a_stack_with_a_live_instance(self, monkeypatch, capsys):
+        rows = [
+            {"tag": "kc-live", "stack_name": "kirocrew-kc-live", "stack_status": "CREATE_COMPLETE"},
+            {"tag": "kc-gone", "stack_name": "kirocrew-kc-gone", "stack_status": "CREATE_COMPLETE"},
+            {
+                "tag": "kc-new",
+                "stack_name": "kirocrew-kc-new",
+                "stack_status": "CREATE_IN_PROGRESS",
+            },
+            {"tag": "kc-bad", "stack_name": "kirocrew-kc-bad", "stack_status": "ROLLBACK_COMPLETE"},
+        ]
+        live_reads: list[str] = []
+
+        def fake_live(*_a, **_k):
+            live_reads.append("read")
+            return {"kc-live", "kc-new", "kc-bad"}
+
+        monkeypatch.setattr(ec2, "list_stacks", lambda *_a, **_k: rows)
+        monkeypatch.setattr(ec2, "live_instance_tags", fake_live)
+
+        found = wizard._discover_existing_launches(LaunchState(), "dev", "us-west-2")
+
+        assert live_reads == ["read"]  # one read for all four stacks
+
+        assert found == [wizard._ExistingLaunch("kc-live", "kirocrew-kc-live", "CREATE_COMPLETE")]
+        out = capsys.readouterr().out
+        assert "Not offered: kirocrew-kc-gone (no live Kiro Crew instance)" in out
+        assert "Not offered: kirocrew-kc-new (CREATE_IN_PROGRESS)" in out
+        assert "Not offered: kirocrew-kc-bad (ROLLBACK_COMPLETE)" in out
+        assert "kirocrew cloud status --tag kc-gone --region us-west-2 --profile dev" in out
+        assert "kirocrew-kc-live" not in out
 
     def test_interactive_existing_stack_can_create_new_installation(self, monkeypatch, capsys):
         cfg = LaunchState(profile="dev", region="us-west-2", last_tag="kc-old")
@@ -853,7 +886,7 @@ class TestLaunchResume:
             x == "i-new" for x in calls["login"]
         )  # sign-in + verify both check i-new
         assert save_calls == [("dev", "us-west-2", "kc-new")]
-        assert choices[0][0] == "Existing KiroCrew cloud deployment"
+        assert choices[0][0] == "Existing Kiro Crew cloud deployment"
         assert choices[0][1][0][0] == "Keep and resume existing"
         assert choices[0][1][1][0] == "Create a new installation"
         assert "existing stack is unchanged" in capsys.readouterr().out
@@ -882,6 +915,7 @@ class TestLaunchResume:
                 {"tag": "kc-b", "stack_name": "kirocrew-kc-b"},
             ],
         )
+        monkeypatch.setattr(ec2, "live_instance_tags", lambda *_a, **_k: {"kc-a", "kc-b"})
         monkeypatch.setattr(
             ec2,
             "describe",
@@ -913,7 +947,7 @@ class TestLaunchResume:
         assert save_calls == [("dev", "us-west-2", "kc-b")]
         assert choices == [
             (
-                "Existing KiroCrew cloud deployments",
+                "Existing Kiro Crew cloud deployments",
                 [
                     ("Keep kc-a", "kirocrew-kc-a"),
                     ("Keep kc-b", "kirocrew-kc-b"),
@@ -934,6 +968,7 @@ class TestLaunchResume:
                 {"tag": "kc-b", "stack_name": "kirocrew-kc-b"},
             ],
         )
+        monkeypatch.setattr(ec2, "live_instance_tags", lambda *_a, **_k: {"kc-a", "kc-b"})
         monkeypatch.setattr(
             ec2,
             "deploy",
@@ -942,8 +977,7 @@ class TestLaunchResume:
 
         assert wizard.launch(profile="dev", region="us-west-2", assume_yes=True) == 1
         out = capsys.readouterr().out
-        assert "multiple existing KiroCrew cloud stacks found" in out
-        assert "kc-a" in out and "kc-b" in out
+        assert "this installation has no record of (kc-a, kc-b)" in out
 
 
 class TestSessionManagerPluginPrereq:
@@ -1105,14 +1139,9 @@ class TestSizeKeyGuard:
 class TestThePriorPointerIsClearedBeforeANewStackExists:
     """A failed pointer write may leave "no target", never "the wrong target".
 
-    The post-deploy write warns and continues, because the instance is already billing and a
-    lost pointer costs a `cloud list`. That decision is only safe if the PREVIOUS pointer is
-    already gone: otherwise the record still names `kc-old` while `kc-new` is the stack that
-    exists, and a later `cloud destroy` with no `--tag` deletes `kc-old` -- irreversibly, with
-    its data, and with nothing visible to the operator saying the pointer was stale.
-
-    These drive the real `launch()` against a real record on disk, because the property is
-    about what is ON DISK at two different moments and a stubbed `LaunchState` cannot show it.
+    The post-deploy write may fail only because the old pointer is already gone; else a
+    bare `cloud destroy` would delete `kc-old` irreversibly. Real `launch()` and a real
+    record on disk, since the property is what is on disk at two moments.
     """
 
     @staticmethod
@@ -1132,11 +1161,9 @@ class TestThePriorPointerIsClearedBeforeANewStackExists:
         )
 
     def test_a_failed_post_deploy_write_does_not_leave_the_old_tag(self, tmp_path, monkeypatch):
-        """The finding itself: `kc-old` saved, `--new` succeeds, the record write hits ENOSPC.
+        """`kc-old` saved, `--new` succeeds, the record write hits ENOSPC.
 
-        Both halves are asserted together, because fixing this one must not undo the previous
-        one: the launch still succeeds (rc 0), and the pointer left behind is EMPTY rather than
-        the old stack's.
+        The launch still succeeds (rc 0) and the pointer left is EMPTY, not the old stack's.
         """
         self._saved(tmp_path, monkeypatch)
         _patch_post_launch(monkeypatch)
@@ -1181,12 +1208,9 @@ class TestThePriorPointerIsClearedBeforeANewStackExists:
     def test_a_declined_clear_aborts_before_provisioning(self, tmp_path, monkeypatch):
         """A refusal is not a commit.
 
-        `clear_tag` declines when the pointer names something other than the tag this launch observed --
-        another launch recorded its own in between. Declining is the right answer for the FILE,
-        and reading it as success provisions anyway: if this launch's record write then fails,
-        the saved pointer still names the OTHER launch's live stack, and a no-tag `destroy`
-        deletes that. The pointer being CURRENT rather than stale is not the question; whose
-        stack destroy would name is.
+        A decline means another launch recorded its tag in between. Provisioning anyway,
+        then failing the record write, would leave a pointer to the OTHER launch's live
+        stack for a bare `destroy` to delete.
         """
         self._saved(tmp_path, monkeypatch)
         _patch_post_launch(monkeypatch)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +20,7 @@ from typing import Any
 import kiro_crew.config.resolution as _resolution
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.aws_project_profiles import coerce_project_profiles
+from kiro_crew.config import loosening_provenance
 from kiro_crew.config import migration as _migration
 from kiro_crew.config import sections as _sections
 from kiro_crew.config import windows_exec_adoption
@@ -35,13 +36,16 @@ from kiro_crew.config.loader_builders import (
     _default_memory_mode_from,
     _read_backend_choice,
     _registry_entry,
+    mark_member_backend_inherited,
     resolve_loop_stall_exit_after,
 )
 from kiro_crew.config.loader_config import KiroCrewConfig
 from kiro_crew.config.loader_document import (
+    _SIDECAR_AGENTS_REPAIRED,
     _SIDECAR_BASE_SHADOW,
     _SIDECAR_BASE_UNREADABLE,
     _SIDECAR_OVERLAY_UNREADABLE,
+    PendingEditBlocksSave,
     _config_fingerprint,
     _content_digest_of,
     _invalidate_config_cache,
@@ -145,6 +149,38 @@ from kiro_crew.memory_stores import DEFAULT_MEMORY_STORE, memory_store_name_defe
 logger = logging.getLogger("kiro_crew.config.loader")
 
 
+def _recording_config_reader(
+    seen: list[bytes], *, overlay: bool = False
+) -> Callable[[Path], bytes]:
+    """The config read handed to ``loosening_provenance.reconciled_bytes``.
+
+    Appends what it read to *seen*, so the content digest names the on-disk text
+    exactly as ``config_content_stamp`` reads it. A name that does not exist reads as
+    missing without opening it, as the plain loader did. For the *overlay*, a name that
+    is not a regular file reads as missing (no overlay), and a world-writable one is
+    reported.
+    """
+
+    def _read(p: Path) -> bytes:
+        if not overlay and not p.exists():
+            raise FileNotFoundError(p)
+        if overlay:
+            if not p.is_file():
+                raise FileNotFoundError(p)
+            st_mode = p.stat().st_mode
+            if st_mode & 0o002:
+                logger.warning(
+                    "SECURITY: config.local.json is world-writable (%o); "
+                    "consider running: chmod 600 %s",
+                    st_mode & 0o777,
+                    p,
+                )
+        seen.append(read_config_text(p).encode("utf-8"))
+        return seen[-1]
+
+    return _read
+
+
 def workspace_dir_for(workspace: str | None = None) -> Path:
     """Resolve a named workspace to its directory path.
 
@@ -211,16 +247,19 @@ def default_project_dir(workspace: str | None = None) -> str:
     """Resolve the default project directory for a workspace.
 
     Returns the realpath of ``workspace_dir_for(workspace)`` if it exists and
-    is not a sensitive path, otherwise returns ``""``.
+    is not a sensitive path, otherwise returns ``""``. The realpath is judged
+    on :func:`security.is_sensitive_canonical_path`, which answers inline off
+    the event loop, so a resolver child that misses its deadline cannot turn
+    the workspace into a sensitive path.
 
     Used by chat_handlers (slot.project fallback) and session.py (pool cwd)
     to avoid duplicating the same resolution + validation logic.
     """
-    from kiro_crew.security import is_sensitive_path  # circular import
+    from kiro_crew.security import is_sensitive_canonical_path  # circular import
 
     try:
         ws_dir = os.path.realpath(str(workspace_dir_for(workspace)))
-        if os.path.isdir(ws_dir) and not is_sensitive_path(ws_dir):
+        if os.path.isdir(ws_dir) and not is_sensitive_canonical_path(ws_dir):
             return ws_dir
     except Exception:
         pass
@@ -312,6 +351,10 @@ class ConfigDocument:
     #: document. The build's advisory warnings fire only on a disk read, as
     #: validation's do, so a cached load does not repeat them.
     disk_read: bool = False
+    #: Validation dropped the ``agents`` value or an ``agents`` entry this document
+    #: still names in the file, so the build marks ``agents`` degraded for this load
+    #: only: a crewmate it drops must not read as deleted.
+    agents_repaired: bool = False
 
 
 def read_config_document() -> ConfigDocument:
@@ -366,6 +409,7 @@ def read_config_document() -> ConfigDocument:
             base_unreadable=bool(sidecar.get(_SIDECAR_BASE_UNREADABLE, False)),
             overlay_unreadable=bool(sidecar.get(_SIDECAR_OVERLAY_UNREADABLE, False)),
             base_shadow=sidecar.get(_SIDECAR_BASE_SHADOW, {}),
+            agents_repaired=bool(sidecar.get(_SIDECAR_AGENTS_REPAIRED, False)),
         )
 
     # Pre-overlay base copy of the sections the overlay touched. Filled below.
@@ -393,11 +437,31 @@ def read_config_document() -> ConfigDocument:
     # than whatever a later read would find.
     read_parts: list[bytes | None] = [None, None]
     digestible = True
-    if path.exists():
+    # Where the namespace sandbox seals this file, a read serves the gateway-endorsed
+    # copy when the on-disk bytes differ, or when the file is missing or unreadable, so
+    # a direct in-sandbox rewrite or delete of ANY key is ignored; the plain read
+    # everywhere else. See loosening_provenance.reconciled_bytes.
+    # The digest names the on-disk text the read returned, as config_content_stamp
+    # does; a document served for a file that could not be read is not stamped.
+    base_seen: list[bytes] = []
+    base_doc: bytes | None = None
+    try:
+        base_doc = loosening_provenance.reconciled_bytes(
+            "config.json", path, _recording_config_reader(base_seen)
+        )
+    except (OSError, UnicodeDecodeError) as e:
+        config_source_unreadable = True
+        base_unreadable = True
+        digestible = False
+        logger.warning("Failed to load config from %s: %s", path, e)
+        _mark_file_degraded(path)
+    if base_doc is not None:
         try:
-            base_text = read_config_text(path)
-            read_parts[0] = base_text.encode("utf-8")
-            raw = json.loads(base_text)
+            if base_seen:
+                read_parts[0] = base_seen[0]
+            else:
+                digestible = False
+            raw = json.loads(base_doc)
             if isinstance(raw, dict):
                 data = raw
                 loaded_base = True
@@ -456,18 +520,28 @@ def read_config_document() -> ConfigDocument:
     # Deep-merge config.local.json overlay (user-owned, never touched by setup)
     local_data: dict = {}
     local_path = config_local_path()
-    if local_path.is_file():
+    # Same read as the base file; a name that is not a regular file is no overlay.
+    local_seen: list[bytes] = []
+    local_doc: bytes | None = None
+    try:
+        local_doc = loosening_provenance.reconciled_bytes(
+            "config.local.json",
+            local_path,
+            _recording_config_reader(local_seen, overlay=True),
+        )
+    except (OSError, UnicodeDecodeError) as e:
+        config_source_unreadable = True
+        overlay_unreadable = True
+        digestible = False
+        logger.warning("Failed to load config.local.json: %s", e)
+        _mark_file_degraded(local_path)
+    if local_doc is not None:
         try:
-            st_mode = local_path.stat().st_mode
-            if st_mode & 0o002:
-                logger.warning(
-                    "config.local.json is world-writable (%o); consider running: chmod 600 %s",
-                    st_mode & 0o777,
-                    local_path,
-                )
-            local_text = read_config_text(local_path)
-            read_parts[1] = local_text.encode("utf-8")
-            raw_local = json.loads(local_text)
+            if local_seen:
+                read_parts[1] = local_seen[0]
+            else:
+                digestible = False
+            raw_local = json.loads(local_doc)
             if isinstance(raw_local, dict):
                 local_data = raw_local
             else:
@@ -531,15 +605,17 @@ def read_config_document() -> ConfigDocument:
     # build_config agrees by construction.
     if isinstance(data.get("resource_limits"), dict):
         data["resource_limits"] = asdict(ResourceLimitsConfig.from_raw(data["resource_limits"]))
-    # Same fail-closed-before-validation reason for the four agent
+    # Same fail-closed-before-validation reason for the five agent
     # switches whose safe direction is FALSE.
     # `agent.session_control` is the operator's single withdrawal of
     # cross-session control, `agent.member_dispatch` gates whether
     # a crew member bypasses that withdrawal, `agent.crew_panel`
     # gates the member's own webview, and `agent.kas_persist_mcp_sign_in`
-    # decides whether Crew stores remote MCP OAuth tokens. Schema validation pops a
+    # decides whether Crew stores remote MCP OAuth tokens, and
+    # `agent.conductor_own_child_verbs` lets a conductor send to its own
+    # children unprompted. Schema validation pops a
     # present-but-malformed value and the missing-field default is TRUE
-    # for all four, so a quoted `"false"` -- a routine operator quoting
+    # for all five, so a quoted `"false"` -- a routine operator quoting
     # mistake -- would silently ride that default back to the
     # capability staying enabled. Coerce a present non-bool to False
     # HERE, so validation sees a valid bool and keeps it; a genuinely
@@ -560,6 +636,7 @@ def read_config_document() -> ConfigDocument:
             "member_dispatch",
             "crew_panel",
             "kas_persist_mcp_sign_in",
+            "conductor_own_child_verbs",
         ):
             if _fail_closed_key in _agent_section and not isinstance(
                 _agent_section[_fail_closed_key], bool
@@ -582,12 +659,28 @@ def read_config_document() -> ConfigDocument:
             _dashboard_section["default_memory_mode"]
         )
     # Validate against JSON Schema (advisory — never fatal)
+    agents_named = "agents" in data
+    agents_before = data.get("agents")
+    names_before = set(agents_before) if isinstance(agents_before, dict) else None
     _validate_config_data(data)
+    # A present ``agents`` that is not an object, or a name the build will not read as
+    # a crewmate (dropped, or left as a non-object), is a repair of this read. It is
+    # recorded per load, never in the sticky set: once the file is fixed the next read
+    # reports a clean roster, so the live appliers stop deferring.
+    agents_after = data.get("agents")
+    kept = (
+        {name for name, entry in agents_after.items() if isinstance(entry, dict)}
+        if isinstance(agents_after, dict)
+        else set()
+    )
+    agents_repaired = agents_named and (names_before is None or not names_before <= kept)
     # Clamp security-relevant resource-limit knobs to their API ceilings
     # BEFORE caching, so a hand-edited/prompt-injected config.json that
     # exceeds a ceiling cannot drive resource exhaustion (DoS). Runs only
     # on the disk-read path; a cache hit, served above, already holds clamped values.
     _clamp_security_bounds(data)
+    # The builders report a clamped value again for each disk read, as validation does.
+    _sections._REPORTED_CLAMPS.clear()
     # Cache under the PRE-read fingerprint and generation. A mid-read
     # write either changes the fingerprint or advances the generation;
     # both paths force the next load to re-read. The base shadow rides
@@ -614,6 +707,7 @@ def read_config_document() -> ConfigDocument:
                 _SIDECAR_BASE_SHADOW: base_shadow,
                 _SIDECAR_BASE_UNREADABLE: base_unreadable,
                 _SIDECAR_OVERLAY_UNREADABLE: overlay_unreadable,
+                _SIDECAR_AGENTS_REPAIRED: agents_repaired,
             },
             expected_generation=read_generation,
             content_digest=content_digest,
@@ -632,6 +726,7 @@ def read_config_document() -> ConfigDocument:
         adoptable=adoptable,
         legacy_lazy_stamp=legacy_lazy_stamp,
         disk_read=True,
+        agents_repaired=agents_repaired,
     )
 
 
@@ -646,7 +741,8 @@ def _parse_app_settings(raw: Any) -> dict[str, AppSettingsConfig]:
 
     A section that is not an object, a non-string name, or an entry that is not an
     object reads as absent, which means every app inherits. A ``model`` that is not
-    a string reads as the empty INHERIT value. Names are kept as written: the
+    a string reads as the empty INHERIT value, and a ``mute_sessions`` that is not
+    the JSON ``true`` reads as unmuted. Names are kept as written: the
     resolver looks an app up by its exact manifest name, so an entry for an app
     that is not installed simply matches nothing.
     """
@@ -660,8 +756,12 @@ def _parse_app_settings(raw: Any) -> dict[str, AppSettingsConfig]:
     for name, entry in raw.items():
         if not isinstance(name, str) or not name or not isinstance(entry, dict):
             continue
-        model = _sections.SectionReader(AppSettingsConfig, entry).get("model")
-        apps[name] = AppSettingsConfig(model=model if isinstance(model, str) else "")
+        reader = _sections.SectionReader(AppSettingsConfig, entry)
+        model = reader.get("model")
+        apps[name] = AppSettingsConfig(
+            model=model if isinstance(model, str) else "",
+            mute_sessions=reader.get("mute_sessions") is True,
+        )
     return apps
 
 
@@ -711,8 +811,9 @@ def build_config(
         agent_defaults = _sections.SectionReader(AgentConfig, {})
         cfg.agent.acp_backend = _read_backend_choice(agent_defaults, {}, "acp_backend")
         cfg.agent.member_acp_backend = _read_backend_choice(
-            agent_defaults, {}, "member_acp_backend"
+            agent_defaults, {}, "member_acp_backend", inherit=cfg.agent.acp_backend
         )
+        mark_member_backend_inherited(cfg.agent, True)
         cfg._base_unreadable = doc.base_unreadable
         cfg._overlay_unreadable = doc.overlay_unreadable
         if (
@@ -738,7 +839,7 @@ def build_config(
     # Collected during the parse that discards them — the only moment the
     # evidence exists, since the write-back rewrites config.json in
     # normalized form (see KiroCrewConfig.degraded_sections).
-    _degraded: set[str] = set()
+    _degraded: set[str] = {"agents"} if doc.agents_repaired else set()
     agent_data = _coerced_section(data, "agent", _degraded)
     session_data = _coerced_section(data, "session", _degraded)
     taskrunner_data = _coerced_section(data, "taskrunner", _degraded)
@@ -1402,6 +1503,9 @@ def persist_write_back(cfg: KiroCrewConfig, doc: ConfigDocument) -> None:
                 )
                 + "\n",
             )
+    except PendingEditBlocksSave as e:
+        # Refused again on every load while the file is pending: once per version.
+        loosening_provenance.log_writeback_refused_once(e.leaf, str(e))
     except Exception as e:
         # Migration write-back is best-effort; never block startup.
         logger.warning("Config write-back failed: %s", e)

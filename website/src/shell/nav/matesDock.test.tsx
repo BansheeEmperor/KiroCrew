@@ -10,7 +10,7 @@ import type { DndContext, DragEndEvent } from '@dnd-kit/core'
 
 import { api, ApiError, type MemberRosterRow } from '../../api/client'
 import { MEMBERS_ROSTER_QUERY_KEY } from '../../api/membersQuery'
-import dashboardReducer, { sseSlots } from '../../store/dashboardSlice'
+import dashboardReducer, { markSlotRead, markSlotUnread, sseSlots } from '../../store/dashboardSlice'
 import chatReducer, { sseSubagentQueued } from '../../store/chatSlice'
 import notificationsReducer from '../../store/notificationsSlice'
 import instancesReducer from '../../store/instancesSlice'
@@ -263,7 +263,7 @@ describe('DockMatesSection', () => {
     renderDock(undefined, { collapsed: true, surface: 'both' })
     const notice = await screen.findByTestId('dock-mates-load-error')
     expect(screen.getAllByRole('alert')).toHaveLength(1)
-    expect(within(notice).getByRole('alert')).toHaveTextContent("Couldn't load your starred Bots.")
+    expect(within(notice).getByRole('alert')).toHaveTextContent("Couldn't load your starred bots.")
     expect(within(notice).getByRole('button', { name: /ask.*agent/i })).toBeInTheDocument()
     fireEvent.click(within(notice).getByRole('button', { name: /dismiss/i }))
     expect(screen.queryByTestId('dock-mates-load-error')).toBeNull()
@@ -332,7 +332,7 @@ describe('DockMatesSection', () => {
     if (surface !== 'tiles') expect(dockNames()).toEqual(['a'])
     if (surface !== 'section') expect(screen.getByTestId('rail-mate-a')).toBeInTheDocument()
     expect(screen.getAllByRole('alert')).toHaveLength(1)
-    expect(within(notice).getByRole('alert')).toHaveTextContent("Couldn't load your starred Bots.")
+    expect(within(notice).getByRole('alert')).toHaveTextContent("Couldn't load your starred bots.")
     fireEvent.click(within(notice).getByRole('button', { name: /ask.*agent/i }))
     expect(handoff.prompts).toHaveLength(1)
     expect(handoff.prompts[0]).toContain('/api/members -> HTTP 503')
@@ -367,6 +367,33 @@ describe.each(['section', 'tiles'] as const)('live presence in %s', surface => {
     act(() => { liveStore.dispatch(sseSubagentQueued({ slot: 'member-a', queued: 0 })) })
     expect(within(mate).queryByRole('status')).toBeNull()
   })
+
+  it('shows its one dot for an unread reply or a turn waiting on the person, and drops it after', () => {
+    const { liveStore } = renderDock([row('a', { starred: true, slot_key: 'member-a' })], { surface })
+    const mate = screen.getByTestId(surface === 'section' ? 'dock-mate-a' : 'rail-mate-a')
+    act(() => { liveStore.dispatch(sseSlots([slot('a', false)])) })
+    expect(within(mate).queryByRole('status')).toBeNull()
+    act(() => { liveStore.dispatch(markSlotUnread('member-a')) })
+    expect(within(mate).getByRole('status', { name: 'Unread message' })).toBeInTheDocument()
+    act(() => { liveStore.dispatch(sseSlots([slot('a', false, { needs_input: true })])) })
+    expect(within(mate).getAllByRole('status')).toHaveLength(1)
+    expect(within(mate).getByRole('status', { name: 'Needs your approval or answer' })).toBeInTheDocument()
+    act(() => { liveStore.dispatch(sseSlots([slot('a', false)])) })
+    act(() => { liveStore.dispatch(markSlotRead('member-a')) })
+    expect(within(mate).queryByRole('status')).toBeNull()
+  })
+
+  it('marks the mate when a session it dispatched waits on an approval', () => {
+    const { liveStore } = renderDock([row('a', { starred: true, slot_key: 'member-a' })], { surface })
+    const mate = screen.getByTestId(surface === 'section' ? 'dock-mate-a' : 'rail-mate-a')
+    act(() => {
+      liveStore.dispatch(sseSlots([
+        slot('a', false),
+        { key: 'chat-worker', agent: 'kirocrew', running: false, mate_root: 'member-a', pending_approval: true } as ChatSlot,
+      ]))
+    })
+    expect(within(mate).getByRole('status', { name: 'Needs your approval or answer' })).toBeInTheDocument()
+  })
 })
 
 describe('DockMatesTiles', () => {
@@ -375,7 +402,7 @@ describe('DockMatesTiles', () => {
     renderDock(undefined, { url: '/chat', surface: 'tiles' })
     const notice = await screen.findByTestId('dock-mates-load-error')
     expect(screen.getAllByRole('alert')).toHaveLength(1)
-    expect(within(notice).getByRole('alert')).toHaveTextContent("Couldn't load your starred Bots.")
+    expect(within(notice).getByRole('alert')).toHaveTextContent("Couldn't load your starred bots.")
     expect(notice).toHaveStyle({ left: '16px' })
     fireEvent.click(within(notice).getByRole('button', { name: /ask.*agent/i }))
     expect(handoff.prompts).toHaveLength(1)

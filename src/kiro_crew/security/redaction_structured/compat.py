@@ -236,6 +236,7 @@ def _combine(
     hits: list[Hit],
     defer_token_param: bool,
     judged_sri_values: Collection[str],
+    token_param_prefixes: tuple[str, ...] | None = None,
 ) -> _Plan:
     """Run the plan's passes on ``text`` with each hit tagged; merge onto ``text``."""
     from kiro_crew.security.pass_compose import _map_back, _splice
@@ -244,7 +245,7 @@ def _combine(
     hit_spans = [(h.start, h.end, tag) for h in hits]
     masked, rows = _splice(text, hit_spans)
     found, pass_warnings, pass_rules = redaction._main_plan(
-        masked, defer_token_param, judged_sri_values
+        masked, defer_token_param, judged_sri_values, token_param_prefixes
     )
     moved = _map_back(found, rows)
     spans = _merge(hit_spans, moved)
@@ -266,6 +267,7 @@ def credential_plan_via_table(
     text: str,
     defer_token_param: bool = False,
     judged_sri_values: Collection[str] = (),
+    token_param_prefixes: tuple[str, ...] | None = None,
 ) -> _Plan:
     """The credential plan with the structured detectors read first. Never raises.
 
@@ -278,8 +280,10 @@ def credential_plan_via_table(
         _load()
         hits = secret_hits(text)
         if not hits:
-            return redaction._main_plan(text, defer_token_param, judged_sri_values)
-        return _combine(text, hits, defer_token_param, judged_sri_values)
+            return redaction._main_plan(
+                text, defer_token_param, judged_sri_values, token_param_prefixes
+            )
+        return _combine(text, hits, defer_token_param, judged_sri_values, token_param_prefixes)
     except Exception as exc:
         return _fail_closed(text if isinstance(text, str) else "", exc)
 

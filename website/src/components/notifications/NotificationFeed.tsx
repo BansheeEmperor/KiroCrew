@@ -3,10 +3,10 @@ import { useState, useMemo, useCallback, useEffect, useRef, type ReactNode } fro
 import { Bell, BellOff, Check, CheckCheck, Layers, X } from 'lucide-react'
 import { motion, useReducedMotion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
+import { shallowEqual } from 'react-redux'
 import { useGuardedLeave } from '../NavigationLeaveGuard'
 import { useAppSelector, useAppDispatch } from '../../store'
-import { clearNotifications, ackAllNotifications, deleteNotification, decideApprovalRow, dismissLocalApprovalRow } from '../../store/notificationsSlice'
-import type { RetiredApproval } from '../../store/notificationsSlice'
+import { clearNotifications, ackAllNotifications, deleteNotification, decideApprovalRow, dismissLocalApprovalRow, approvalMarks, rowPhase } from '../../store/notificationsSlice'
 import { api } from '../../api/client'
 import { EmptyState, SearchInput } from '../ui'
 import Clickable from '../Clickable'
@@ -18,7 +18,7 @@ import StatusNotice from '../StatusNotice'
 import { disintegrate } from '../../lib/disintegrate'
 import type { Notification } from '../../types'
 import {
-  parseTs, dateGroup, KIND_META, DEFAULT_META, fmtTime, stripMd, notePriority, safeInternalUrl,
+  parseTs, dateGroup, KIND_META, DEFAULT_META, fmtTime, stripMd, notePriority, noteText, safeInternalUrl,
   MAC_ACTION_BTN_CLASS, decisionFailedCopy, decidedClearFailedCopy,
 } from './notifMeta'
 import NotificationPermissionHint from './NotificationPermissionHint'
@@ -27,7 +27,9 @@ import { CrewmateNoteFace, CrewmateNoteName, CrewmateRosterError, noteMember } f
 import NotificationClearButton, { NOTIF_CONTROL_HEIGHT } from './NotificationClearButton'
 import { keepsOutOfDayClear, stackKeyOf, stackLabelOf } from './notificationStacks'
 
+import { Trans } from 'react-i18next'
 import { i18nT } from '../../i18n/t'
+import { useLanguageGeneration } from '../../i18n/useLanguageGeneration'
 import { uiLocation } from '../../uiLocations/uiLocation'
 /** localStorage key for app channels the user has already decided on (keep or
  *  mute) via the first-notification prompt. System channels never prompt. */
@@ -60,12 +62,6 @@ function loadSeenChannels(): Set<string> {
  * detail panel; deleting the selected row clears it naturally because the host
  * derives `selected` from the items list by ts.
  */
-const NO_RETIRED: Readonly<Record<string, RetiredApproval>> = {}
-const NO_DISMISS_FAILED: Readonly<Record<string, 'decided'>> = {}
-
-const hasRetired = (map: Readonly<Record<string, unknown>>, ts: string): boolean =>
-  Object.hasOwn(map, ts)
-
 export default function NotificationFeed({ selectedTs, onSelect, variant = 'panel', header, footer, revealTs = null }: {
   selectedTs: string | null
   onSelect: (n: Notification) => void
@@ -129,17 +125,22 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
 
   const silencedCount = useMemo(() => items.filter(n => n.silenced).length, [items])
 
+  const languageGeneration = useLanguageGeneration()
   const filtered = useMemo(() => {
+    void languageGeneration // a gateway-written note is searched by its localized copy
     let list = [...items].reverse()
     // Muted-channel rows stay in history but hide behind the "Show muted"
     // disclosure (mute-doesn't-destroy semantics).
     if (!showMuted) list = list.filter(n => !n.silenced)
     if (filter) {
       const q = filter.toLowerCase()
-      list = list.filter(n => ((n.title || '') + (n.body || '')).toLowerCase().includes(q))
+      list = list.filter(n => {
+        const { title, body } = noteText(n)
+        return ((title || '') + (body || '')).toLowerCase().includes(q)
+      })
     }
     return list
-  }, [items, filter, showMuted])
+  }, [items, filter, showMuted, languageGeneration])
 
   // Only a feed showing a crewmate's note reads the roster, so only that feed
   // can report the roster read failing. While a crewmate note is selected its
@@ -334,9 +335,10 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
   // focus on <body>. Hand it to the neighbouring row's open control instead.
   // Each deletion commits on its own, so a multi-note clear changes `items`
   // several times while the clicked control is still mounted and focused; the
-  // target waits until every cleared note has gone (or the clear settled, which
-  // covers a partial failure). Focus the user moved to another live element is
-  // left alone.
+  // target waits until every cleared note has gone, the clear settled (which
+  // covers a partial failure), or the clicked control unmounted (an expanded
+  // stack's header goes when one note is left), so focus never waits on
+  // <body>. Focus the user moved to another live element is left alone.
   useEffect(() => {
     const r = refocus.current
     if (!r) return
@@ -345,7 +347,7 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
       refocus.current = null
       return
     }
-    if (!r.settled && items.some(n => r.gone.has(n.ts))) return
+    if (!r.settled && r.origin?.isConnected && items.some(n => r.gone.has(n.ts))) return
     // The clearing control survived (a partial failure kept its rows), so
     // focus never fell to <body>.
     if (active && active === r.origin && active.isConnected) {
@@ -405,11 +407,10 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
   // which gets the hedged copy), as in `ApprovalCard`. A retired row keeps
   // its ordinary close X, which is how it leaves the feed.
   const [decideFailed, setDecideFailed] = useState<Readonly<Record<string, { reason: string }>>>({})
-  // The ts of every stored note whose DELETE the server refused after a
-  // decision on it landed: the row stays with the reason, and its close X
-  // tries again. Held in the slice so the detail panel shows it too.
-  const dismissFailed = useAppSelector(s => s.notifications.dismissFailed) ?? NO_DISMISS_FAILED
-  const retiredApprovals = useAppSelector(s => s.notifications.retiredApprovals) ?? NO_RETIRED
+  // Each row's approval phase (retired, or decided with a failed DELETE, whose
+  // close X tries again) is held in the slice so the detail panel shows it
+  // too, and read only through `rowPhase`.
+  const marks = useAppSelector(s => approvalMarks(s.notifications), shallowEqual)
   // Retiring a row takes the pressed Approve/Reject away, which drops keyboard
   // focus to <body>. This holds the ts of that approval until its buttons are
   // gone, and the effect below then moves focus to the row's close X, the one
@@ -445,7 +446,7 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
   useEffect(() => {
     const ts = focusRescueRef.current
     if (ts === null) return
-    if (items.some(i => i.ts === ts) && !hasRetired(retiredApprovals, ts) && !hasRetired(dismissFailed, ts)) return
+    if (items.some(i => i.ts === ts) && rowPhase(marks, ts).phase === 'live') return
     const active = document.activeElement
     const lost = !active || active === document.body
     const row = listRef.current?.querySelector<HTMLElement>(`[data-ts="${CSS.escape(ts)}"]`)
@@ -459,7 +460,7 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
     // The notice that replaced the buttons is the point of the retirement:
     // bring its last line into view, past the list's scroll fade.
     row.querySelector<HTMLElement>('[data-testid="notif-approval-retired"], [data-testid="notif-dismiss-failed"]')?.scrollIntoView?.({ block: 'nearest' })
-  }, [items, retiredApprovals, dismissFailed])
+  }, [items, marks])
   useEffect(() => {
     const ts = failedNoticeRef.current
     if (ts === null || !Object.hasOwn(decideFailed, ts)) return
@@ -510,7 +511,15 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
   const promptBody = (pc: { channel: string; label: string }) => (
     <>
       <Bell className="lucide-inline shrink-0 text-accent" />
-      <div className="flex-1 min-w-0 text-[12px] text-text">{i18nT('components.notifications.notificationFeed.first_notification_from')} <span className="font-semibold">{pc.label}</span>{i18nT('components.notifications.notificationFeed.keep_receiving_these')}</div>
+      {/* One sentence with the channel inside it, so a language can put the
+          channel where its grammar needs it. The label is a child, never a
+          value: Trans would parse a stored value as markup. */}
+      <div className="flex-1 min-w-0 text-[12px] text-text">
+        <Trans
+          i18nKey="components.notifications.notificationFeed.first_notification_prompt"
+          components={{ name: <span className="font-semibold">{pc.label}</span> }}
+        />
+      </div>
       <button
         type="button"
         className="px-2.5 py-1 rounded-md text-[12px] font-semibold cursor-pointer border-none bg-accent text-card hover:opacity-90 transition-opacity font-body whitespace-nowrap disabled:opacity-50 disabled:cursor-default"
@@ -629,7 +638,9 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
                 // A retired approval asks for nothing, so it drops the
                 // critical border and the unread dot and recedes like a read
                 // row.
-                const settled = hasRetired(retiredApprovals, n.ts) || (n.kind === 'approval' && hasRetired(dismissFailed, n.ts))
+                const { phase, endedFailure: retiredFailure, dismissFailed } = rowPhase(marks, n.ts)
+                const retired = phase === 'retired'
+                const settled = retired || (n.kind === 'approval' && dismissFailed)
                 const panelBorder = silenced || settled ? 'border-l-muted' : prio === 'critical' ? 'border-l-danger' : km.borderColor
                 const promptChannel = promptTsSet.has(n.ts) && n.channel && n.source
                   ? { channel: n.channel, label: `${n.source} / ${n.channel.startsWith(`${n.source}.`) ? n.channel.slice(n.source.length + 1) : n.channel}` }
@@ -641,10 +652,11 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
                 // offers no Approve or Reject; opening it leads to that card.
                 // A decided stored note whose DELETE failed is settled too:
                 // its controls are withdrawn and its notice says why it stayed.
-                const isApproval = n.kind === 'approval' && !n.acked && !n.crew_member && !hasRetired(retiredApprovals, n.ts) && !hasRetired(dismissFailed, n.ts)
+                const isApproval = n.kind === 'approval' && !n.acked && !n.crew_member && phase === 'live'
                 // A persisted row is untrusted: a truthy non-string body must
                 // not reach the renderer, its raw fallback, or the flattener.
-                const bodyText = typeof n.body === 'string' ? n.body : ''
+                const { title, body } = noteText(n)
+                const bodyText = typeof body === 'string' ? body : ''
                 // Defense-in-depth for legacy/corrupted persisted rows: the
                 // actions field must be a real array (a truthy non-array like
                 // `{}` would throw on .filter), and only string fields render
@@ -653,7 +665,6 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
                   .filter(a => typeof a?.id === 'string' && typeof a?.label === 'string' && typeof a?.url === 'string')
                   .map(a => ({ ...a, safeUrl: safeInternalUrl(a.url) }))
                   .filter(a => a.safeUrl)
-                const retired = hasRetired(retiredApprovals, n.ts)
                 const approveLabel = i18nT('components.notifications.notificationFeed.approve')
                 const rejectLabel = i18nT('components.notifications.notificationFeed.reject')
                 // A settled row (retired, or decided with a failed DELETE) has
@@ -662,8 +673,7 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
                 const decideReason = Object.hasOwn(decideFailed, n.ts) && !settled ? decideFailed[n.ts] : null
                 // A press that failed after a frame ended its request: the
                 // row is retired, and the failure leads its notice.
-                const retiredMark = retired ? retiredApprovals[n.ts] : undefined
-                const endedFailure = typeof retiredMark === 'object' && !active ? retiredMark.failed : null
+                const endedFailure = active ? null : retiredFailure
                 const hasActions = isApproval || urlActions.length > 0
                 // A row whose controls authorize a command shows the whole
                 // command: a clamped excerpt turns `echo safe` + `rm -rf target`
@@ -700,7 +710,7 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
                 // here; the mark comes from a landed decision's failed
                 // clean-up. The open row's detail panel already says an
                 // approval row's failed DELETE, so the row does not repeat it.
-                const rowDismissFailed = hasRetired(dismissFailed, n.ts) && !(active && n.kind === 'approval')
+                const rowDismissFailed = dismissFailed && !(active && n.kind === 'approval')
                 // A retired row says "no longer pending", so its failed
                 // DELETE shows no recorded decision, as in the detail panel.
                 const rowDecided = rowDismissFailed && !retired
@@ -751,6 +761,15 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
                 // row's close X, its only way out.
                 const rowDim = (n.acked || settled || prio === 'passive') && !active && !silenced ? 'opacity-50' : ''
                 const collapsedStack = !!(stackKey && stackCount && stackCount > 1 && !stackExpanded)
+                // A keyed note that took an earlier note's place says so, so a
+                // reader who saw the old row does not take it for a new note.
+                const edited = !!n.replaced && !silenced
+                const editedLabel = edited ? (
+                  <span className="text-[10px] text-muted italic">{i18nT('components.notifications.notificationFeed.edited')}</span>
+                ) : null
+                const openRowLabel = edited
+                  ? i18nT('components.notifications.notificationFeed.open_edited_notification', { title })
+                  : i18nT('components.notifications.notificationFeed.open_notification', { title })
                 const actionBtn = MAC_ACTION_BTN_CLASS
                 // The mac row IS the shared card (one rendering with the
                 // banner); the feed adds only what it owns — the reveal anchor,
@@ -840,16 +859,17 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
                         active={active}
                         muted={silenced}
                         settled={settled}
-                        dismissVisible={settled || hasRetired(dismissFailed, n.ts)}
+                        dismissVisible={settled || dismissFailed}
                         onOpen={() => { if (collapsedStack && stackKey) toggleStack(stackKey); else onSelect(n) }}
                         openLabel={collapsedStack
-                          ? i18nT('components.notifications.notificationFeed.expand_grouped_notifications', { count: stackCount, title: n.title })
-                          : i18nT('components.notifications.notificationFeed.open_notification', { title: n.title })}
+                          ? i18nT('components.notifications.notificationFeed.expand_grouped_notifications', { count: stackCount, title })
+                          : openRowLabel}
                         onDismiss={dismissRow}
                         dismissLabel={dismissLabel}
                         actions={macActions}
                         body={approvalBody}
                         footer={rowNotice ?? undefined}
+                        timeNote={editedLabel ?? undefined}
                         trailing={silenced ? (
                           <span className="text-[10px] text-muted italic flex items-center gap-1"><BellOff className="lucide-inline" /> {i18nT('components.notifications.notificationFeed.muted_2')}</span>
                         ) : collapsedStack ? (
@@ -863,19 +883,26 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
                       <div className="flex items-center gap-2.5">
                       <Clickable
                         onClick={() => onSelect(n)}
-                        aria-label={i18nT('components.notifications.notificationFeed.open_notification', { title: n.title })}
+                        aria-label={openRowLabel}
                         className={`flex items-center gap-2 flex-1 min-w-0 text-left cursor-pointer ${rowDim}`}
                       >
                         {member ? <CrewmateNoteFace member={member} size={18} fallback={kindIcon} /> : kindIcon}
                         <div className="flex-1 min-w-0">
                           {member && <CrewmateNoteName member={member} className="block text-[11px] text-muted truncate leading-tight" />}
-                          <div className={`text-[13px] font-semibold truncate leading-tight ${silenced ? 'text-muted font-normal' : 'text-text-strong'}`}>{n.title}</div>
+                          <div className={`text-[13px] font-semibold truncate leading-tight ${silenced ? 'text-muted font-normal' : 'text-text-strong'}`}>{title}</div>
                           {approvalBody ?? (
                             <div className="text-[12px] text-muted mt-0.5 truncate">{stripMd(bodyText).slice(0, 80)}</div>
                           )}
                         </div>
                         <div className="flex flex-col items-end gap-0.5 shrink-0">
-                          <span className="text-[11px] text-muted font-mono">{fmtTime(n.ts)}</span>
+                          {editedLabel ? (
+                            <div className="flex items-center gap-1">
+                              {editedLabel}
+                              <span className="text-[11px] text-muted font-mono">{fmtTime(n.ts)}</span>
+                            </div>
+                          ) : (
+                            <span className="text-[11px] text-muted font-mono">{fmtTime(n.ts)}</span>
+                          )}
                           {silenced ? (
                             <span className="text-[10px] text-muted italic flex items-center gap-1"><BellOff className="lucide-inline" /> {i18nT('components.notifications.notificationFeed.muted_2')}</span>
                           ) : !n.acked && !settled ? (
@@ -886,7 +913,7 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
                       <Clickable
                         data-notif-dismiss
                         aria-label={dismissLabel}
-                        className={`${settled || hasRetired(dismissFailed, n.ts) ? 'opacity-80' : 'opacity-0 group-hover:opacity-40 [@media(hover:none)]:opacity-60'} focus-visible:opacity-100 text-[11px] cursor-pointer hover:!opacity-100 hover:text-danger transition-opacity shrink-0`}
+                        className={`${settled || dismissFailed ? 'opacity-80' : 'opacity-0 group-hover:opacity-40 [@media(hover:none)]:opacity-60'} focus-visible:opacity-100 text-[11px] cursor-pointer hover:!opacity-100 hover:text-danger transition-opacity shrink-0`}
                         onClick={dismissRow}
                       ><X className="lucide-inline" /></Clickable>
                       </div>

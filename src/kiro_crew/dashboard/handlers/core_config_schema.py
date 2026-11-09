@@ -57,6 +57,8 @@ from kiro_crew.config.sections import (
     JUDGE_PROVIDERS,
     LIVE_MAX_FPS_CHOICES,
     LIVE_QUALITIES,
+    REMOTE_EDITOR_HOST_PATTERN,
+    REMOTE_EDITOR_IDS,
     SESSION_SORT_MODES,
     SHARED_CREW_BOUNDS,
     STRANDS_PROVIDER_CHOICES,
@@ -349,6 +351,15 @@ _EDITABLE_CONFIG: dict[str, dict] = {
         "type": "enum",
         "values": ["", *EXTERNAL_TERMINAL_APPS],
     },
+    # The side panel ⋯ menu's "Open in <editor>" link (Settings → Display → Remote
+    # editor). "" = off. The editor is an enum because its value becomes the
+    # link's URL scheme; the host pattern keeps URL structure out of the link.
+    "dashboard.remote_editor.editor": {"type": "enum", "values": ["", *REMOTE_EDITOR_IDS]},
+    "dashboard.remote_editor.host": {
+        "type": "str",
+        "max_len": 253,
+        "pattern": REMOTE_EDITOR_HOST_PATTERN,
+    },
     # Keep the host awake while the agent is running a task. Gateway-host
     # behavior (not a display pref), read by the prevent-sleep poll in
     # dashboard/server.py; off by default.
@@ -411,11 +422,12 @@ _EDITABLE_CONFIG: dict[str, dict] = {
     # the loader accepts rather than a second copy. Without the Feature preview
     # the gateway reads every one of these as its default
     # (``shared_crew.preview``), so a stored value waits for the preview.
-    # ``tailnet_direct`` takes effect on the next gateway start. ``hard_limits``
-    # and ``containment_enabled`` stay config-file-only: they refuse work or
+    # ``tailnet_direct``, ``ssm`` and ``ssm_port`` take effect on the next gateway start.
+    # ``hard_limits`` and ``containment_enabled`` stay config-file-only: they refuse work or
     # start per-person cgroup slices, which this surface does not offer.
     "dashboard.shared_crew.admission_enabled": {"type": "bool"},
     "dashboard.shared_crew.tailnet_direct": {"type": "bool"},
+    "dashboard.shared_crew.ssm": {"type": "bool"},
     "dashboard.shared_crew.principal_concurrency": {
         "type": "int",
         "min": SHARED_CREW_BOUNDS["principal_concurrency"][0],
@@ -425,6 +437,11 @@ _EDITABLE_CONFIG: dict[str, dict] = {
         "type": "int",
         "min": SHARED_CREW_BOUNDS["crew_concurrency"][0],
         "max": SHARED_CREW_BOUNDS["crew_concurrency"][1],
+    },
+    "dashboard.shared_crew.ssm_port": {
+        "type": "int",
+        "min": SHARED_CREW_BOUNDS["ssm_port"][0],
+        "max": SHARED_CREW_BOUNDS["ssm_port"][1],
     },
     "dashboard.shared_crew.typing_idle_seconds": {
         "type": "int",
@@ -697,19 +714,22 @@ _APP_MODEL_SPEC: dict = {
 }
 
 
+# ``apps.<name>.mute_sessions``, the switch each app's row in Settings →
+# Notifications → Sources writes: mute the sessions that app opens.
+_APP_MUTE_SESSIONS_SPEC: dict = {"type": "bool"}
+
+
 def _editable_config_spec(path_key: object) -> dict | None:
-    """The PATCH spec for *path_key*: a listed field, or a per-app model path."""
+    """The PATCH spec for *path_key*: a listed field, or a per-app setting path."""
     if not isinstance(path_key, str):
         return None
     spec = _EDITABLE_CONFIG.get(path_key)
     if spec is None:
         parts = path_key.split(".")
         # ``fullmatch``: ``KEBAB_RE``'s ``$`` also matches before a trailing newline.
-        if (
-            len(parts) == 3
-            and parts[0] == "apps"
-            and parts[2] == "model"
-            and KEBAB_RE.fullmatch(parts[1])
-        ):
-            return _APP_MODEL_SPEC
+        if len(parts) == 3 and parts[0] == "apps" and KEBAB_RE.fullmatch(parts[1]):
+            if parts[2] == "model":
+                return _APP_MODEL_SPEC
+            if parts[2] == "mute_sessions":
+                return _APP_MUTE_SESSIONS_SPEC
     return spec

@@ -76,7 +76,7 @@ describe('CrewmateSwitcher closed chip', () => {
     expect(label.className).toContain('motion-reduce:transition-none')
     expect((label.firstElementChild as HTMLElement).className).toContain('overflow-hidden')
     expect(chip()).toHaveAccessibleName('Bots')
-    expect(chip()).toHaveAttribute('title', 'Switch Bot')
+    expect(chip()).toHaveAttribute('title', 'Switch bot')
     expect(chip()).toHaveAttribute('aria-expanded', 'false')
   })
 
@@ -149,8 +149,8 @@ describe('CrewmateSwitcher open list', () => {
     const list = await open()
     const search = screen.getByTestId('crewmate-switcher-search')
     // Same words as the roster column's search over the same roster (#24448).
-    expect(search).toHaveAccessibleName('Search Bots…')
-    expect(search).toHaveAttribute('placeholder', 'Search Bots…')
+    expect(search).toHaveAccessibleName('Search bots…')
+    expect(search).toHaveAttribute('placeholder', 'Search bots…')
 
     fireEvent.change(search, { target: { value: 'radar' } })
     // Matches the display name AND the agent template ("radar-template").
@@ -161,7 +161,7 @@ describe('CrewmateSwitcher open list', () => {
 
     fireEvent.change(search, { target: { value: 'nobody' } })
     expect(within(list).queryAllByRole('option')).toHaveLength(0)
-    expect(screen.getByTestId('crewmate-switcher-empty')).toHaveTextContent('No Bot matches')
+    expect(screen.getByTestId('crewmate-switcher-empty')).toHaveTextContent('No bot matches')
     // The create door is still offered under an empty result.
     expect(screen.getByTestId('crewmate-switcher-create')).toBeInTheDocument()
   })
@@ -241,6 +241,43 @@ describe('CrewmateSwitcher open list', () => {
     expect(await screen.findByTestId('import-dialog-stub')).toBeTruthy()
     expect(onCreate).not.toHaveBeenCalled()
     await waitFor(() => expect(screen.queryByTestId('crewmate-switcher-list')).toBeNull())
+  })
+})
+
+// Issue #30935: the folded roster carries the column's star, through the
+// page's own toggle, so starring works without opening the full roster.
+describe('CrewmateSwitcher star', () => {
+  it('draws no star when the page passes no toggle', async () => {
+    setup()
+    const list = await open()
+    expect(within(list).queryByTestId('crewmate-switcher-star-fixer')).toBeNull()
+  })
+
+  it('stars a row through the page toggle, without picking it or closing the list', async () => {
+    const onToggleStar = vi.fn()
+    const { onPick } = setup({ onToggleStar, members: [MEMBERS[1], row('fixer', { starred: true })] })
+    const list = await open()
+    const scribeStar = within(list).getByTestId('crewmate-switcher-star-scribe')
+    expect(scribeStar).toHaveAccessibleName('Star scribe')
+    expect(scribeStar).toHaveAttribute('aria-pressed', 'false')
+    // The star is the row button's sibling, never inside the option.
+    expect(within(list).getAllByRole('option')[0]).not.toContainElement(scribeStar)
+    const fixerStar = within(list).getByTestId('crewmate-switcher-star-fixer')
+    expect(fixerStar).toHaveAccessibleName('Unstar fixer')
+    expect(fixerStar).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(fixerStar)
+    expect(onToggleStar).toHaveBeenCalledTimes(1)
+    expect(onToggleStar.mock.calls[0][0].name).toBe('fixer')
+    expect(onPick).not.toHaveBeenCalled()
+    expect(screen.getByTestId('crewmate-switcher-list')).toBeInTheDocument()
+  })
+
+  it('holds the star while its write is in flight', async () => {
+    setup({ onToggleStar: vi.fn(), starPending: new Set(['fixer']) })
+    const list = await open()
+    // Held with aria-disabled, so a focused star keeps its focus.
+    expect(within(list).getByTestId('crewmate-switcher-star-fixer')).toHaveAttribute('aria-disabled', 'true')
+    expect(within(list).getByTestId('crewmate-switcher-star-oncall')).not.toHaveAttribute('aria-disabled')
   })
 })
 

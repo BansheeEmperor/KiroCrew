@@ -283,7 +283,7 @@ describe('CrewEditorModal — single editing experience', () => {
     await waitFor(() => expect(mockApi.agentsInstalled).toHaveBeenCalled())
     // No classic dialog, and the retired Classic/New toggle is gone. The one
     // dialog is the New editor, named for the crewmate it edits.
-    expect(screen.getAllByRole('dialog', { name: /Edit Bot/ })).toEqual([next])
+    expect(screen.getAllByRole('dialog', { name: /Edit bot/ })).toEqual([next])
     expect(within(next).queryByTestId('crew-editor-experience-toggle')).toBeNull()
     expect(within(next).queryByTestId('crew-editor-exp-classic')).toBeNull()
     expect(within(next).queryByTestId('crew-editor-exp-next')).toBeNull()
@@ -363,7 +363,7 @@ describe('CrewEditorNextDialog — section rail', () => {
     expect(name).not.toHaveTextContent('c0ffee12')
     const added = within(dialog).getByTestId('next-band-added')
     expect(added).toHaveTextContent('Added to On-Call Pager')
-    expect(added).not.toHaveTextContent('Added to Bot')
+    expect(added).not.toHaveTextContent('Added to bot')
   })
 
   it("splits what the owned config's worker carries into Comes-with and Added bands", async () => {
@@ -513,7 +513,7 @@ describe('CrewEditorNextDialog — section rail', () => {
     mockCaps.get.mockResolvedValue({ ...view, revision: 'r2' })
     fireEvent.click(within(ask).getByRole('button', { name: 'Remove' }))
     expect(await within(dialog).findByTestId('next-builtfrom-remove-error')).toHaveTextContent(
-      "This Bot's abilities changed since you opened this. Nothing was removed; check the list and press Remove again.",
+      "This bot's abilities changed since you opened this. Nothing was removed; check the list and press Remove again.",
     )
     expect(mockCaps.save).not.toHaveBeenCalled()
     expect(mockCaps.get.mock.calls.length).toBeGreaterThan(getsBefore)
@@ -542,7 +542,7 @@ describe('CrewEditorNextDialog — section rail', () => {
     const getsBefore = mockCaps.get.mock.calls.length
     fireEvent.click(within(added).getByTestId('next-band-remove-mcpServers-github'))
     const ask = await screen.findByRole('dialog', { name: 'Remove “github”?' })
-    expect(ask).toHaveTextContent('It stops being available to this Bot. You can add it back with Add abilities.')
+    expect(ask).toHaveTextContent('It stops being available to this bot. You can add it back with Add abilities.')
     fireEvent.click(within(ask).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Remove “github”?' })).toBeNull())
     expect(mockCaps.preview).not.toHaveBeenCalled()
@@ -926,7 +926,7 @@ describe('CrewEditorNextDialog — Behavior / Approvals', () => {
     expect(within(dialog).queryByTestId('next-model-pin-unserved')).toBeNull()
     // It says why the pick is not the model in use: which harness lacks it.
     expect(readout).toHaveTextContent(
-      `${acpBackendName({ id: 'codex' })} doesn't offer claude-fable-5, so this Bot runs on openai.gpt-5.6-terra.`,
+      `${acpBackendName({ id: 'codex' })} doesn't offer claude-fable-5, so this bot runs on openai.gpt-5.6-terra.`,
     )
     expect(within(dialog).queryByTestId('next-model-uses-line')).toBeNull()
   })
@@ -962,7 +962,7 @@ describe('CrewEditorNextDialog — Behavior / Approvals', () => {
     const dialog = await openNew()
     const readout = await within(dialog).findByTestId('next-model-pin-unserved')
     // The session leaves the pin unsent and stays on the harness's default model.
-    expect(readout.textContent).toMatch(/doesn't offer claude-opus-5\.5, so this Bot's sessions run on .+'s default model instead/)
+    expect(readout.textContent).toMatch(/doesn't offer claude-opus-5\.5, so this bot's sessions run on .+'s default model instead/)
     expect(within(dialog).queryByTestId('next-model-runs-instead')).toBeNull()
   })
 })
@@ -973,6 +973,30 @@ describe('CrewEditorNextDialog — General edits, footer, danger', () => {
     fireEvent.change(within(dialog).getByTestId('display-name-input'), { target: { value: 'On-Call Bot' } })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
     await waitFor(() => expect(mockApi.updateKirocrewAgent).toHaveBeenCalled())
+  })
+
+  it('shows the stored session colour on General and saves a changed one', async () => {
+    mockApi.kirocrewAgents.mockResolvedValue({ ...AGENTS_RESPONSE, agents: [DEFAULT_CREW, { ...OTHER_CREW, session_color: '#ef4444' }] })
+    const dialog = await openNew()
+    const hex = within(dialog).getByRole('textbox', { name: 'Session color hex value' })
+    await waitFor(() => expect(hex).toHaveValue('#ef4444'))
+    fireEvent.change(hex, { target: { value: '#14b8a6' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+    await waitFor(() =>
+      expect(mockApi.updateKirocrewAgent).toHaveBeenCalledWith('oncall', expect.objectContaining({ session_color: '#14b8a6' })),
+    )
+  })
+
+  it('clears the stored session colour and saves the empty value', async () => {
+    mockApi.kirocrewAgents.mockResolvedValue({ ...AGENTS_RESPONSE, agents: [DEFAULT_CREW, { ...OTHER_CREW, session_color: '#ef4444' }] })
+    const dialog = await openNew()
+    const hex = within(dialog).getByRole('textbox', { name: 'Session color hex value' })
+    await waitFor(() => expect(hex).toHaveValue('#ef4444'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+    await waitFor(() =>
+      expect(mockApi.updateKirocrewAgent).toHaveBeenCalledWith('oncall', expect.objectContaining({ session_color: '' })),
+    )
   })
 
   it('shows the unsaved-changes note when a pane is dirty', async () => {
@@ -1053,7 +1077,7 @@ describe('CrewEditorNextDialog — Memory', () => {
   it('names a private V2 store in the status line', async () => {
     const dialog = await openNew()
     fireEvent.click(within(dialog).getByTestId('next-rail-memory'))
-    expect(await within(dialog).findByTestId('next-memory-status')).toHaveTextContent('This Bot has its own memory (V2).')
+    expect(await within(dialog).findByTestId('next-memory-status')).toHaveTextContent('This bot has its own memory (V2).')
   })
 
   it('shows only the diagnostic for a store another member owns', async () => {

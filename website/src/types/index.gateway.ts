@@ -79,6 +79,12 @@ export interface StatusData {
    */
   update_channel_move_pending?: boolean
   update_managed_by?: string
+  /**
+   * The home security policy file's path when its update commands manage
+   * this install, so the policy notice can say where it is. Empty under any
+   * other policy tier, absent on older gateways and on app sockets.
+   */
+  update_policy_file?: string
   update_can_arm?: boolean
   /**
    * What an available update leads to on this install: `install` (with the
@@ -87,6 +93,14 @@ export interface StatusData {
    * the gateway first derives it. The update loop acts on the same answer.
    */
   update_auto_effect?: 'install' | 'notify' | 'mandatory' | 'unknown'
+  /**
+   * True when `update_auto_effect` is `notify` only because the security policy
+   * turns unattended installs off: a person's Update still installs here. It
+   * says so for every install shape, where `update_can_apply` is false on a
+   * managed venv whose Update is the arm and approve flow. Absent on older
+   * gateways (reads as false).
+   */
+  update_auto_manual_only?: boolean
   /**
    * Whether the desktop app bundles and launches this gateway, from the baked
    * packaging stamp. Independent of `update_managed_by`, which reads `command`
@@ -161,6 +175,9 @@ export interface StatusData {
   yolo_duration?: '30m' | '1h' | '6h' | '12h' | '24h' | 'until_shutdown'
   /** Whether enterprise governance currently allows the until_shutdown option. */
   yolo_until_shutdown_permitted?: boolean
+  /** HTTP reply only: whether this account owns the data home's key entries,
+   *  and the gateway's repair line when it does not. Absent on an older gateway. */
+  data_home_access?: { ok: boolean; home: string; foreign: string[]; owner: string; help_url: string }
   /** Auto-approve modes forbidden by the `approval_modes` policy scope. Today the
    * scope governs `yolo` only, so this is `['yolo']` or empty; `normal`, `trust`
    * and `trust_reads` are non-deniable and never appear. The approval-mode picker
@@ -335,8 +352,8 @@ export interface SessionStorageCleanup {
  * a single slot, so a second empty is refused with 409 and this same shape rather
  * than queued.
  *
- * `total_bytes` comes from the staged manifests — the same figure the trash row
- * showed — so it is the denominator for `freed_bytes` and never a remeasurement.
+ * `total_bytes` counts what the delete counts in `freed_bytes` (the trash row's
+ * figure plus each batch's manifest), so it is the denominator, never a remeasurement.
  */
 export interface SessionStorageEmptyJob {
   job_id: string
@@ -435,7 +452,8 @@ export interface RemoteCrewApprovalState {
 
 export interface RemoteCrewCapabilities {
   instance_id: string
-  /** The peer's gateway version, or "" when it could not be read. */
+  /** The peer's gateway version, or "" when it could not be read (its reason is
+   *  `unavailable.version`). */
   version: string
   local_version: string
   /** The equality gate the backend enforces on every dispatch. False also covers
@@ -444,6 +462,9 @@ export interface RemoteCrewCapabilities {
   /** The peer runs a strictly older build than this machine (exact version,
    *  so a patch skew counts). Absent from a gateway that predates the field. */
   behind?: boolean
+  /** The peer runs a strictly newer build than this machine; the mirror of
+   *  `behind`, false for an unknown or unordered version. */
+  ahead?: boolean
   agents: { name: string; description: string; scope: string; model: string }[]
   /** The agent the PEER falls back to when the session has picked none. "" when
    *  the roster read failed — never substitute this machine's default, which
@@ -462,15 +483,16 @@ export interface RemoteCrewCapabilities {
 export interface InstanceVersionRow {
   id: string
   name: string
-  /** The peer's gateway version, or "" when it did not answer. */
+  /** The peer's gateway version, or "" when it is unknown (see `error`). */
   version: string
   /** Strictly older than `local_version`; never true for an unknown version. */
   behind: boolean
   /** This dashboard can run the crew's updater: false for a chained crew
    *  (no shell from here) and a fargate or headless one (no gateway). */
   updatable: boolean
-  /** Why the crew's version could not be read (the carrier's code), or "" when
-   *  it answered. A crew with an error is never `behind`: its version is unknown. */
+  /** Why the crew's version is unknown (the carrier's code, or
+   *  `capability_malformed_reply` for an answer naming no version), or "" when it
+   *  is known. A crew with an error is never `behind`: its version is unknown. */
   error?: string
 }
 

@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Bot, ScrollText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Wrench, MessageCircleQuestionMark, Workflow, BookmarkPlus, Component, GitPullRequest, CircleDot, Square, RotateCcw, Clock, Search, Link as LinkIcon, ExternalLink } from 'lucide-react'
 import { api } from '../../api/client'
-import { isTerminalApprovalRefusal } from '../../api/apiError'
+import { isBenignSupersededRetry, isTerminalApprovalRefusal } from '../../api/apiError'
 import { LogViewer } from '../LogsPage'
 import Clickable from '../../components/Clickable'
 import ErrorNotice from '../../components/ErrorNotice'
@@ -1067,14 +1067,14 @@ function ArtifactListRow({ row, busy, onOpen, onSave }: {
   )
 }
 
-export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, onFileOpen, onArtifactOpen, navLinks, navResolving, view, sources, selectedSourceUrl, onSelectSource, onReconcileSource, issues, selectedIssueUrl, onSelectIssue, onReconcileIssue, onAddToChat, pins, pinsLoading, onJumpToPin, onUnpin, slotTitle, chatMode, remoteEnvironmentName }: {
+export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, onFileOpen, onArtifactOpen, navLinks, navResolving, view, sources, selectedSourceUrl, onSelectSource, onReconcileSource, onDismissSource, issues, selectedIssueUrl, onSelectIssue, onReconcileIssue, onAddToChat, pins, pinsLoading, onJumpToPin, onUnpin, slotTitle, chatMode, remoteEnvironmentName }: {
   /** Set when the session runs on a remote environment: the Git view then
    *  shows the guest's checkout instead of the gateway's local one. */
   remoteEnvironmentName?: string
   subagents: Record<string, SubagentActivity>; toolLog: ToolActivity[]; open: boolean; onToggle: () => void; slot: string
   onFileOpen?: (path: string) => void; onArtifactOpen?: (slug: string) => void
   navLinks?: ExtractedLink[]; navResolving?: boolean
-  sources?: PullRequestLink[]; selectedSourceUrl?: string; onSelectSource?: (url: string) => void; onReconcileSource?: (url: string) => void; onAddToChat?: (text: string) => void
+  sources?: PullRequestLink[]; selectedSourceUrl?: string; onSelectSource?: (url: string) => void; onReconcileSource?: (url: string) => void; onDismissSource?: (url: string) => void; onAddToChat?: (text: string) => void
   /** Issue links mentioned in this session, plus the Issues tab's own selection. */
   issues?: PullRequestLink[]; selectedIssueUrl?: string; onSelectIssue?: (url: string) => void; onReconcileIssue?: (url: string) => void
   /** Pinned messages for this session (Pins tab). Passed down rather than
@@ -1157,7 +1157,9 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
     setBatchError(null)
     Promise.allSettled(failedRetryableIds.map(id => api.spawnRetry(id)))
       .then(results => {
-        const rejected = results.filter(r => r.status === 'rejected').length
+        // A `409 retry_superseded` means the run already has a successor, so it
+        // is not a failure to report; an all-benign batch shows no notice.
+        const rejected = results.filter(r => r.status === 'rejected' && !isBenignSupersededRetry(r.reason)).length
         if (rejected > 0) setBatchError(i18nT('pages.chat.activityViewer.retry_failed_error', { count: rejected }))
       })
       .finally(() => setRetryingFailed(false))
@@ -1273,6 +1275,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
               selectedUrl={selectedSourceUrl || ''}
               onSelect={onSelectSource || (() => {})}
               onReconcile={onReconcileSource}
+              onDismiss={onDismissSource}
               onAddToChat={onAddToChat || (() => {})}
             />
           ) : (

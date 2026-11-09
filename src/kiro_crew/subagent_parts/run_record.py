@@ -113,6 +113,10 @@ class SubagentInfo:
     # its parent's depth + 1 for a child of a sub-agent. Set at admission,
     # which refuses a spawn past ``_MAX_SPAWN_DEPTH``.
     depth: int = field(default=1, kw_only=True)
+    # The session the spawn tree started from: a nested run's Subagents panel
+    # cards draw in its tab, since a ``subagent:<id>`` parent names none. Set at
+    # admission from the spawning run's record; "" reads as the parent's own key.
+    root_session_key: str = field(default="", kw_only=True)
     memory_mode: str = field(default="persistent", kw_only=True)
     _memory_mode_ready: bool = field(default=True, init=False, repr=False)
     agent: str = ""
@@ -341,8 +345,7 @@ class SubagentInfo:
     # write). A completion route skips the injection for an announce whose every
     # member is marked: the parent already holds the result.
     _collected_inline: bool = False
-    # A mark on a parent that is not dashboard-born (``settles_at_release``):
-    # "pending" until the attempt holding the parent's permit when it arrived
+    # A mark on any parent: "pending" until the attempt holding the parent's permit when it arrived
     # (``_inline_token``) ends, then "confirmed" if that turn landed. A revoked
     # mark clears all three, so the completion is delivered
     # (``kiro_crew.parent_turns``).
@@ -662,6 +665,10 @@ class SubagentInfo:
     # recovery writer while the worker is live re-opens the stale-overwrite race
     # the drain exists to close.
     _state_drain_active: bool = False
+    # The ``(session key, revocation stamp)`` pairs, root first, that this run's
+    # stored ``parent_policy=auto`` rests on (``turn_session.resolve_parent_policy``);
+    # a child of this run inherits them. ``None`` while the run holds no "auto".
+    _approval_lineage: tuple[tuple[str, int], ...] | None = None
     # Set only on the synthetic marker `_conversation_busy` returns for a
     # conversation held by an abandoned state writer, so the two
     # retention callers can say "still settling a state write" instead of
@@ -687,6 +694,11 @@ class SubagentInfo:
     # Every store write the run makes carries it, so a late write from a
     # superseded dispatch of the same id is fenced out. 0 = no store row.
     _taskq_generation: int = 0
+    # Generation of the claim that began this attempt of the run. A wait wake
+    # moves ``_taskq_generation`` and never this, so it is what the run's
+    # tombstone records (``taskq_attempt``) for the boot reconcile to tell this
+    # attempt's ending from an earlier one's. 0 = no store row.
+    _taskq_attempt: int = 0
     # Scheduler-core fields (session-start gate, lane-slot waits; see
     # docs/system-specs/modules/subagent.md § Lane-slot waits).
     # Time this start spent queued at its start queues in total, ms (the paused
@@ -708,6 +720,9 @@ class SubagentInfo:
     # Set when the run's lane slot was yielded for a wait and a resume entry
     # is queued in admission; cleared when the slot is granted back.
     _resume_pending: bool = False
+    # Awaited children this run released as deferral-held
+    # (``taskq_release_deferred_async``); no wait of this run awaits them again.
+    _deferred_released: set[str] = field(default_factory=set)
     # The run loop's wake-up for a yielded slot: set by ``resume_grant`` when
     # the pump hands the slot back, or by the dependency coordinator's
     # ``on_fail`` when the wait ended in failure (``_wait_failed`` names why).

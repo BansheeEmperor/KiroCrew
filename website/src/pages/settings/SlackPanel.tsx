@@ -84,9 +84,14 @@ function connectError(config: SlackConfigData): string {
 
 /** One-line explanation of WHY Slack is not connected, with the fix. */
 function connectionHint(config: SlackConfigData): string {
+  if (config.connected) return ''
+  // Both tokens without an owner still reads "Needs setup"; name the missing piece.
+  if (config.bot_token_set && config.app_token_set && !config.owner_id) {
+    return i18nT('pages.settings.slackPanel.owner_id_missing')
+  }
   // A startup failure is shown by `connectError`; "saved but not yet active"
   // would only repeat it underneath.
-  if (config.connected || !config.configured || config.connect_error) return ''
+  if (!config.configured || config.connect_error) return ''
   return i18nT('pages.settings.slackPanel.tokens_are_saved_but_not_yet_active_restart_the')
 }
 
@@ -147,7 +152,7 @@ export function TagListEditor({ label, description, hint, values, placeholder, o
           {/* min-w-0 + flex-1: a `flex-none` input keeps its intrinsic width, which
               pushes the Add button off the card at 320px. Letting the input shrink
               keeps both on one row at every width the repo supports. */}
-          <Input value={draft} placeholder={placeholder} className="min-w-0 flex-1 font-mono"
+          <Input value={draft} placeholder={placeholder} aria-label={label} className="min-w-0 flex-1 font-mono"
             onChange={e => { setDraft(e.target.value); setErr('') }}
             {...ime.bindEnter({ onEnter: add })} />
           <Btn onClick={add} disabled={!draft.trim()} className="shrink-0"><Plus size={13} /> {i18nT('pages.settings.slackPanel.add')}</Btn>

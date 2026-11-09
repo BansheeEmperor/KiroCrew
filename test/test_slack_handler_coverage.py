@@ -172,6 +172,16 @@ class TestYoloCommand:
         await _slash("!yolo renew", slack, sessions)
         assert "renewed" in _texts(slack)
 
+    @pytest.mark.asyncio
+    async def test_the_cli_grant_is_not_slacks_to_renew(self, slack, sessions, owner):
+        """``gateway --approval yolo``'s grant reads as off in Slack, so renew refuses it."""
+        from kiro_crew import safety_override as so
+
+        assert so.safety_override().activate_declared("cli").active is True
+        await _slash("!yolo renew", slack, sessions)
+        assert "not active" in _texts(slack)
+        assert so.safety_override().is_cli_launch is True
+
 
 # ──────────────────────────────────────────────────────────────────────
 # !stop
@@ -1243,6 +1253,17 @@ class TestCompactCommand:
         sessions.has_session.return_value = has_session
         await h._handle_compact_command(slack, sessions, "C1", "t1", "msg1", "t1")
         assert expected in _texts(slack)
+
+    @pytest.mark.asyncio
+    async def test_flagged_session_says_the_account_changed(self, slack, sessions):
+        # The Kiro account check flagged the session without retiring it: try_acquire
+        # refuses it while has_session still answers True, and no reply is running.
+        sessions.try_acquire = AsyncMock(return_value=False)
+        sessions.has_session.return_value = True
+        sessions.is_retiring.return_value = True
+        await h._handle_compact_command(slack, sessions, "C1", "t1", "msg1", "t1")
+        assert _texts(slack) == mc.COMPACT_ACCOUNT_CHANGED_TEXT
+        sessions.release.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_acquired_but_no_provider(self, slack, sessions):

@@ -66,6 +66,7 @@ import {
 import { commitUrlFor, userUrlFor, repoScopeKey } from '../lib/links'
 import { providerKeyOf, providerTerms, readOnlyHint } from '../lib/links'
 
+import { Trans } from 'react-i18next'
 import { i18nT } from '../../../i18n/t'
 import ErrorNotice from '../../../components/ErrorNotice'
 import { fmtDateTime, fmtDateTimeNumeric } from '../../../i18n/format'
@@ -343,7 +344,12 @@ function eventVisual(
     case 'renamed':
       return {
         Icon: Pencil, color: 'text-muted',
-        body: <>{who} {i18nT('apps.issueRadar.components.issueDetail.changed_the_title')} <span className="line-through">{ev.rename?.from}</span> → <span className="text-text">{ev.rename?.to}</span></>,
+        body: (
+          <Trans
+            i18nKey="apps.issueRadar.components.issueDetail.changed_the_title_from_to"
+            components={{ who, from: <span className="line-through">{ev.rename?.from}</span>, to: <span className="text-text">{ev.rename?.to}</span> }}
+          />
+        ),
       }
     case 'milestoned':
       return { Icon: MilestoneIcon, color: 'text-muted', body: <>{who} {i18nT('apps.issueRadar.components.issueDetail.added_this_to_the')} <span className="font-medium text-text">{ev.milestone}</span> {i18nT('apps.issueRadar.components.issueDetail.milestone')}</> }
@@ -1070,9 +1076,14 @@ export default function IssueDetail({ issue }: { issue: Issue }) {
                 <div className="flex items-center gap-2">
                   {me && !editingAssignees && (
                     <button
-                      onClick={toggleSelf}
-                      disabled={assigneesMutation.isPending}
-                      className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-accent cursor-pointer bg-transparent disabled:opacity-50"
+                      // `aria-disabled`+`aria-busy` while the assignee write runs,
+                      // not `disabled`: a keyboard user who pressed this keeps focus
+                      // here instead of dropping it to <body>; the press is refused.
+                      onClick={() => { if (!assigneesMutation.isPending) toggleSelf() }}
+                      aria-disabled={assigneesMutation.isPending || undefined}
+                      aria-busy={assigneesMutation.isPending || undefined}
+                      data-busy={assigneesMutation.isPending || undefined}
+                      className="busy-cue [--busy-dim:0.5] inline-flex items-center gap-1 text-[11px] text-muted hover:text-accent cursor-pointer bg-transparent"
                     >
                       {assignedToMe
                         ? <><UserMinus size={11} /> {i18nT('apps.issueRadar.components.issueDetail.unassign_me')}</>

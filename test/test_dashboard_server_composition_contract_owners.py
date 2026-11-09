@@ -27,6 +27,7 @@ from dashboard_server_composition_contract_helpers import (
 )
 
 import kiro_crew.dashboard.server as server
+from kiro_crew.crew_log import read_budget
 from kiro_crew.testing.wait import async_wait_until
 
 # ── the clauses the bootstrap carries ─────────────────────────────────────────
@@ -398,6 +399,7 @@ async def test_the_recorder_row_reads_the_gateway_counters(
         "sessions": 2,
         "subagents": 0,
         "live_loops": 3,
+        "crew_log_reads": read_budget.snapshot(),
         "adaptive_cap": None,
         "adaptive_action": "hold",
         "adaptive_reason": "ok",
@@ -455,11 +457,14 @@ async def test_the_recorder_stop_is_awaited_and_never_raises(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("is_macos", [False, True], ids=["linux", "macos"])
 async def test_the_watchdog_budget_falls_back_to_the_managed_service_grace(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, is_macos: bool
 ) -> None:
     """A config failure must not erase the grace a managed service launch asked for:
-    the watchdog is armed with the environment's budget and a fresh dump file."""
+    the watchdog is armed with the environment's budget and a fresh dump file, and
+    on macOS also with the page-in reader and its shorter paging grace cap."""
+    monkeypatch.setattr(server.platform_compat, "IS_MACOS", is_macos)
     steps: list[str] = []
     monkeypatch.setattr(server, "sweep_stale_dumps", lambda: steps.append("sweep"))
     monkeypatch.setattr(server, "rotate_dumps", lambda: steps.append("rotate"))
@@ -474,7 +479,11 @@ async def test_the_watchdog_budget_falls_back_to_the_managed_service_grace(
     monkeypatch.setattr(server, "LoopStallWatchdog", watchdog)
     assert await server._open_loop_watchdog({"KIROCREW_MANAGED": "1"}) is watchdog.return_value
     assert steps == ["sweep", "rotate"]
-    watchdog.assert_called_once_with(dump_file="dump.txt", exit_after=40.0)
+    expected: dict[str, Any] = {"dump_file": "dump.txt", "exit_after": 40.0}
+    if is_macos:
+        expected["loop_major_faults"] = server.read_loop_pageins_under_pressure
+        expected["paging_grace_max"] = server.PAGING_GRACE_MAX_SECS_MACOS
+    watchdog.assert_called_once_with(**expected)
 
 
 @pytest.mark.asyncio
@@ -820,6 +829,9 @@ async def test_the_workflow_service_hooks_redact_announce_and_authorize(
     )
     prompt = slot.enqueue_or_run_prompt.call_args.args[0]
     assert prompt.startswith("[Workflow `nightly` finished: done] Its result was just posted")
+    # The gateway's words: an inject row, run as a synthetic payload.
+    assert slot.enqueue_or_run_prompt.call_args.kwargs == {"workflow_followup": True}
+    assert slot.enqueue_or_run_prompt.call_args.args[1].keywords == {"_synthetic_payload": True}
     state.push_slots_update.assert_called_once_with()
     assert state._background_tasks == set()
 

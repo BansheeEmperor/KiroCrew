@@ -26,6 +26,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from kiro_crew.dashboard.session_pulse_counter import increment_user_session_count_off_loop
+from kiro_crew.dashboard.slot_buffers import MAX_SLOT_KEY_CHARS
 from kiro_crew.dashboard.state_parts.chat_slot import _ChatSlot
 from kiro_crew.dashboard.state_parts.dashboard_services import _registry_for
 from kiro_crew.dashboard.state_parts.transcript_rows import chat_message_note
@@ -167,16 +168,12 @@ def _ascii_slot_key(name: str) -> str:
 _SLOT_KEY_FILENAME_UNSAFE_RE = re.compile(r"[^\w\-.]", flags=re.ASCII)
 
 
-# Longest slot key kept verbatim. A transcript is ``<stem>.jsonl`` -- the stem
-# is ``dashboard_<key>`` for a dashboard slot and the key itself for a channel
-# slot -- and filesystems refuse a name over 255 bytes (ENAMETOOLONG). So a key
-# longer than this could never have had a transcript of either kind; only such
-# a key is shortened, and a key whose transcript may already exist keeps its
-# spelling so a restart still finds it. A longer key keeps its first
-# ``_SLOT_KEY_KEEP_CHARS`` characters plus ``-`` and a short sha256 of the whole
-# folded key: a valid filename stem, stable across calls, distinct per name, and
-# short enough to stay unchanged when folded again.
-_SLOT_KEY_MAX_CHARS = 255 - len(".jsonl")
+# A key longer than ``MAX_SLOT_KEY_CHARS`` (defined in ``slot_buffers``, which
+# says why that is the bound) keeps its first ``_SLOT_KEY_KEEP_CHARS`` characters
+# plus ``-`` and a short sha256 of the whole folded key: a valid filename stem,
+# stable across calls, distinct per name, and short enough to stay unchanged
+# when folded again.
+_SLOT_KEY_MAX_CHARS = MAX_SLOT_KEY_CHARS
 
 
 _SLOT_KEY_KEEP_CHARS = 180
@@ -407,11 +404,19 @@ def resolve_slot(self: DashboardState, name: str) -> _ChatSlot | None:
 
 
 def link_slack(self: DashboardState, slot_name: str, thread_ts: str, channel_id: str) -> None:
-    """Update a slot's Slack link state and persist to SessionStore."""
+    """Update a slot's Slack link state and persist to SessionStore.
+
+    Raises ``AnchorHandoffRefused``, changing nothing, when *thread_ts* is a
+    Slack code channel's anchor owned by another slot: see
+    ``slack.code_channels.binding.check_anchor_handoff``.
+    """
     slot = self._slots.get(slot_name)
     if not slot:
         logger.warning("slack link skipped: no live slot %r (chat closed?)", slot_name)
         return
+    from kiro_crew.slack.code_channels.binding import check_anchor_handoff
+
+    check_anchor_handoff(thread_ts, slot_name)
     # A thread handoff is ONE action with TWO persisted writes: the previous
     # owner's link is cleared and this slot's is claimed. Each write rewrites
     # the whole session map, so as two separate writes they are separately

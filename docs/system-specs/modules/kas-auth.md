@@ -3,9 +3,18 @@
 > Status: implemented and wired to the KAS relay. The auth subsystem lives under
 > `src/kiro_crew/auth/` with unit tests. Its runtime consumer is
 > `src/kiro_crew/acp/kas_host_auth.py`: when the vault holds an identity, the KAS
-> backend spawns the relay in `acp --agent-engine v3` mode WITHOUT `--auth-method
-> cli`, so the engine's `_kiro/auth/getAccessToken` request reaches Kiro Crew, and
-> `AcpRuntime` answers it from `KasAuthProvider.get_access_token_callback()`. That
+> backend spawns the relay in `acp --agent-engine v3` mode with `--auth-method
+> client`, so the engine's `_kiro/auth/getAccessToken` request reaches Kiro Crew, and
+> `AcpRuntime` answers it from `KasAuthProvider.get_access_token_callback()`. The
+> flag is passed unless the installed kiro-cli is known to be below
+> `kiro_cli.KAS_AUTH_CLIENT_MIN_KIRO_CLI` (2.35.2), because from that release an
+> omitted `--auth-method` means `cli` and kiro-cli would answer from its own store.
+> A version known to be below the floor gets no flag, which those releases read as
+> client-owned (measured on 2.21.0 and 2.35.1). When `--version` cannot be read the
+> spawn passes the flag. A release that lacks the `client` value refuses it at
+> argument parse, before `initialize`, so an unknown version or a floor set too low
+> fails closed rather than falling back to kiro-cli's credential: a pre-2.35.2
+> install whose version probe fails stops there instead of starting. That
 > spawn enters through `kiro-cli-chat` when one sits beside the resolved `kiro-cli`
 > (`kiro_cli.chat_sibling`, consulted by `acp/harness/kas.py` on the Crew-owned
 > branch only, never for an explicit `KIROCREW_KIRO_BIN`, never on Windows whose one
@@ -34,7 +43,12 @@
 > So the vault sign-in always takes effect on the next spawn, and every KAS prompt
 > points at the Kiro sign-in card and never at `kiro-cli login`: the declaration's
 > `sign_in_remedy` and `signed_out_message` name that card alone, led by the route
-> of the last spawn once one ran (`host_auth._with_kas_route`); `kirocrew doctor`'s
+> of the last spawn once one ran (`host_auth._with_kas_route`). The chat row for
+> that sentence carries the `meta.notice` token `kas_signed_out`, and the route it
+> names in `notice_args.route` (both set when `host_auth.kas_signed_out_route`
+> recognises it), so the dashboard draws it in the user's language, led by the
+> route in plain words; beside the card's sign-in button the copy points at that button.
+> Any other wording, the launcher form included, keeps its English. `kirocrew doctor`'s
 > `kas auth:` row names the route ("KAS through kiro-cli's relay") and prints the
 > same remedy when kiro-cli's own store is what answers. A stored Kiro CLI pick
 > (`agent.acp_backend == "kiro"`) is not moved: it keeps kiro-cli's sign-in.
@@ -237,10 +251,25 @@ because SSO-OIDC answers `Invalid start url provided` to `<org>.awsapps.com/star
 and to `https://<org>.awsapps.com`. A URL it cannot canonicalize (`http://`, a query,
 a port, shell characters) is refused with `invalid_start_url` before AWS is called.
 A `400 invalid_request` from `StartDeviceAuthorization` for a company start URL is
-`StartUrlRejectedError`, also `invalid_start_url` (HTTP 400, not the 502 of an
-auth-service failure): its message says to use the access portal URL when AWS names
-the start URL, and to check the Region field otherwise, since a portal looked up in
-the wrong region answers a bare `Invalid request`.
+`StartUrlRejectedError` (HTTP 400, not the 502 of an auth-service failure): its
+message says to use the access portal URL when AWS names the start URL
+(`invalid_start_url`), and to check the Region field otherwise, since a portal looked
+up in the wrong region answers a bare `Invalid request`; that answer names neither
+field, so it is `start_url_or_region_rejected`. The dashboard's company SSO form
+reads the code, not the text: `invalid_region`, `invalid_start_url` and
+`start_url_or_region_rejected` get a headline naming the Region, the start URL or
+both, and those inputs are marked `aria-invalid` and described by the error; every
+other begin error keeps the "Check your connection" headline.
+
+An approved IdC token carries no profile ARN, so `_poll_oidc` resolves it with the
+control plane's `ListAvailableProfiles` (`auth/login/control_plane.py`). The Identity
+Center region does not name the control plane that serves the profile (a `us-east-1`
+instance can hold an `eu-central-1` profile, #28904), so the call asks every host in
+`_CPS_ENDPOINTS`, the login region's own first, and keeps the first answer that lists
+a profile. A host that refuses or sends an unreadable answer is logged and skipped.
+The poll ends as `error`, with nothing stored, when every host refused or none lists
+a profile (`no available Kiro profiles`); a connection failure is not skipped and
+raises out of the poll, since this leg has no transport budget (above).
 
 ### External IdP (enterprise SSO) — independent
 
@@ -257,7 +286,7 @@ cross-process lock (KAS just re-reads / re-callbacks):
 | Identity | Refresh endpoint | Protocol |
 |---|---|---|
 | Social + Builder ID (social path) | `POST {host}/refreshToken` | JSON `{refreshToken}` → `{accessToken, refreshToken?, expiresIn, profileArn?}` |
-| IAM Identity Center | AWS SSO-OIDC `CreateToken` | needs stored `{clientId, clientSecret}` from RegisterClient |
+| IAM Identity Center | AWS SSO-OIDC `CreateToken` | needs stored `{clientId, clientSecret}` from RegisterClient; its `clientSecretExpiresAt` is kept as `client_secret_expires_at` |
 | External IdP | token's `tokenEndpoint` | OAuth `grant_type=refresh_token` |
 
 Refresh window: KAS enters its refresh buffer at **now + 3min**. The module MUST ensure
@@ -484,10 +513,18 @@ engine instead ([aws-control.md](aws-control.md)).
   --agent-engine v3` with no `--auth-method` → the engine's credential request is the
   first frame the host receives → host answers with a real OIDC credential →
   `initialize`, `session/new`, `session/prompt` complete with `stopReason=end_turn`
-  and the model's reply (`getAccessToken_calls=1`). The refused path was measured
+  and the model's reply (`getAccessToken_calls=1`). The no-flag shape was measured
+  client-owned on 2.21.0 and 2.35.1. On 2.35.2 and later an omitted flag is
+  cli-owned, and `--auth-method client` is the shape that forwards the request:
+  `client` parses on 2.35.2, and on 2.37.1 and 3.0.0, signed out in an isolated
+  `HOME`, `_kiro/auth/getAccessToken` is the first frame the host receives.
+  `--auth-method client` with kiro-cli signed in has not been measured.
+  The refused path was measured
   the same way: with the host answering every callback `-32000 "not signed in to
   Kiro Crew"`, the engine does not wedge — `initialize` and `session/new` still
-  complete, it re-asks on each attempt, and `session/prompt` fails `-32000` with its
+  complete, it re-asks on each attempt (about twice a second; the runtime logs the
+  first refusal of each reason at WARNING and the repeats at DEBUG until a callback
+  is served, `_kas_host_auth_failure_logged`), and `session/prompt` fails `-32000` with its
   own "not signed in … Please sign in and retry" (`ModelRegistryUnauthenticatedError`
   / `TokenExpiredError`), which `acp/transport_errors.py`'s auth-failure vocabulary now
   recognizes so the dashboard renders the sign-in prompt rather than a raw error.
@@ -538,13 +575,19 @@ engine instead ([aws-control.md](aws-control.md)).
   the vault (`TokenStore.mark_refresh_rejected`, cleared by any new credential
   landing in the slot), and that marker is what `kirocrew doctor` (`crew vault:`
   line), `KasLoginService.status()` (`refresh_rejected`) and the dashboard's
-  Kiro sign-in card report as "sign-in expired -- sign in again". The marker does
+  Kiro sign-in card report as "sign-in expired -- sign in again". A Builder ID /
+  IdC entry whose `client_secret_expires_at` has passed gets its cause on that
+  doctor line ("client registration expired on <date>", verdict `cannot renew`
+  until the refused refresh records the marker), since SSO-OIDC refuses the
+  refresh with a bare `invalid_client`. It is not a
+  `refresh_blocker`: the refresh is still attempted, so the refusal still records
+  the marker the card reads. The marker does
   NOT feed the spawn decision: a lapsed Crew identity is told to the user (the
   card, and the agent's "not signed in" error row with its sign-in deep link),
   never silently handed back to whatever `kiro-cli login` holds. Automatic
   demotion to cli-owned after a persistent refresh failure is therefore not a
   gap to close but a behaviour deliberately not built (see #9772). The spawn
-  owner is the shared sign-in resolver's pick (RFC crew-enterprise-edition D4,
+  owner is the shared sign-in resolver's pick (RFC crew-lts-edition D4,
   `oss` order, amended 2026-10-30; delivered by #26841): any stored vault entry, including one whose access token has
   expired with no refresh token, and a vault that cannot be read, keeps the spawn
   Crew-owned and reports "not signed in"; only an empty vault hands it to

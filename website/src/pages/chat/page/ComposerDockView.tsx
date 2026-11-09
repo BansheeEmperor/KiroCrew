@@ -84,8 +84,13 @@ function StableChatInput(props: React.ComponentProps<typeof ChatInput>) {
   return <ChatInput {...useStableCallbackProps(props)} value={value} />
 }
 
+/** The `/` menu of a composer that refuses `/fork` leaves it out. */
+const FORK_HIDDEN: readonly string[] = ['/fork']
+
 interface ComposerDockViewProps {
   embedded?: boolean
+  /** An embedded page (not a popout): `/fork` is refused, so its menu row goes. */
+  forkUnavailable?: boolean
   mode?: string
   activeSlot: string
   connected: boolean
@@ -96,7 +101,8 @@ interface ComposerDockViewProps {
   provider: ProviderAdapter
   activityOpen: boolean
   composerBusy: boolean
-  contextPct: number
+  /** Undefined while the slot has no reading. */
+  contextPct: number | undefined
   contextTokens: { used?: number; window?: number; }
   knowledgeFetch: ReturnType<typeof useActiveSlotState>['knowledgeFetch']
   messages: ChatMessage[]
@@ -257,6 +263,7 @@ interface ComposerDockViewProps {
   answerQuestionCard: (text: string) => void
   handleCancelQueued: (queueId: string) => void
   handleEditQueued: (queueId: string, content: string) => void
+  handleEditOpenQueued: (queueId: string, open: boolean) => void
   handleInterruptQueued: (queueId: string) => void
   handleReorderQueued: (queueId: string, direction: 'next' | 'later') => void
   keepQuestionAnswer: (text: string, questions?: { question: string; }[]) => void
@@ -314,7 +321,7 @@ interface ComposerDockViewProps {
  * Its body is not re-indented: `ChatPage.statusStackLayering.test.tsx` finds the status stack's end by its closing tag's depth (14 spaces).
  */
 export default function ComposerDockView({
-  embedded, mode, activeSlot, connected, dispatch, isMobile, isTouch, navigate, provider, activityOpen, composerBusy, contextPct, contextTokens, knowledgeFetch, messages, pendingFollowup,
+  embedded, forkUnavailable = false, mode, activeSlot, connected, dispatch, isMobile, isTouch, navigate, provider, activityOpen, composerBusy, contextPct, contextTokens, knowledgeFetch, messages, pendingFollowup,
   pendingQuestion, projectLocked, restoredQuestionNotice, sentMessages, slotRunning, slotStopping, composerDraft, historySuggestions, showHistorySuggestions, chatConfig, agentDropdown,
   agentDropdownRef, agentFilter, agentInputRef, defaultAgent, defaultAgentFailed, effectiveAgents, filteredAgents, installedAgents, setAgentDropdown, setAgentFilter, toggleDefaultAgent,
   codexPairModels, filteredModels, hiddenModelsQ, ownModelsFailed, ownModelsFetching, retryOwnModels, modelsBackend, jevRouteOn, modelDropdown, modelDropdownRef, modelFilter, modelInputRef, modelPickerConfigured, modelPickerReturnsFocusRef, setModelDropdown,
@@ -327,7 +334,7 @@ export default function ComposerDockView({
   activeAgentName, attachmentAnnouncement, clampOutOfTokens, handleAddToContext, mentionKeyEdit, optimizerMentionGuard, mentionEditRange, removeDirChip, removeFileChip, selectPickedFile, followupAddToSession,
   followupStartInNewChat, followupStartInWorktree, displayMode, _modelPinActive, _modelPinAgent, _modelPinPinned, _pinShownModel, _slotProject, defaultEffort, effectiveEffort, effortLevelsOverride,
   effortSupported, effortAutoNote = false, modelMarker, pinModelToAgentMut, projectBranch, projectGit, projectGitError, shownModel, cardOwnsRecovery, continuable, continuing, handleContinue, interrupted, dockGutter, dockRef,
-  endQuoteFlight, flyingQuote, inputAreaRef, isAtBottom, answerQuestionCard, handleCancelQueued, handleEditQueued, handleInterruptQueued, handleReorderQueued, keepQuestionAnswer, queuedMessages,
+  endQuoteFlight, flyingQuote, inputAreaRef, isAtBottom, answerQuestionCard, handleCancelQueued, handleEditQueued, handleEditOpenQueued, handleInterruptQueued, handleReorderQueued, keepQuestionAnswer, queuedMessages,
   queuePendingIds, steer, stopTurn, systemDeliveryCount, handleEditLastRequest, composerOptimizing, handleOptimizingChange, memorySwitching, showComposerMemoryChip, switchMemoryMode, composerAbove, typingLock, composerPresence,
   composerSessionControls, crewModeOffered, crewModeMidChatOffered = false, turnOnCrewMode, turnOffCrewMode, crewModeSwitching = null, agentPickerHidden = false, crewChipPressed = false, agentSwitchLocked = false, steerWorker, steerWorkerRoot = '',
 }: ComposerDockViewProps) {
@@ -424,7 +431,7 @@ export default function ComposerDockView({
               {!(activityOpen && !search.isOpen && tabsCtl.tabs.find(t => t.id === tabsCtl.activeId)?.kind === 'subagents') && <SubagentProgressBar slot={activeSlot} />}
               {!(activityOpen && !search.isOpen && tabsCtl.tabs.find(t => t.id === tabsCtl.activeId)?.kind === 'workflows') && <WorkflowProgressBar slot={activeSlot} />}
               <SubagentDeliveryProgress count={systemDeliveryCount} />
-              <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} onEdit={handleEditQueued} onReorder={handleReorderQueued} pendingIds={queuePendingIds} fuseBelow={followUpOptions.length === 0 && !knowledgeFetch.pendingKnowledge} />
+              <QueueStack key={activeSlot} messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} onEdit={handleEditQueued} onEditOpen={handleEditOpenQueued} onReorder={handleReorderQueued} pendingIds={queuePendingIds} fuseBelow={followUpOptions.length === 0 && !knowledgeFetch.pendingKnowledge} />
               </div>
               {flyingQuote && <FlyingQuote text={flyingQuote.text} from={flyingQuote.from} targetRef={inputAreaRef} onComplete={endQuoteFlight} />}
               <div ref={inputAreaRef} className="relative z-10 dock-inert">
@@ -590,6 +597,7 @@ export default function ComposerDockView({
               >
               <StableChatInput
               aboveComposer={composerAbove}
+              hiddenCommands={forkUnavailable ? FORK_HIDDEN : undefined}
               // StableChatInput carries the root's draft snapshot to the memoized editor.
               // `composerUserEdit` is what ChatInput calls for the user's own edits
               // (typing, paste, undo, picker inserts), never for a parent-driven
@@ -638,6 +646,7 @@ export default function ComposerDockView({
                  path, which has no request to cancel. */
               onCancelUpload={uploadCount > 0 ? cancelUpload : undefined}
               uploadCount={uploadCount}
+              uploadSlot={activeSlot}
               /* The one collapsible composer. Opt-in rather than default so the
                  shared preference key and the window-level expand event stay
                  correct by construction -- see ChatInput's `collapsible` prop. */
@@ -692,6 +701,7 @@ export default function ComposerDockView({
               // would hide every routed turn. Same `jevRouteOn` the picker's row is
               // drawn from, so chip, menu and gate cannot disagree.
               modelIsJevRouted={jevRouteOn && isUnpinnedModel(currentSlot?.model)}
+              harnessBackend={modelsBackend}
               // A crew member's footer is the conductor's: the Crew Mode mark (never
               // a switch there) in place of the agent picker and its label.
               agentBadge={crewChipPressed ? undefined : agentPickerHidden || steerWorker !== undefined ? <CrewModeComposerChip /> : undefined}
@@ -722,7 +732,8 @@ export default function ComposerDockView({
                   setOpenSessionControl({ key, slot: activeSlot })
                 }
               }}
-              contextPct={contextPct}
+              contextPct={contextPct ?? 0}
+              contextUnknown={contextPct === undefined && contextTokens?.used == null}
               contextUsedTokens={contextTokens?.used}
               contextWindowTokens={contextTokens?.window || provider.getContextWindow(shownModel)}
               derivePctFromUsed={contextTokens?.used != null && contextTokens.window == null}
@@ -762,6 +773,7 @@ export default function ComposerDockView({
                  button; typing still works. */
               continuable={continuable && interrupted && !cardOwnsRecovery}
               continueIsRecovery={interrupted}
+              restoredQueueCount={queuedMessages.filter(m => m.meta?.restored === true).length}
               onContinue={handleContinue}
               continuing={continuing}
               onStop={stopTurn}

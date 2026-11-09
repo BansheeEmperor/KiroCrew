@@ -273,7 +273,7 @@ async def api_update_channel(request: web.Request) -> web.Response:
     unattended, unconsented version jump.
 
     **Not a governance bypass.** A channel the policy requires (``updates.channel``,
-    or ``stable`` in an enterprise build with no pin; ``update_layout``
+    or ``lts`` in an LTS build, whatever it pins; ``update_layout``
     ``policy_release_channel``) wins on read, so a switch to any other channel is
     refused below with ``locked_by_policy`` rather than stored. When the pins
     define a command provider the endpoint refuses outright — the provider's
@@ -337,7 +337,7 @@ async def api_update_channel(request: web.Request) -> web.Response:
             status=409,
         )
 
-    # The policy's channel (stable in an enterprise build with no pin) wins on
+    # The policy's channel (lts in an LTS build, RFC D11) wins on
     # read, so a file write naming another channel would be ignored.
     from kiro_crew.edition_locks import LOCKED_BY_POLICY
     from kiro_crew.platform.update_layout import policy_release_channel
@@ -443,8 +443,11 @@ async def api_update_revalidate(request: web.Request) -> web.Response:
     ``request.remote`` is empty; the secret check is unchanged on both.
     """
     from kiro_crew.dashboard.handlers.core import _unix_peer_is_self
+    from kiro_crew.dashboard.origin import is_ssm_request
 
-    if not is_loopback(request.remote or "") and not _unix_peer_is_self(request):
+    if is_ssm_request(request) or (
+        not is_loopback(request.remote or "") and not _unix_peer_is_self(request)
+    ):
         await _audit_update_event(
             request, operation="update.revalidate", outcome="denied", resources="non-loopback"
         )

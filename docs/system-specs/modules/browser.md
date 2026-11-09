@@ -30,7 +30,7 @@ agent turn ──MCP browser(op, args)──▶ ops ──▶ supervisor.call(<h
 
 | Part | Where |
 |---|---|
-| Driver install, environment fence, browser discovery, relay, supervisor, helper worker, status and install routes | the `browser_harness` package: `env.py`, `install.py`, `chromium.py`, `discover.py`, `relay.py`, `supervisor.py`, `helper_worker.py`; `dashboard/handlers/browser_harness_status.py` |
+| Driver install, environment fence, browser discovery, relay, supervisor, helper worker, status and install routes | the `browser_harness` package: `env.py`, `install.py`, `build_deps.py`, `chromium.py`, `discover.py`, `relay.py`, `supervisor.py`, `helper_worker.py`; `dashboard/handlers/browser_harness_status.py` |
 | Screencast, adaptive ladder, takeover input, the live hub, the card's routes and the `browser_live` event | `screencast.py`, `takeover.py`, `live_hub.py` in that package; `dashboard/handlers/browser_live.py` |
 | The `browser` MCP tool's ops, the snapshot walker and the op route that also drives the card | `mcp_tools/browser.py`, `ops.py`, `snapshot_walker.js` in that package; `dashboard/handlers/browser_ops.py` |
 | The live card in the transcript | `BrowserLiveCard*.tsx` under the chat page, the `useBrowserLive*` hooks, and the binary-frame branch of `useWebSocket.ts` |
@@ -50,6 +50,59 @@ at `<data-home>/browser-harness/venv` (`python -m venv --clear` on that
 directory alone, so the Chromium beside it survives a re-install; then
 `pip install --require-hashes -r browser_harness/requirements.lock`: 12 pinned
 requirements, 176 sha256 hashes, compiled for Python 3.11+ on every platform).
+The venv links to the base interpreter that built it, which under Toolbox is a
+versioned directory Toolbox later prunes. A finished install (marker at this
+`HARNESS_VERSION`) whose interpreter link dangles, built by the gateway's own
+Python minor version (`pyvenv.cfg` `version`) and holding the pip it needs, is
+repaired in place instead of cleared: the dangling `python*` links are unlinked
+and `python -m venv --upgrade --without-pip` re-points the venv at the gateway's
+interpreter, keeping site-packages, so the pip step finds every pin already
+installed and needs no package index. Any other missing interpreter (no marker,
+another version, another minor version, a venv filled from a runtime copy, below) is
+still a `--clear` rebuild.
+On Linux with a glibc older than 2.27 (Amazon Linux 2: 2.26) the locked
+`pillow==12.3.0`, which `browser-harness` itself pins, has no wheel and pip has to
+build its sdist. `build_deps.py` checks first, from the filesystem alone, for a C
+compiler (`$CC`, the interpreter's own `CC`, or `cc`/`gcc` on `PATH`), the gateway
+interpreter's `Python.h`, and `zlib.h` and `jpeglib.h` wherever pillow 12.3.0's
+`setup.py` looks: the system include directories, `C_INCLUDE_PATH`, `CPATH`,
+`INCLUDE`, a glued `-I<dir>` in `CFLAGS`/`CPPFLAGS`/`LDFLAGS`, and
+`ZLIB_ROOT`/`JPEG_ROOT`. Pillow also asks pkg-config, which the check does not run,
+so with `PKG_CONFIG_PATH` or `PKG_CONFIG_LIBDIR` set the headers are left to pip. A
+host missing any of them is refused at `preparing`, before the marker or the venv
+is touched, with what is missing and the `yum`/`apt-get` command that installs it.
+A venv that already holds the locked pillow and is not being rebuilt is not
+checked, since pip has nothing to build.
+A runtime that already ships the harness asks no index at all. When the gateway's
+own interpreter carries `browser-harness`, `cdp-use` and `fetch-use` at the
+versions the lock pins (a distribution that bundles the harness beside the
+gateway), the gateway reads the file records for every distribution named by the
+lock. The launch directory and the working directory are not searched.
+A missing harness-family distribution, a different harness-family version,
+an absent RECORD or any recorded `.pth` file selects the hash-pinned pip path.
+Other lock distributions absent from the runtime are skipped. The venv is made
+`--clear --without-pip` on every runtime install, and the gateway copies the
+recorded files into its site-packages with content-only copies, each read from a
+descriptor that must still identify the regular file checked, opening each directory
+on the way without following links where descriptor-relative opens are supported
+(Windows keeps the path-based identity check). Anchored paths,
+paths containing `..`, and `__pycache__` entries are skipped. A recorded file that
+resolves outside its distribution's directory selects the pip path. No runtime
+directory is added to the venv's import path.
+`<venv>/python -I -c` must import `browser_harness` and resolve those three
+versions before the marker is written with `source: "runtime"`. The marker is
+removed before rebuilding, so a failed copy or interpreter check reads as not
+installed. A host whose index is unreachable or refuses its credentials can
+therefore still install. A failed interpreter check fails the install at
+`installing_harness`; it does not fall back to pip.
+The copied dependencies use the runtime's releases rather than the lock's, and
+nothing hash-checks this copy. Until the gateway takes it, the runtime tree has
+the gateway's own exposure: only the `kiro_crew` package directory is sealed
+([security](security.md), the packaged install directory). The driver's installed
+code is always under the sealed prefix, so later runtime edits or pruning cannot
+change it. Nothing is built, so the pillow check does not apply. The pip path
+reads the marker's source, independent of the venv's Python layout, and rebuilds
+a runtime-filled venv rather than repairing or reusing its packages.
 Kiro's own Chromium (Chrome for Testing `154.0.8037.0`, the build Playwright's
 `chromium-1244` ships, fetched from Google's bucket and then Playwright's CDN,
 which alone hosts linux-arm64) is downloaded into the same prefix for hosts with
@@ -71,10 +124,12 @@ start, in the background task that first reclaims a stray daemon
 (`handlers/browser_harness_status.py`) starts the SAME install job when the
 Harness is missing or stale (`install.harness_current`:
 installed AND the marker's `lock_sha256` equals the shipped lock's digest, so a
-re-pin without a version bump reinstalls). It adds Kiro's Chromium only when
-discovery would launch it (no usable Chrome/Edge, or `browser.choice` pins
-`kiro_chromium`/`headless`) and it is not on disk; a host that drives the user's
-Chrome never downloads it unasked (Settings' Install still installs both). After
+re-pin without a version bump reinstalls). A copied venv remains current when
+the runtime's package tree moves, is pruned or changes versions. It adds Kiro's
+Chromium only when discovery would launch it (no usable Chrome/Edge, or
+`browser.choice` pins `kiro_chromium`/`headless`) and it is not on disk; a host
+that drives the user's Chrome never downloads it unasked (Settings' Install still
+installs both). After
 a successful install it warms the connection the way Test does ONLY for a
 headless Kiro Chromium: connecting the user's Chrome or Edge is what raises
 Chrome's Allow sheet, and a headed Kiro Chromium would open a window, so both stay
@@ -114,20 +169,28 @@ shorter place is the system temp dir, which no sandbox mask covers, and the
 daemon resolves symlinks before binding, so an alias cannot help (the guard
 measures the RESOLVED home for the same reason). The daemon runs with
 `python -I`, like the helper worker, so the gateway's working directory can never
-shadow the pinned package; the INSTALLER's two spawns (`python -I -m venv`,
-`<venv>/python -I -m pip`) run the same way, with the `PYTHON*` and `PIP_*`
-families scrubbed from their environment and the prefix as their working
-directory, because a pod gateway's cwd is the agent's workspace and a `pip/`
-package written there would otherwise run as the owner the moment they press
-Install. `NO_PROXY`/`no_proxy` always carry `127.0.0.1,localhost`: neither
-`urllib` nor `websockets` bypasses a proxy for loopback on its own, and a shell
-with `HTTPS_PROXY` set would send the relay URL (secret and all) to the proxy
-host. A version bump re-reads the package's telemetry and auth modules before it
-lands, because 0.1.13's telemetry is on by default and its run event carries the
-agent's whole script unscrubbed.
+shadow the pinned package; the INSTALLER's two spawns (`python -I -m venv`, then
+`<venv>/python -I -m pip`, or the copied venv's `-I -c` check) run the same way,
+with the `PYTHON*` and `PIP_*` families scrubbed from their environment and the
+prefix as their working directory, because a pod gateway's cwd is the agent's
+workspace and a `pip/` package written there would otherwise run as the owner the
+moment they press Install. Their environment also sets `PIP_CONFIG_FILE` to the
+null device, so pip loads no config file (the user's `~/.config/pip/pip.conf` or
+`~/.pip/pip.conf`, `/etc/pip.conf`, the venv's own) and installs from its default
+index, PyPI: an `index-url` in the user's file, such as a CodeArtifact repository
+whose login has expired, would otherwise answer 401 for every locked wheel and
+fail the install with pip's raw output. A mirror set in pip's config or in
+`PIP_INDEX_URL` is therefore not used; the lock's hashes pin every file either
+way. `NO_PROXY`/`no_proxy` always carry `127.0.0.1,localhost`: neither `urllib`
+nor `websockets` bypasses a proxy for loopback on its own, and a shell with
+`HTTPS_PROXY` set would send the relay URL (secret and all) to the proxy host. A
+version bump re-reads the package's telemetry and auth modules before it lands,
+because 0.1.13's telemetry is on by default and its run event carries the agent's
+whole script unscrubbed.
 
-**The helper worker.** The gateway's Python has no `browser_harness` package, so
-each helper call runs in a worker the venv's interpreter executes
+**The helper worker.** The gateway never imports `browser_harness` (its Python
+carries none unless its runtime bundles the harness), so each helper call runs in
+a worker the venv's interpreter executes
 (`<prefix>/bin/python -I browser_harness/helper_worker.py`, JSON lines on its
 pipes, one call at a time behind a lock, `CALL_TIMEOUT_SECS = 90`). The pipe is
 read with an 8 MiB line limit (`WORKER_LINE_LIMIT`; asyncio's 64 KiB default is
@@ -163,7 +226,8 @@ as `HelperError` with Harness's own one-line message; `HarnessNotInstalled` and
 brings browser, relay, daemon and worker up in `ensure()` (serialised: a second
 caller waits for the first), reports `status()` (`installed`, `version`,
 `wanted_version`, `browser {kind, headless}`, `connection`
-`connected|waiting_allow|disconnected|error`, `detail`, `agent_tabs`, `chromium`),
+`connected|waiting_allow|disconnected|error`, `detail`, `agent_tabs`, `chromium`
+`{version, platform, build, present, executable}`),
 and stops all of it in `stop()`. `waiting_allow` has no deadline because the
 connection is what keeps Chrome's Allow sheet on screen. The gateway stops the
 supervisor on shutdown and before an in-place restart's exec
@@ -181,6 +245,29 @@ auto-install (see the driver section).
 | Chrome's `RemoteDebuggingAllowed` policy is off | Kiro's Chromium | none |
 
 A snap-packaged Chromium is skipped: snap confinement breaks the debugging port.
+
+**Old libcups: the headless shell.** The full Chrome for Testing build links
+`libcups.so.2` and binds every symbol at load, so on a Linux host whose libcups
+lacks `ippValidateAttributes`, `cupsFindDestDefault`, `cupsFindDestSupported` or
+`cupsUserAgent` (Amazon Linux 2: cups-libs 1.6.3) it exits 127 before it opens
+the debugging pipe. There `chromium.wanted_build` picks the same version's
+`chrome-headless-shell` (the `{build}` in both download URLs), which links no
+libcups, and keeps it in `chromium/154.0.8037.0-headless-shell/` beside the full
+build's directory. Everything that reads or fetches Kiro's Chromium goes through
+that one answer: `chromium_state` (so on such a host a full build already on
+disk reads as not downloaded, and the startup auto-install fetches the shell),
+`download_chromium`, and therefore the executable the supervisor launches, with
+the same flags. The shell has no window, so on such a host Kiro's Chromium is
+always headless: `supervisor._choose` reports a `kiro_chromium` choice as
+headless even when a display and a windowed pin would otherwise give it one, so
+status, the live card and the startup warm never offer a window it cannot show. `libcups.py` decides from the filesystem alone: the first
+native 64-bit `libcups.so.2` in the linker's system directories (never
+`LD_LIBRARY_PATH`), its ELF dynamic symbol table parsed in Python. It launches
+nothing, so `install_state` and the status poll still launch nothing, and it
+needs no binutils. No libcups found, or none readable, is no evidence and keeps
+the full build; macOS and Windows always get the full build. A version bump
+re-reads `libcups.REQUIRED_SYMBOLS` from the new build's
+`nm -D --undefined-only`.
 On macOS and Linux Kiro's Chromium speaks CDP over `--remote-debugging-pipe`
 (fds 3 and 4, moved into place by `/bin/sh` before `exec`), so it opens no port
 at all; Python cannot hand a Windows child fds 3 and 4, so there it keeps an
@@ -193,8 +280,19 @@ browser can never answer, behind which every `http(s)` navigation -- loopback in
 -- hangs forever while `data:` pages still load. The key stays in memory; the profile
 it protects is Kiro's own hidden leaf. Kiro's profile is a
 `HIDDEN` crew-home leaf: cookies from a takeover login stay there and the agent
-cannot read the file. `browser.choice` (`auto|user_chrome|kiro_chromium|headless`)
+cannot read the file. Tabs do not survive a relaunch of Kiro's Chromium: before
+each launch the supervisor removes the profile's session files
+(`Default/Sessions/` and the older `Current`/`Last` `Session`/`Tabs` files), so
+pages from closed chats are not reopened; cookies and logins are kept. The
+user's own Chrome or Edge is never touched. `browser.choice` (`auto|user_chrome|kiro_chromium|headless`)
 overrides the order by hand.
+
+A Kiro's Chromium that exits before the daemon answers fails the start at once
+with `Kiro's Chromium exited with code <n>`. On macOS and Linux its stderr goes
+to a pipe of the gateway's own, drained for the browser's whole life (only the
+newest 4 KiB kept, in memory), and its last stderr lines follow, redacted, so a
+missing shared library is named by the loader's own report rather than by a
+60 s `the Harness daemon did not start in time`. On Windows stderr is discarded.
 
 Chrome 144+ asks "Allow remote debugging?" once per connection. The supervisor's
 `waiting_allow` state never times out that prompt; the live card shows the one
@@ -331,7 +429,13 @@ undo a page already read.
   not hang. The user's own tabs are never attached.
 - **Tab ledger.** Each target the agent creates is recorded at the create reply,
   whether or not the page then loads; `tabs` lists only those and session end
-  closes only those.
+  closes only those. A chat whose session ends -- its tab closed, archived as
+  idle, or its open conversation deleted -- closes the ledgered tabs it owned, in
+  the background and after any op still in flight (`browser_ops.close_chat_tabs`);
+  every other chat keeps its own. A chat reopened on the same key before that
+  close runs keeps the tabs. Closing the tab of a chat linked to a channel
+  session (`slack:<ts>`) closes none: that session keeps running and shares the
+  tab's hub key.
 - Late `screencastFrameAck` errors after a stop are swallowed; close is clean.
 
 ### The stream
@@ -456,9 +560,10 @@ address pill. One daemon serves every chat, so every op runs under one
 gateway-wide lock and is preceded by a tab bind: the session keeps the agent tab
 it was bound to while the browser still has it (`switch_tab` back to it if the
 daemon moved), adopts the daemon's current tab when no other session owns it,
-and otherwise opens a tab of its own. Chat B therefore never clicks on chat A's
-page, `tabs` lists and switches only the caller's own tabs, and a takeover in
-chat A fences A's tab while B keeps browsing. With `browser.live.enabled` off
+and otherwise opens a tab of its own; a daemon whose current tab was closed (an
+ended chat's, or one the person closed) counts as having none. Chat B therefore
+never clicks on chat A's page, `tabs` lists and switches only the caller's own
+tabs, and a takeover in chat A fences A's tab while B keeps browsing. With `browser.live.enabled` off
 the hub publishes no event at all, so no card is mounted; the ops still run. While the owner's Chrome shows its Allow sheet the op route tells
 the hub `waiting_allow`, bounded at 60 s per op (the Allow sheet itself outlasts
 the op). The session key the shim resolves (`dashboard:<slot>` or the bare slot)
@@ -950,7 +1055,7 @@ and its gates). Three uses:
 
 | Use | Ops | Request | Used when | Otherwise |
 |---|---|---|---|---|
-| pick | `click`, `hover`, `type`, `select_option` with `target` (a description) and no `ref`/`x`/`y` | one Choice over the outline's refs, each option `role "name"` plus the nearest heading above it (at most 200, the ones sharing most words with `target`), with Nouls `present`, `error_shown`, `not_found`, `bot_check` | `present > 0.7`, the pick's p >= 0.6, no risk Noul > 0.7: the op runs on that ref and the result carries `picked` | refused `needs_ref` |
+| pick | `click`, `hover`, `type`, `select_option` with `target` (a description) and no `ref`/`x`/`y` | one Choice over the outline's refs, each option's words (`role "name"` plus the nearest heading above it) in the state as `pick_options`, never in the question (at most 100, the ones sharing most words with `target`), with Nouls `present`, `error_shown`, `not_found`, `bot_check` | `present > 0.7`, the pick's p >= 0.6, no risk Noul > 0.7: the op runs on that ref and the result carries `picked` | refused `needs_ref` |
 | verify | `click`, `type`, `navigate` that succeeded | before/after outlines, or before/after screenshots with the image scope; Nouls `as_expected`, `changed`, `error_shown` | any valid answer: the result carries `verify` `{as_expected, changed, error_shown: yes/no/unsure, by: outline/screenshot}` | the result is today's, byte for byte |
 | box | `click`, `hover` whose pick found no control (`present < 0.3`) on a page with a visible `<canvas>` (`canvasRects`) | one screenshot, Noul `present` + Box `where` | `present > 0.7`, confidence >= 0.6 and the box centre inside a canvas: the op runs on that pixel | refused `needs_ref` |
 
@@ -1002,7 +1107,7 @@ for `type`, filled only with `values`.
 | Part | What the code does | What the model answers |
 |---|---|---|
 | Observation | ONE walker call, `observe(opts)`: the indexed element table (visible, enabled, in-viewport controls with role, name, current value, checked/selected/expanded state, select options, each with its ref and a guard -- a hash of the element and its row/form/dialog text), the visible text, declarative `read` probes (`name=css@text\|value\|checked\|box\|count\|attr:NAME`, at most 16, 4 KB, a password or secret-named field reads as null; no script), a mutation counter, an animation-frame counter and a fingerprint, all limited to `region` when given. `grid` (+ `grid_items`) adds the cells read by `cells(selector)`. `see: true` adds a masked frame under `browser_images` with the frame rules above | -- |
-| Request | one per decision, `extra.kind = "reflex"`: Choice `operation` over the moves offered (key presses, scrolls, drags, bound typing, WAIT, and one option per targeted operation); per targeted operation a speculative Choice `<op>_target` over the elements that operation fits (a select's options as `eN:i`); Choice `value` over `values` when there are several; Nouls `done`, `stuck`, `off_path`, the agent's `until_noul`, and `risk_i` for at most 8 moves not yet judged | the judgments |
+| Request | one per decision, `extra.kind = "reflex"`: Choice `operation` over the moves offered (key presses, scrolls, drags, bound typing, WAIT, and one option per targeted operation); per targeted operation a speculative Choice `<op>_target` over the elements that operation fits (a select's options as `eN:i`), at most 100 options in page order, a dropdown that does not fit skipped whole; Choice `value` over `values` (at most 20) when there are several, so with at most 40 moves a request carries at most 465 options, within Laya's 512; Nouls `done`, `stuck`, `off_path`, the agent's `until_noul`, and `risk_i` for at most 8 moves not yet judged. Page words (target option words, risk move labels) ride the fenced state as `target_options` and `risk_moves`; the questions name them by key only | the judgments |
 | Use | only the target head matching the picked operation is read; the others are discarded unread, so a target never meets an operation it does not fit | -- |
 | Executor | before input the walker's `check(ref, kind, guard)` re-reads the target: the same guard, enabled, visible, inside the viewport, not covered at its centre (`elementFromPoint`), editable and not secret for typing, the option still offered for a select. A failed check drops that answer (`stale`) and nothing is input. Typing replaces the field's text (`selectText`, then the `type` op). The model's answer is never a selector, a coordinate or script | -- |
 | Settle | after an action, two animation frames (at most 50 ms), or after typing into a combobox until its suggestions show (at most 200 ms); `settle_ms` overrides | -- |
@@ -1157,10 +1262,11 @@ One card and two controls; everything else is under a collapsed More group.
   Chrome" re-posts the attach, which brings Chrome's prompt back), `error` (red;
   the gateway's `detail`, or the last attach's, verbatim in an `ErrorNotice`;
   Retry re-posts the attach), `disconnected`
-  (Connect) and `connected` (Disconnect). A failed job while the engine IS
-  installed (a Redownload) does not take over the card; it is an `ErrorNotice`
-  on the Engine row. A button whose request is in flight is disabled and
-  `aria-busy`.
+  (Connect) and `connected` (Disconnect). "Not installed" is `needsInstall`:
+  the engine is missing, or `browser.kind` is `kiro_chromium` and
+  `chromium.downloaded` is false. A failed job or install request while no
+  install is needed (a Redownload) is an `ErrorNotice` on the Engine row, not
+  the card. A button whose request is in flight is disabled and `aria-busy`.
 - **Which browser** (`browser.choice`) offers `auto`, `user_chrome`,
   `kiro_chromium`. **Show the live view in chat** (`browser.live.enabled`).
 - **Use \<provider\> sign-in** (`browser.credentials.enabled`), under Show the

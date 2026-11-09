@@ -1,5 +1,5 @@
-"""The send path: ``POST /api/chat``, its SSE writer, and the steer-or-queue decision a
-busy slot's human send asks for.
+"""The send path: ``POST /api/chat`` and the steer-or-queue decision a busy slot's
+human send asks for.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from kiro_crew import turn_timing
 if TYPE_CHECKING:
     from kiro_crew.dashboard.chat_handlers import (
         _CREATABLE_MODES,
-        _SSE_WRITE_DEADLINE_SECS,
+        _CREW_PERSON_STEER,
         CHAT_BANNER_META_KEY,
         HUMAN_TURN_META_KEY,
         RESERVED_ROW_META_KEYS,
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
         _history_key_for,
         _maybe_auto_title,
         _normalize_slot_key,
+        _person_crew_worker_root,
         _record_explicit_agent_selection,
         _redact_meta,
         _run_chat,
@@ -51,17 +52,23 @@ if TYPE_CHECKING:
         attachment_meta,
         audit_app_slot_denial,
         chat_message_frame,
+        crew_steer_discarded,
         cron_creator_admission,
         cron_slot_creator,
         deny_app_session_control,
         drained_to_thread,
         effective_session_key,
+        fork_title_pending,
+        hold_crew_steer,
         is_claude_code,
         is_registered_agent_name,
+        knowledge_meta,
         load_window_off_loop,
         logger,
+        mark_crew_steer,
         maybe_auto_link_slack,
         maybe_auto_tag,
+        member_thread_grant,
         members_mod,
         normalize_send_id,
         normalize_theme_consent_sha,
@@ -76,6 +83,7 @@ if TYPE_CHECKING:
         resolve_session_agent_bindings,
         restore_agent_selection,
         row_mid,
+        schedule_fork_title,
         sel,
         slot_is_live,
         slot_not_found,
@@ -87,6 +95,7 @@ if TYPE_CHECKING:
         teardown_hold_active,
         warm_project_agent_names,
         warn_if_not_durable,
+        write_sse_or_abort,
     )
 
 
@@ -220,121 +229,6 @@ async def decided_message_handling(slot: Any, message: str) -> tuple[bool, dict 
     except Exception:
         logger.debug("message.steer: taking the shipped default", exc_info=True)
         return False, None
-
-
-#: Request key the send path stamps when the person typed into a Crew Mode worker:
-#: ``(root, worker, message)``, read by :func:`api_chat` once the send succeeded.
-_CREW_PERSON_STEER = "kirocrew_crew_person_steer"
-
-#: Queue-entry key naming ``(root, worker)`` on a person's queued send into a
-#: Crew Mode worker; the drain records the steer when it delivers that entry.
-CREW_STEER_QUEUE_KEY = "_crew_person_steer"
-
-
-def mark_crew_steer(entry: dict[str, Any], root: str, worker: str) -> None:
-    """Mark queue *entry* as the person's steer into *worker* of Crew Mode *root*.
-
-    In memory only, like a held steer: an entry a restart restores comes off a
-    writable file, so it is still delivered but never recorded as the person's.
-    """
-    entry[CREW_STEER_QUEUE_KEY] = (root, worker)
-
-
-#: A person's steer written into a crew member's running turn and not yet read by
-#: it: slot key -> steer text -> ``(root, worker)``. Recorded on the ledger when the
-#: turn reads it (:func:`crew_steer_consumed`), moved onto the queue entry when the
-#: turn's end requeues it (:func:`crew_steer_requeued`), and dropped when it is taken
-#: back or discarded (:func:`crew_steer_discarded`), so a withdrawn steer is never
-#: on the ledger. In memory only: a restart loses the record, never adds one.
-_HELD_CREW_STEERS: dict[str, dict[str, tuple[str, str]]] = {}
-
-
-def hold_crew_steer(slot_key: str, message: str, root: str, worker: str) -> bool:
-    """Hold *message*'s record until the running turn reads it (see above).
-
-    ``True`` only when this call made the hold. An earlier unread steer of the same
-    text keeps its hold, and the caller must not drop it when its own attempt fails
-    (the duplicate is refused, but the first one is still read and recorded).
-    """
-    held = _HELD_CREW_STEERS.setdefault(slot_key, {})
-    if message in held:
-        return False
-    held[message] = (root, worker)
-    return True
-
-
-def _take_held(slot_key: str, message: str) -> tuple[str, str] | None:
-    held = _HELD_CREW_STEERS.get(slot_key)
-    if not held:
-        return None
-    marker = held.pop(message, None)
-    if not held:
-        _HELD_CREW_STEERS.pop(slot_key, None)
-    return marker
-
-
-def crew_steer_consumed(state: Any, slot: Any, message: str) -> None:
-    """The running turn read *message*: record the held steer, off the turn's path."""
-    marker = _take_held(getattr(slot, "key", ""), message)
-    if marker is None:
-        return
-    try:
-        from kiro_crew.dashboard.handlers import crew_workers
-
-        task = asyncio.get_running_loop().create_task(
-            crew_workers.person_steer(state, marker[0], marker[1], message)
-        )
-        tasks = getattr(state, "_background_tasks", None)
-        if isinstance(tasks, set):
-            tasks.add(task)
-            task.add_done_callback(tasks.discard)
-    except Exception:
-        logger.warning("crew steer: a read steer was not recorded", exc_info=True)
-
-
-def crew_steer_requeued(slot: Any, message: str, entry: dict[str, Any] | None) -> None:
-    """*message* went back into the queue: the drain records it when it delivers it."""
-    marker = _take_held(getattr(slot, "key", ""), message)
-    if marker is not None and entry is not None:
-        mark_crew_steer(entry, *marker)
-
-
-def crew_steer_discarded(slot: Any, message: str) -> None:
-    """*message* was taken back or thrown away unread: it is never recorded."""
-    _take_held(getattr(slot, "key", ""), message)
-
-
-def _person_crew_worker_root(request: web.Request, state: Any, slot: Any, app: str) -> str:
-    """The Crew Mode root *slot* works for when the dashboard owner typed into it, else ``""``.
-
-    Only the person's own send counts: no app token, the owner's dashboard request,
-    and a slot the slot list stamps as some root's worker. ``""`` for every send
-    while ``crew_mode.APPROVAL_ROUTING_LIVE`` is off (the Crew panel part turns it
-    on), so a send typed into a crew member's own composer is an ordinary send until
-    then. No I/O.
-    """
-    if app:
-        return ""
-    try:
-        from kiro_crew import crew_mode
-
-        if not crew_mode.APPROVAL_ROUTING_LIVE:
-            return ""
-        from kiro_crew.dashboard.handlers.source_providers import is_owner_dashboard_request
-
-        if not is_owner_dashboard_request(request):
-            return ""
-        from kiro_crew.dashboard.session_control_parts.crew_filing import _frame_parents
-
-        # The lineage the slot frame reads: a session its conductor released is a
-        # plain session again, and an adopted one belongs to its new conductor.
-        crew_root, _is_root = crew_mode.live_stamps(
-            state._slots, _frame_parents(state), settled=crew_mode.lineage_is_settled()
-        ).get(slot.key, ("", False))
-        return crew_root
-    except Exception:
-        logger.debug("crew steer: could not tell whether this send is to a worker", exc_info=True)
-        return ""
 
 
 def _send_id_of(user_meta: dict | None) -> str:
@@ -737,11 +631,26 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
 
     if request_app and _requested_key:
         denied = await _app_slot_acquisition_recheck(
-            state, request_app, _requested_key, acquisition_judged, "chat_send"
+            state,
+            request_app,
+            _requested_key,
+            acquisition_judged,
+            "chat_send",
+            session_grant_route=True,
         )
         if denied is not None:
             return denied
     created_in_send = slot_name is None or _normalize_slot_key(slot_name) not in state._slots
+    # A History delete in flight on this key (a row delete, an untouched session's
+    # discard) unlinks the transcript a slot minted now would write; refuse
+    # retryably, as resume does.
+    log = state.conversation_log
+    if created_in_send and _requested_key and log is not None:
+        if log.delete_in_flight(_history_key_for(_requested_key)):
+            return web.json_response(
+                {"error": "this session is being deleted; try again", "code": "delete_in_flight"},
+                status=409,
+            )
     try:
         slot = state.get_or_create_slot(
             slot_name,
@@ -801,11 +710,12 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
         command = await _send_harness_command(message, state, slot)
         # The slot may have closed, or a cron or channel binder may have
         # re-linked it, during the permission and config reads; the grant
-        # reaches only a local user session.
+        # reaches only a local user session, a member thread among them only
+        # with the scope this request's grant read recorded.
         if (
             state._slots.get(slot.key) is not slot
             or slot.is_closing
-            or not app_slot_is_local_user_session(slot)
+            or not app_slot_is_local_user_session(slot, member_threads=member_thread_grant(request))
         ):
             audit_app_slot_denial(
                 request_app,
@@ -814,10 +724,12 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
                 "slot closed or re-linked during the permission read",
             )
             return slot_not_found()
-        # No await sits between this check and the agent write below for a slot
-        # this grant reaches: the member awaits never run for one, and the
-        # mismatch branch's awaits run only on a slot that already has an agent.
-        # The persona condition reads only the request body.
+        # No await sits between this check and a slot write for a slot this
+        # grant reaches: the agent and persona writes are refused for the app
+        # right here, the member awaits below only refuse or fall through and
+        # are followed by a fresh judgement, and the mismatch branch's awaits
+        # run only on a slot that already has an agent. The persona condition
+        # reads only the request body.
         if command:
             return _deny_app_session_settings(request_app, slot.key, f"command={command[:64]}")
         if _send_binds_agent(agent, slot):
@@ -829,7 +741,11 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
             operation="chat_send",
             outcome="allowed",
             source="app_isolation",
-            resources=f"permissions.sessionApproval|slot={slot.key}",
+            resources=(
+                "permissions.sessionApproval"
+                + ("+memberThreads" if slot.mode == members_mod.DM_SLOT_MODE else "")
+                + f"|slot={slot.key}"
+            ),
         )
         # The gateway mints the row id for a turn sent onto another's session.
         if user_meta is not None and "mid" in user_meta:
@@ -885,6 +801,25 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
                     },
                     status=409,
                 )
+        if not may_configure:
+            # The member reads above await after the app's last liveness check,
+            # so the owner may have closed or replaced the thread, or revoked
+            # the grant, while they ran. Judge again on a fresh grant read
+            # (which also checks the slot is still the one under its key), then
+            # the closing state, with no await between that and the code below.
+            denied = await deny_app_session_control(
+                request, request_app, slot, slot.key, "chat_send", fresh=True
+            )
+            if denied is not None:
+                return denied
+            if state._slots.get(slot.key) is not slot or slot.is_closing:
+                audit_app_slot_denial(
+                    request_app,
+                    "chat_send",
+                    slot.key,
+                    "slot closed or re-linked during the member reads",
+                )
+                return slot_not_found()
     if _person_send:
         # A dashboard user (no app token) typed into this slot, so a human
         # demonstrably has it open. That restores the full 2h approval
@@ -1088,12 +1023,16 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
         slot.theme_consent = theme_consent
         slot.theme_consent_sha = theme_consent_sha
 
+    from kiro_crew import crew_pause
     from kiro_crew.dashboard import responsive_chat
 
+    # Ultra Mode "Pause all" holds this session: a send is queued, not started,
+    # and waits for Resume all (or the session's own Continue).
+    _crew_paused = crew_pause.holds_slot(slot)
     _responsive_eligible = False
     # The responsive path records its send as the person's own
     # (`directive_user_origin=True`), so only a person's send may take it.
-    if _person_send and (body.get("responsive") is True or steer):
+    if _person_send and not _crew_paused and (body.get("responsive") is True or steer):
         _responsive_eligible = responsive_chat.eligible(
             request,
             slot,
@@ -1122,7 +1061,20 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
     if _replay is not None:
         return _sc_entry.chat_replay_response(_replay, slot_key=slot.key)
 
-    if slot.turn_running or slot._turn_admission_reserved:
+    # The session's own human typing into the dashboard, recognised by the
+    # POSITIVE dashboard-user mark token_auth sets only for a validated
+    # dashboard token with no app claim. A loopback internal-secret caller (an
+    # MCP tool, a cron script) never carries it, nor does an app, and a hub
+    # conductor's agent-origin send is not the person either. Only such a
+    # send skips the sub-agent hold below; every other sender keeps waiting for
+    # the wave, including a future caller nobody taught this rule.
+    _from_composer = (
+        request.get("is_dashboard_user") is True and not _agent_origin and not cron_creator
+    )
+
+    # Asked again after the replay await: a Pause all may have landed during it.
+    _crew_paused = _crew_paused or crew_pause.holds_slot(slot)
+    if slot.turn_running or slot._turn_admission_reserved or _crew_paused:
         # Mid-turn steer: inject into the RUNNING turn instead of queueing for
         # the next turn. Gated on an explicit `steer` flag + a live, steer-capable
         # inner AcpClient that _run_chat published on the slot. App-authenticated
@@ -1170,7 +1122,13 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
         from kiro_crew.shared_crew.admission_entry import admission_pending
 
         _admission_pending = admission_pending(slot.key)
-        if steer and _person_send and not _auto_queues and not _admission_pending:
+        if (
+            steer
+            and _person_send
+            and not _auto_queues
+            and not _admission_pending
+            and not (_crew_paused and not slot.turn_running)
+        ):
             # Client-minted send correlation id (the same `meta.sendId`
             # convention the plain send path persists): thread it through the
             # steer so the persisted row and the steer_push echo can be matched
@@ -1293,6 +1251,7 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
             attachments=attachment_meta(user_meta),
             quote=quote_meta(user_meta).get("quote"),
             banner=banner,
+            knowledge=knowledge_meta(user_meta),
             # The receipt travels whichever way the send went, including the one
             # case where the two disagree: `auto` answered steer and the steer was
             # UNAVAILABLE, so this path runs with a record saying steer. That is the
@@ -1300,14 +1259,14 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
             # the delivery ended -- a receipt withheld there would lose the only
             # record that a decision was made at all.
             decision_strip=_auto_strip,
-            # A steer that fell through here (unavailable, or refused as a
-            # duplicate) still means "act now": released past the sub-agent hold
-            # when this turn ends. An `auto` send Jev chose to queue is a real
-            # queue and waits like one.
-            steer_intent=bool(steer) and _person_send and not _auto_queues,
+            # The composer's own human, whichever way the send went (Queue, a
+            # steer that fell through, or `auto` choosing to queue): Queue means
+            # after THIS turn, so the sub-agent hold releases it when the turn
+            # ends instead of parking it behind background children.
+            composer_send=_from_composer,
             author=_author_meta(_queued_actor_of(request)) if _person_send else None,
+            queued_work=_queued_admission,
         )
-        _sc_entry.stamp_queued_work(slot, qid, _queued_admission)
         _send_race.commit_request(request, message_id=qid)
         # The admission await (a config refresh included, even when admission
         # turns out off) may have outlived the running turn's handoff: the
@@ -1318,36 +1277,46 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
             headers=_sc_entry.admission_headers(_queued_admission),
         )
 
-    # Queue a message typed while background sub-agents are still running for
-    # this slot. The slot.running queue path above covers the mid-turn case;
-    # this covers the idle case (spawn_run is fire-and-forget, so the main slot
-    # goes idle while children run). Without the hold, this message would start a
-    # main turn immediately and interleave with the [Subagent completion event]
-    # injections. Queue it instead (reusing the slot queue) — the queue drain
-    # releases it after the last sub-agent finishes (see subagents_hold_user_messages).
-    # Opt-out: if the user explicitly chose steer mode, honour it — start a new
-    # turn immediately so the message is processed without waiting for children.
-    # An app on a session it does not own has no opt-out (`steer` is None there),
-    # and an agent-origin send has none either: it waits like any queued turn.
-    # The opt-out covers the SUB-AGENT hold only. It is a choice about waiting,
-    # not about which conversation answers, so it cannot waive a deferred
-    # discard: the composer's Steer action on an idle slot with children running
-    # is exactly the state that defers one, and answering there would use the
-    # conversation the person asked to drop. `_turn_admit` consumes without
-    # ``allow_discard``, so nothing later in the turn drops it either.
+    # Hold a message sent while background sub-agents are still running for this
+    # slot. The slot.running queue path above covers the mid-turn case; this
+    # covers the idle case (spawn_run is fire-and-forget, so the main slot goes
+    # idle while children run). Held, the message waits in the slot queue and the
+    # drain releases it after the last sub-agent finishes (see chat_runner
+    # _hold_users), so it cannot interleave with [Subagent completion event]
+    # injections. Only an automated send (an app, an MCP tool, a cron script) is
+    # held: the session's own human is never kept waiting on background work,
+    # whatever the composer's busy-send mode -- a completion that lands during
+    # their turn queues behind it as usual. An agent-origin send (a hub
+    # conductor's) is not the session's human: it waits like any queued turn.
+    # The steer opt-out and the composer exemption cover the SUB-AGENT hold only.
+    # They are choices about waiting, not about which conversation answers, so
+    # neither can waive a deferred discard: the composer on an idle slot with
+    # children running is exactly the state that defers one, and answering there
+    # would use the conversation the person asked to drop. `_turn_admit` consumes
+    # without ``allow_discard``, so nothing later in the turn drops it either.
     _teardown_hold = bool(not slot.running and teardown_hold_active(state, slot))
     _sub_key = effective_session_key(slot)
-    _held = subagents_hold_user_messages(state, _sub_key)
+    _children_hold = subagents_hold_user_messages(state, _sub_key)
+    _held = not _from_composer and _children_hold
     # Messages parked while a child was live stay parked once it is flagged
     # stalled (nothing starts a drain then). A send behind them joins the queue
     # and drains it, so it is answered after them rather than ahead of them.
     _behind_parked = bool(
-        not _held
+        not _children_hold
         and slot._queue
         and state.subagents is not None
         and state.subagents.running_agents_for(_sub_key)
     )
-    if (not (steer and not _agent_origin) and (_held or _behind_parked)) or _teardown_hold:
+    # A queued card's open editor holds the queue: a send joins it behind the
+    # held entries, steer or not, rather than being answered first.
+    from kiro_crew.dashboard.queue_edit_hold import edit_hold_blocks_user_turn
+
+    _edit_held = edit_hold_blocks_user_turn(slot)
+    if (
+        (not (steer and not _agent_origin) and (_held or _behind_parked))
+        or _teardown_hold
+        or _edit_held
+    ):
         # circular import: session_control imports this package's modules at module level.
         from kiro_crew.dashboard.session_control import containment_meta
 
@@ -1374,6 +1343,8 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
         _hold_attachments = attachment_meta(user_meta)
         _hold_meta.update(_hold_attachments)
         _hold_meta.update(quote_meta(user_meta))
+        _hold_knowledge = knowledge_meta(user_meta)
+        _hold_meta.update(_hold_knowledge)
         if banner:
             _hold_meta[CHAT_BANNER_META_KEY] = banner
         if request_app or cron_creator or _agent_origin:
@@ -1392,6 +1363,18 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
             from kiro_crew.shared_crew.identity import actor_of as _hold_actor_of
 
             _hold_meta[MESSAGE_AUTHOR_META_KEY] = _hold_author_meta(_hold_actor_of(request))
+        if _from_composer:
+            # Every composer send carries the mark, whichever hold queued it: the
+            # mark answers the sub-agent hold only. Behind parked messages, the
+            # drain runs the parked message first and a stalled child that streams
+            # again (or a child that turn spawns) reinstates the hold at its end; an
+            # editor or deferred-discard hold ends while children may still run.
+            # Either way the mark is what releases the person's send then. Those
+            # two holds, and a crew pause, are enforced by the drain itself
+            # (system injections only, or no drain), so the mark cannot pass them.
+            from kiro_crew.dashboard.chat_utils import COMPOSER_SEND_META
+
+            _hold_meta[COMPOSER_SEND_META] = True
         qid = slot.queue_append(
             message,
             meta=_hold_meta,
@@ -1401,7 +1384,7 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
         _sc_entry.stamp_queued_work(slot, qid, _held_admission)
         _send_race.commit_request(request, message_id=qid)
         _redacted = queued_text_for_display(message, user_origin=_person_send)
-        warn_if_not_durable(slot._queue, qid, slot.key)
+        _hold_durable = warn_if_not_durable(slot._queue, qid, slot.key)
         # Start the durable write here too, not only in the busy-slot branch.
         # This branch holds an IDLE slot, so no drain is coming to write the
         # prompt's transcript row and no turn-end flush is scheduled: the queue
@@ -1426,12 +1409,17 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
             _hold_push.setdefault("meta", {})["quote"] = _hold_meta["quote"]
         if banner:
             _hold_push.setdefault("meta", {})[CHAT_BANNER_META_KEY] = banner
+        if not _hold_durable:
+            # The card's "won't survive a restart" marker, as on the busy-slot frame.
+            _hold_push.setdefault("meta", {})["durable"] = False
+        if _hold_knowledge:
+            _hold_push.setdefault("meta", {}).update(_hold_knowledge)
         state.broadcast_ws("queue_push", _hold_push)
         if _teardown_hold:
             # Deduped, so this only matters when no decline armed one: the retry
             # is what lands the discard and drains the queue this send joined.
             _arm_pending_reset_retry(state, slot)
-            _wake_pending_reset_retry(slot)
+            _wake_pending_reset_retry(state, slot)
         if _behind_parked:
             await _start_next_queued_turn(state, slot)
         elif not subagents_hold_user_messages(state, _sub_key):
@@ -1441,8 +1429,7 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
             await _drain_parked_queues(state, [slot.key])
         # Same receipt contract as the busy-slot queue branch: `queue_id` binds
         # the sender's pre-send composer state to this exact entry. An entry the
-        # durable bounds refuse is reported in the log by the call above, not on
-        # the receipt: the on-screen marker belongs with its consumer.
+        # durable bounds refuse is reported in the log and on the frame above.
         return web.json_response({"ok": True, "queued": True, "queue_id": qid})
 
     # WS mode: return JSON immediately, chunks delivered via WebSocket
@@ -1475,16 +1462,35 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
     _prior_reserved = slot._turn_admission_reserved
     slot._turn_admission_reserved = True
     try:
+        from kiro_crew.apps.manifest import app_name_error
+        from kiro_crew.history_schema import EMBED_APP_META_KEY
+        from kiro_crew.shared_crew.host_hooks import ensure_slot_recorded
+
+        # A person's send from an app page's chat embed names that app. Only the line
+        # written for a conversation this send begins (no row yet, so the retry of a
+        # refused first send still begins it) records it, so uninstalling the app
+        # drops that conversation's resume pointer. It grants the app nothing.
+        embed_app = body.get("embed_app") if _person_send and not slot.messages else None
+        named = isinstance(embed_app, str) and not app_name_error(embed_app)
+        embed_line = {EMBED_APP_META_KEY: embed_app} if named else {}
         if admission_entry.admission_enforced():
             # The session is on disk before its work is: a crash right after the
             # accept cannot leave a work record for a session that is gone.
-            from kiro_crew.shared_crew.host_hooks import ensure_slot_recorded
-
-            if not await ensure_slot_recorded(state, slot):
+            if not await ensure_slot_recorded(state, slot, extra=embed_line):
                 from kiro_crew.shared_crew.admission_gate import Admission
 
                 slot._has_reader = False
                 return Admission(None, "rejected", store_unavailable=True).refusal_response()
+        elif embed_line and not await ensure_slot_recorded(state, slot, extra=embed_line):
+            # No later save can add the app, so the send is refused, not run without it.
+            slot._has_reader = False
+            return web.json_response(
+                {
+                    "error": "Could not save this conversation. Try again.",
+                    "code": "history_unavailable",
+                },
+                status=503,
+            )
         turn_admission = await admission_entry.admit_chat_turn(
             request,
             session_key=effective_session_key(slot),
@@ -1579,6 +1585,17 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
                         )
                     if assigned_store:
                         slot.memory_store = assigned_store
+
+        # A Pause all that landed during the admission awaits holds this session.
+        # Nothing is recorded yet, so the send is refused whole and the sender
+        # can send it again after Resume all.
+        if crew_pause.holds_slot(slot):
+            slot._has_reader = False
+            await turn_admission.abandon()
+            return web.json_response(
+                {"error": "This crew is paused. Resume it from the Board.", "code": "crew_paused"},
+                status=409,
+            )
 
         # A dashboard's busy snapshot can suppress its optimistic user bubble even
         # when this send starts a turn. Echo correlated sends BEFORE starting the
@@ -1686,6 +1703,10 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
             slot._title_task = _tt
             state._background_tasks.add(_tt)
             _tt.add_done_callback(state._background_tasks.discard)
+        elif _user_row_meta.get(HUMAN_TURN_META_KEY) is True and fork_title_pending(slot):
+            # A fork child keeps its "Fork of <parent>" name until the person
+            # sends it a message; this one names it.
+            schedule_fork_title(state, slot)
 
         # Auto-tag: derive a tag from the session's project directory (deterministic,
         # no LLM). Fire-and-forget, same pattern as auto-title.
@@ -1721,7 +1742,19 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
             # start, and the row stays as a message that was stopped unanswered.
             # A send queued behind it during the hold starts now, as it would at
             # the end of a stopped turn.
-            if slot._stop_generation != _stop_gen_before_hold:
+            # A Pause all during the hold is answered the same way: the turn does
+            # not start, and the row stays a message that was stopped unanswered.
+            # The paused prompt is owed to Resume all (as at the dispatch gate);
+            # a pause lifted before that is recorded lets the turn start.
+            held = crew_pause.holds_slot(slot)
+            if held and slot._stop_generation == _stop_gen_before_hold:
+                try:
+                    held = await asyncio.to_thread(crew_pause.owe_turn, slot.key)
+                except Exception:
+                    # As at the dispatch gate: end it, as the hold says.
+                    logger.warning("crew pause: could not record the turn owed to %s", slot.key)
+                held = held or crew_pause.holds_slot(slot)
+            if slot._stop_generation != _stop_gen_before_hold or held:
                 # Release capacity before the drain tries to admit its next turn.
                 await turn_admission.abandon()
                 # The reservation stays up across the drain's awaits (the
@@ -1885,25 +1918,3 @@ async def _api_chat_send(request: web.Request) -> web.StreamResponse:
             slot.drain()
             slot._has_reader = False
     return resp
-
-
-async def write_sse_or_abort(request: web.Request, resp: web.StreamResponse, data: bytes) -> None:
-    """Write one SSE frame; abort the connection when the client stops reading.
-
-    ``resp.write`` has no deadline of its own. A client that stops reading without
-    closing its socket would park the write, and with it the stream loop and the
-    slot state that loop owns (the pending queue and the broadcast hold), for as
-    long as the socket stays open. Past the deadline the transport is aborted and
-    the write raises ``ConnectionResetError``, so the caller's existing disconnect
-    handling releases that state.
-    """
-    try:
-        await asyncio.wait_for(resp.write(data), timeout=_SSE_WRITE_DEADLINE_SECS)
-    except asyncio.TimeoutError:
-        transport = request.transport
-        if transport is not None:
-            transport.abort()
-        logger.info(
-            "SSE client stopped reading for %.0fs; connection aborted", _SSE_WRITE_DEADLINE_SECS
-        )
-        raise ConnectionResetError("SSE client stopped reading") from None

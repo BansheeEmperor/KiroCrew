@@ -171,13 +171,43 @@ def test_an_unreadable_ruling_establishes_nothing(monkeypatch):
         ({}, []),
         ("not an object", ["toolsSettings"]),
         (_SHELL_ALLOWLIST, ["toolsSettings"]),
-        ({"use_subagent": {"availableAgents": []}}, ["toolsSettings"]),
+        # kiro-cli's `use_subagent` spelling is the spawn gate's too.
+        ({"use_subagent": {"availableAgents": []}}, []),
         ({"subagent": {"trustedAgents": ["x"]}}, ["toolsSettings"]),
         (_SPAWN_GATED, []),
         ({"subagent": {"availableAgents": [], "trustedAgents": []}, "shell": {}}, []),
         (
             {**_SHELL_ALLOWLIST, "subagent": {"availableAgents": [], "trustedAgents": ["x"]}},
             ["toolsSettings.shell", "toolsSettings.subagent.trustedAgents"],
+        ),
+        # A kept alias is named as the spec wrote it, not as the key it is read as.
+        (
+            {"use_subagent": {"availableAgents": [], "trustedAgents": ["x"]}},
+            ["toolsSettings.use_subagent.trustedAgents"],
+        ),
+        (
+            {"crew": {"availableAgents": [], "trustedAgents": ["x"]}},
+            ["toolsSettings.crew.trustedAgents"],
+        ),
+        (
+            {"executeBash": {"deniedCommands": ["rm"]}, "use_subagent": {"availableAgents": []}},
+            ["toolsSettings.executeBash"],
+        ),
+        # Both spellings: kiro-cli keeps `subagent` whole and drops `use_subagent`,
+        # with the same value or a different one.
+        (
+            {
+                "subagent": {"availableAgents": [], "trustedAgents": ["x"]},
+                "use_subagent": {"availableAgents": [], "trustedAgents": ["x"]},
+            },
+            ["toolsSettings.subagent.trustedAgents", "toolsSettings.use_subagent"],
+        ),
+        (
+            {
+                "subagent": {"availableAgents": [], "trustedAgents": ["x"]},
+                "use_subagent": {"availableAgents": ["*"]},
+            },
+            ["toolsSettings.subagent.trustedAgents", "toolsSettings.use_subagent"],
         ),
     ],
 )
@@ -205,6 +235,18 @@ def test_beside_a_spawn_allowlist_only_the_rest_is_named(backend, agents_dir, no
     assert "availableAgents" not in rows[0]
 
 
+@pytest.mark.parametrize("backend", _ALLOWLIST_UNAPPLIED + _CREW_FIRED)
+def test_the_notice_names_the_use_subagent_spelling_the_spec_wrote(backend, agents_dir, notices):
+    """An author searching the spec for the printed key must find it."""
+    only = {"use_subagent": {"availableAgents": ["helper-*"], "trustedAgents": ["helper-*"]}}
+    _write_spec(agents_dir, "a1", toolsSettings=only)
+    _prepare(backend, "a1", is_new=True)
+    rows = _tools_settings_rows(notices)
+    assert len(rows) == 1
+    assert "sets toolsSettings.use_subagent.trustedAgents, which" in rows[0]
+    assert "toolsSettings.subagent" not in rows[0]
+
+
 def test_claude_names_no_allowlist_its_gate_applies(agents_dir, notices):
     """claude's gate refuses what a ``denyByDefault`` or ``fallbackAction: "deny"``
     allowlist does not cover, so the notice never says those go unapplied."""
@@ -230,7 +272,11 @@ def test_claude_names_only_what_its_gate_does_not_apply(agents_dir, notices):
         (_SHELL_ALLOWLIST, []),
         ({"shell": {"allowedCommands": ["ls"]}}, ["toolsSettings"]),
         ({"read": {"deniedPaths": ["~/.ssh"]}}, ["toolsSettings"]),
-        ({"execute_bash": {"allowedCommands": ["ls"]}, "shell": {"denyByDefault": True}}, []),
+        # kiro-cli keeps `shell` and drops `execute_bash`, so the notice names it.
+        (
+            {"execute_bash": {"allowedCommands": ["ls"]}, "shell": {"denyByDefault": True}},
+            ["toolsSettings.execute_bash"],
+        ),
         (
             {"fs_write": {"fallbackAction": "interactive", "allowedPaths": ["a"]}},
             ["toolsSettings"],
@@ -239,10 +285,14 @@ def test_claude_names_only_what_its_gate_does_not_apply(agents_dir, notices):
             {**_SHELL_ALLOWLIST, "web_fetch": {"blocked": ["x"]}, "read": {"deniedPaths": ["y"]}},
             ["toolsSettings.read.deniedPaths", "toolsSettings.web_fetch.blocked"],
         ),
+        (
+            {**_SHELL_ALLOWLIST, "use_subagent": {"trustedAgents": ["x"]}},
+            ["toolsSettings.use_subagent.trustedAgents"],
+        ),
     ],
 )
 def test_the_gate_applied_allowlists_are_left_out(settings, named):
-    """Both halves of an applied allowlist, across both alias keys, are left out;
+    """Both halves of an applied allowlist, on the alias key kiro-cli keeps, are left out;
     without either switch the field is named as on every other mirror."""
     from kiro_crew.agent_sdk.tools_settings_reach import tools_settings_unapplied
 

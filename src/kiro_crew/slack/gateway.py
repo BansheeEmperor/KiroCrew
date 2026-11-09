@@ -130,6 +130,7 @@ from kiro_crew.config.loader import (
 )
 from kiro_crew.config.paths import kiro_agents_dir
 from kiro_crew.constants import (
+    DENY_CAUSE_APPROVAL_TIMEOUT,
     LEAKED_TOOL_CALL_NOTE,
     NO_TOOL_CALLS_NOTE,
     SUBAGENT_COMPLETION_META_KEY,
@@ -148,6 +149,10 @@ from kiro_crew.cron import (
     effective_wake_budget,
 )
 from kiro_crew.cron_script import delivery_fingerprint, run_command_sandboxed, run_script_sandboxed
+from kiro_crew.cron_service.fields import (  # noqa: F401
+    auto_job_approver,
+    effective_job_approval_mode,
+)
 from kiro_crew.dashboard import cautious_boot, start_dashboard, token_secret
 from kiro_crew.dashboard.chat_persistence import (
     rehydrate_slot_from_history_async,
@@ -156,7 +161,6 @@ from kiro_crew.dashboard.chat_persistence import (
 from kiro_crew.dashboard.chat_runner import (
     _auto_approve_reason,
     _resolve_channel_target,
-    _retire_sessions_on_identity_change,
     _run_chat,
     _slot_is_trusted,
     _start_next_queued_turn,
@@ -182,6 +186,8 @@ from kiro_crew.dashboard.cron_inject import (
 from kiro_crew.dashboard.handlers import MAX_PROMPT_BYTES
 from kiro_crew.dashboard.handlers.autonudge import (
     _redact_monitor_value,
+    _scrub_serialized_field,
+    _withhold_serialized_field,
     compose_nudge_body,
     render_nudge_message,
 )
@@ -279,6 +285,7 @@ from kiro_crew.llm_helpers import (
     acp_error_after_tool_activity,
     acp_error_is_session_not_found,
     acp_error_is_transient,
+    acp_error_needs_sign_in,
     annotate_model_fallback,
     append_fallback_story,
     configured_fallback_chain,
@@ -365,7 +372,7 @@ from kiro_crew.monitoring.models import (
     monitor_state_public_dict,
 )
 from kiro_crew.notifications.bus import MONITOR_CHANNEL
-from kiro_crew.parent_turns import ledger_of, note_turn_landed, settle_turn, settles_at_release
+from kiro_crew.parent_turns import ledger_of, note_turn_landed, settle_turn
 from kiro_crew.platform import boot_platform, release_apply
 from kiro_crew.platform.bootstrap import apply_kas_cli_floor
 from kiro_crew.platform.context import (
@@ -409,6 +416,7 @@ from kiro_crew.platform.update_governance import (
 )
 from kiro_crew.pre_exec_stops import run_pre_exec_stops
 from kiro_crew.providers.base import LLMEvent
+from kiro_crew.recovery.ladder import L4_GATEWAYD, LADDER
 from kiro_crew.safety_override import flush_breadcrumb_writes, safety_override
 from kiro_crew.sandbox import (
     SandboxUnavailableError,
@@ -560,6 +568,7 @@ from kiro_crew.slack.gateway_runtime.result_egress import (
 from kiro_crew.slack.gateway_runtime.runtime_charge import (
     _apply_gate_verdict,
     _charge_failure,
+    _cron_auth_expiry,
     _cron_failure_attribution,
     _streak_after_charge,
 )
@@ -590,6 +599,7 @@ from kiro_crew.slack.gateway_runtime.subagent_wiring import (
     _WORKFLOW_STEP_PREFIXES,
     _spawn_parent_slot,
     _subagent_batch_pending,
+    _subagent_nested_live,
     _subagent_queued_count,
     _subagent_work_pending,
 )
@@ -624,6 +634,7 @@ from kiro_crew.subagent import (
     DIGEST_HOLD_SECS,
     INJECTION_TIMEOUT,
     ORPHAN_NOTICE_OWED,
+    HostSpawnDecision,
     SpawnApprovalUnreachable,
     SubagentDelivery,
     SubagentInfo,
@@ -765,6 +776,7 @@ class GatewayOrchestrator:
     channel_history: ChannelHistory | None
     dashboard_state: DashboardState | None
     _background_tasks: set[asyncio.Task]
+    _skills_sync_task: "asyncio.Task[list[tuple[str, Path]]] | None"
     _mcp_launch_approval_ready: asyncio.Event
     _memory_startup: MemoryStartup | None
     _memory_startup_task: asyncio.Task | None
@@ -800,6 +812,11 @@ class GatewayOrchestrator:
     _mandatory_update_deferred_key: str | None
     _wheel_update_noticed: set[str]
     _mcp_gateway_manager: GatewayManager | None
+    # A manager whose start failed, held while ``_mcp_gateway_start_retry``
+    # starts it again (gateway_runtime/mcp_broker.py). Defaulted on the class
+    # so the ``__new__`` fixtures that never run ``__init__`` read "no retry".
+    _mcp_gateway_pending: GatewayManager | None = None
+    _mcp_gateway_start_retry: asyncio.Task[None] | None = None
     _mcp_resolve_prefetch: asyncio.Task[None] | None
     _mcp_target_env: dict[str, str]
     _mcp_overlay_refresh_lock: asyncio.Lock | None = None
@@ -972,6 +989,7 @@ class GatewayOrchestrator:
     _report_monitor_completion = _nudge_chan._report_monitor_completion
     # gateway_runtime/nudge_dashboard_fire.py
     _fire_dashboard_nudge = _nudge_dash._fire_dashboard_nudge
+    _start_dashboard_wake_turn = _nudge_dash._start_dashboard_wake_turn
     _work_ledger_wake_loop = _nudge_dash._work_ledger_wake_loop
     _work_ledger_wake_text = _nudge_dash._work_ledger_wake_text
     _steer_work_ledger_wake = _nudge_dash._steer_work_ledger_wake
@@ -993,6 +1011,8 @@ class GatewayOrchestrator:
     _parent_tab = _subagent_injection._parent_tab
     _route_completion = _subagent_injection._route_completion
     _reset_cron_parent_when_idle = _subagent_injection._reset_cron_parent_when_idle
+    _route_cron_parent_to_tab = _subagent_injection._route_cron_parent_to_tab
+    _drop_cron_injection = _subagent_injection._drop_cron_injection
 
     @staticmethod
     def _notif_meta(parent_key: str | None) -> dict[str, str] | None:
@@ -1065,6 +1085,9 @@ class GatewayOrchestrator:
     # gateway_runtime/mcp_broker.py
     _schedule_mcp_launch_approval_persist = _mcp_broker._schedule_mcp_launch_approval_persist
     _init_mcp_gateway = _mcp_broker._init_mcp_gateway
+    _mark_mcp_broker_ready = _mcp_broker._mark_mcp_broker_ready
+    _mcp_gateway_start_retry_delay = _mcp_broker._mcp_gateway_start_retry_delay
+    _retry_mcp_gateway_start = _mcp_broker._retry_mcp_gateway_start
 
     #: Floor on the gap between timed pre-resolve passes. ``refresh_hours = 0``
     #: legitimately means "always stale" for the freshness check, but it must not
@@ -1113,6 +1136,7 @@ class GatewayOrchestrator:
     _finish_auto_update_apply = _upd_sched._finish_auto_update_apply
     _RESTART_GATE_HOLD_SECS = _upd_sched._RESTART_GATE_HOLD_SECS
     _restart_gate_when_idle = _upd_sched._restart_gate_when_idle
+    _restart_gate_held = _upd_sched._restart_gate_held
     _release_restart_gate_hold = _upd_sched._release_restart_gate_hold
     _wheel_apply_module = staticmethod(_upd_sched._wheel_apply_module)
     _dashboard_policy_applies = staticmethod(_upd_sched._dashboard_policy_applies)
