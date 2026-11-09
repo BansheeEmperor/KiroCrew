@@ -45,6 +45,18 @@ describe('the transport keeps a permission refusal', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps an owner_only refusal sent in the Crew API error body', async () => {
+    fetchMock.mockImplementation(async () => json(403, {
+      error: { type: 'permission_error', code: 'owner_only', message: 'refused', param: null, request_id: 'req_1' },
+    }))
+    for (let i = 0; i < 3; i++) {
+      const err = await settle(api.members())
+      expect(err).toBeInstanceOf(ApiError)
+      expect(isPermissionRefusal(err)).toBe(true)
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('asks again once a kept refusal is a minute old', async () => {
     // Only Date is faked: the fetch stub and the channel still settle on real time.
     vi.useFakeTimers({ toFake: ['Date'] })
@@ -132,7 +144,7 @@ describe('the transport keeps a permission refusal', () => {
     release(json(403, { error: 'refused', code: 'owner_only' }))
     await pending
     await settle(api.members())
-    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/members')).toHaveLength(2)
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/v1/crew/owner/members')).toHaveLength(2)
   })
 
   it('asks again after a token is exchanged in the auth banner', async () => {

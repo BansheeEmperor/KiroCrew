@@ -340,3 +340,66 @@ def test_non_ascii_app_secret_is_rejected(bad: str, tmp_path) -> None:
     (app_dir / ".app_secret").write_text("real", encoding="utf-8")
     assert validate_app_secret("demo", "real") is True
     assert validate_app_secret("demo", bad) is False
+
+
+# -- The refusal body: /api/ flat JSON, /v1/ the Crew API error -------------------
+
+
+@pytest.mark.asyncio
+async def test_a_v1_route_without_a_credential_is_refused_with_the_crew_api_error() -> None:
+    import json
+
+    mw = token_auth_middleware()
+    req = _make_request(path="/v1/crew/owner/members", headers={"X-Request-Id": "req_noauth1"})
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 403
+    assert resp.content_type == "application/json"
+    assert resp.headers["X-Auth-Required"] == "true"
+    assert resp.headers["X-Request-Id"] == "req_noauth1"
+    assert json.loads(resp.body) == {
+        "error": {
+            "type": "authentication_error",
+            "code": "invalid_token",
+            "message": "Token required",
+            "param": None,
+            "request_id": "req_noauth1",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_v1_refusal_keeps_its_own_code() -> None:
+    import json
+
+    mw = token_auth_middleware(
+        internal_paths=frozenset({"/v1/chat/completions"}), internal_secret="s"
+    )
+    req = _make_request(
+        path="/v1/chat/completions", method="POST", headers={"X-Internal-Secret": "wrong"}
+    )
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 403
+    error = json.loads(resp.body)["error"]
+    assert (error["type"], error["code"]) == ("permission_error", "internal_auth_mismatch")
+    assert error["request_id"].startswith("req_")
+    assert error["request_id"] == resp.headers["X-Request-Id"]
+
+
+@pytest.mark.asyncio
+async def test_an_api_route_without_a_credential_keeps_the_flat_refusal() -> None:
+    import json
+
+    mw = token_auth_middleware()
+    resp = await mw(_make_request(path="/api/members"), _ok_handler)
+    assert resp.status == 403
+    assert resp.headers["X-Auth-Required"] == "true"
+    assert json.loads(resp.body) == {"error": "Token required", "code": "forbidden"}
+    assert "X-Request-Id" not in resp.headers
+
+
+@pytest.mark.asyncio
+async def test_a_page_route_without_a_credential_keeps_the_html_refusal() -> None:
+    mw = token_auth_middleware()
+    resp = await mw(_make_request(path="/sprites/x.png"), _ok_handler)
+    assert resp.status == 403
+    assert resp.content_type == "text/html"

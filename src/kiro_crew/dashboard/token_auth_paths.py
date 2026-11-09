@@ -455,6 +455,26 @@ def _deny(request: web.Request, reason: str, code: str = "") -> web.Response:
         return web.json_response(
             {"error": reason, "code": code or "forbidden"}, status=403, headers=headers
         )
+    # Function-local: the token_auth facade mirrors every module-level name of its
+    # owners, and these are not part of its surface.
+    from kiro_crew.dashboard.crew_api_errors import (
+        contract_error,
+        is_crew_api_path,
+        request_id_for,
+    )
+
+    if is_crew_api_path(request.path):
+        # The Crew API's own error body. A refusal with no code of its own is a
+        # missing or rejected credential, the contract's ``invalid_token``. The
+        # status stays 403: only the body differs from the /api/ answer above.
+        return contract_error(
+            403,
+            code or "invalid_token",
+            reason,
+            request_id_for(request),
+            headers,
+            type_="authentication_error" if not code else "",
+        )
     return web.Response(
         text=_403_HTML.format(reason=reason),
         status=403,

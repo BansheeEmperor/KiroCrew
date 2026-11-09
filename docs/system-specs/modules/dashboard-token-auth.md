@@ -133,7 +133,8 @@ graph LR
 6. `_workflow_ready` (`_register_workflow_lifecycle`) answers 503 on `/api/workflows`
    until the workflow service is ready, and `_crewmate_prune_gate`
    (`_register_crewmate_prune_gate`, dashboard only) holds every mutating request,
-   and any request under `/api/members`, until the Bot prune settles, 503
+   and any request under `/api/members` or its Crew API twin
+   `/v1/crew/owner/members`, until the Bot prune settles, 503
    past its timeout.
    Both RETURN their refusal, inner to `sel_audit`.
 
@@ -1165,7 +1166,9 @@ dashboard session; if no other device is signed in, it restores the
 
 The dashboard client reads a refusal by its shape. A 403 carrying
 `X-Auth-Required: true` is this middleware's own denial (JSON with `error` and
-`code` on `/api/*`): `website/src/api/client.ts` tries one silent refresh and
+`code` on `/api/*`; on `/v1/*` the Crew API error body `{"error": {"type",
+"code", "message", "param", "request_id"}}` with `X-Request-Id`, `code`
+defaulting to `invalid_token`; an HTML page elsewhere): `website/src/api/client.ts` tries one silent refresh and
 raises the re-auth banner only when that refresh is terminal; an embedded pane
 tries the same refresh and, when it fails, hands recovery to its hub instead of
 raising the banner. A 401 or 403 without the header whose

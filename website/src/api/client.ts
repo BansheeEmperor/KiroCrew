@@ -23,6 +23,7 @@ import {
   noteStaleOwnerResponse,
 } from './staleOwnerSignal'
 import { edgeChallengeMessage, noteEdgeAuthChallenge } from './edgeAuthChallenge'
+import { flattenCrewApiError } from './crewApiError'
 import { AUTH_BANNER_BUTTON_CSS, AUTH_BANNER_CSS } from './authBannerStyles'
 import { isCameraPermissionDenied, qrScanSupported, scanQrCode } from './qrScan'
 import { beginArtifactWrite, endArtifactWrite } from '../lib/artifactWrites'
@@ -1147,7 +1148,7 @@ const parseJson = async (r: Response, benign?: BenignDenial, nullOn204 = false) 
     // rejection, which the acceptance-receipt wires have to treat as
     // indeterminate and would show as "delivery unconfirmed" instead of an
     // error. The app-sdk's `jsonFetch` keeps the same guard.
-    const errText = await r.text().catch(() => r.statusText)
+    const errText = flattenCrewApiError(await r.text().catch(() => r.statusText))
     throw apiFailure(r, errText, benign)
   }
   return r.json()
@@ -1419,7 +1420,7 @@ async function keepIfRefused(input: string, r: Response, generation: number): Pr
   if (r.status !== 403 || typeof r.clone !== 'function') return r
   if (r.headers?.get?.('X-Auth-Required') === 'true') return r
   const kept = r.clone()
-  const body = await kept.clone().text().catch(() => '')
+  const body = flattenCrewApiError(await kept.clone().text().catch(() => ''))
   if (generation === callerGeneration && isPermissionRefusal({ status: 403, body })) {
     refusedReads.set(input, { response: kept, at: Date.now() })
   }
