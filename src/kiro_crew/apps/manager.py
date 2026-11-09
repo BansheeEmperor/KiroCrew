@@ -148,7 +148,11 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _ALWAYS_STORED_FAMILIES,
         _GRANT_AND_SCOPE_WIDENING,
         _GRANT_WIDENING,
+        _RECORD_READ_CAP,
         _SCOPE_WIDENING,
+        _TOKEN_CUTOFF_MAX_ENTRIES,
+        _TOKEN_CUTOFF_PRIME_MARGIN,
+        _TOKEN_CUTOFF_TTL,
         _TREE_SWAP_LAST_CAP,
         _VALID_LIFECYCLE,
         _VALID_ORIGIN,
@@ -171,12 +175,15 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _effective_approved_grants,
         _held_back_entries,
         _is_sidecar_entry,
+        _next_token_cutoff,
         _now_iso,
         _parse_approved_grants,
         _pending_session_approval_after_manifest_change,
         _read_approved_grants,
         _read_enabled,
         _read_installed,
+        _read_not_before,
+        _read_record_bytes,
         _read_schema_version,
         _record_lock_path,
         _record_lock_state,
@@ -184,7 +191,11 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _session_approval_consent_unrecorded,
         _session_approval_save_rule,
         _session_control_widening,
+        _store_token_cutoff,
         _SwapState,
+        _token_cutoff_cache,
+        _token_cutoff_epoch,
+        _token_cutoff_lock,
         _tree_swap,
         _tree_swap_guard,
         _tree_swap_last,
@@ -202,11 +213,15 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         app_data_dir,
         app_dir,
         app_record_lock,
+        app_token_cutoff,
         approved_manifest_permissions,
         apps_dir,
+        cached_app_token_cutoff,
+        forget_app_token_cutoff,
         get_app_manifest,
         hold_app_record_lock,
         holds_app_record_locks,
+        prime_app_token_cutoff,
         refresh_app_config_keys,
         staged_app_grants,
     )
@@ -246,6 +261,7 @@ if TYPE_CHECKING:  # names it serves from outside the family, from their homes
     import ipaddress  # noqa: F401
     import json  # noqa: F401
     import logging  # noqa: F401
+    import math  # noqa: F401
     import os  # noqa: F401
     import re  # noqa: F401
     import shutil  # noqa: F401
@@ -352,6 +368,9 @@ if TYPE_CHECKING:  # names it serves from outside the family, from their homes
         read_config_text,
         read_endorsed_config_text,
         update_config_locked,
+    )
+    from kiro_crew.jsonl_util import (  # noqa: F401
+        open_regular_nofollow,
     )
     from kiro_crew.loop_lock import (  # noqa: F401
         LoopBoundLock,

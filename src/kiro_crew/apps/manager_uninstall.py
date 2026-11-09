@@ -30,6 +30,7 @@ from kiro_crew.apps.manager_records import (
     InstalledApp,
     _read_installed,
     app_dir,
+    forget_app_token_cutoff,
     refresh_app_config_keys,
 )
 from kiro_crew.apps.manager_tree import (
@@ -428,6 +429,8 @@ def uninstall_app(name: str, *, keep_data: bool = True, retired_builtin: bool = 
             )
         return AppResult(ok=False, name=name, error=f"failed to remove app: {exc}{restore_note}")
 
+    # Its record is gone: a cached cutoff must not keep its tokens alive.
+    forget_app_token_cutoff(name)
     refresh_app_config_keys()
     logger.info("Uninstalled app %s (keep_data=%s)", name, keep_data)
 

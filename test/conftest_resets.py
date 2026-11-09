@@ -339,6 +339,9 @@ def forget_home_bound_caches() -> None:
     if token_auth is not None:
         token_auth._app_perms_cache.clear()
         token_auth._app_perms_denied.clear()
+    manager_records = sys.modules.get("kiro_crew.apps.manager_records")
+    if manager_records is not None:
+        manager_records._token_cutoff_cache.clear()
 
 
 @pytest.fixture(autouse=True)

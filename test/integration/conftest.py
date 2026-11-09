@@ -109,7 +109,8 @@ cross-home flake three tests later.
      home's gateway still accepts.
    * ``dashboard.token_auth._revoked_store_singleton`` -- revoked-nonce store
      pinned to the first ``config_dir()``; ``_state`` and ``_app_perms_cache``
-     -- nonce and permission state for the previous gateway's tokens.
+     -- nonce and permission state for the previous gateway's tokens; and
+     ``apps.manager_records._token_cutoff_cache``, the previous home's app records.
    * ``dashboard.revocation_gen._gen`` -- memoised revocation generation,
      loaded from the home's counter file.
    * ``crash_guard._CRASH_LOG`` -- crash-record path pinned to the home by
@@ -295,7 +296,7 @@ from kiro_crew import (
 )
 from kiro_crew.acp import client as acp_client
 from kiro_crew.agent_sdk import host_auth
-from kiro_crew.apps import credential_masks
+from kiro_crew.apps import credential_masks, manager_records
 from kiro_crew.apps.builtin_adoption_pins import HARNESS_PINS_ENV, load_adoption_pins
 from kiro_crew.config import live as config_live
 from kiro_crew.config import loader as config_loader
@@ -793,6 +794,7 @@ def _reset_home_bound_globals() -> None:
     token_auth._state.clear_all()
     token_auth._app_perms_cache.clear()
     token_auth._app_perms_denied.clear()
+    manager_records._token_cutoff_cache.clear()
     revocation_gen._gen = None
     crash_guard._CRASH_LOG = None
     config_live.reset_for_tests()
@@ -884,6 +886,7 @@ def home_bound_globals_are_clear() -> bool:
         and token_auth._revoked_store_singleton is None
         and revocation_gen._gen is None
         and not token_auth._app_perms_cache
+        and not manager_records._token_cutoff_cache
         and crash_guard._CRASH_LOG is None
         and autonudge._INSTANCE is None
         and platform_context._ACTIVE is None

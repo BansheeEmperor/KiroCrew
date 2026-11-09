@@ -13,8 +13,10 @@ as ``kiro_crew.apps.manager.<name>``, and a patch there reaches this module too
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -26,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Sequence
 
 from kiro_crew.apps import credential_masks
+from kiro_crew.apps.execution import APP_NAME_RE
 from kiro_crew.apps.host_exec_grants import revoke_host_exec
 from kiro_crew.apps.manifest import AppManifest, Permissions
 from kiro_crew.apps.point_grants import point_grant_families
@@ -33,6 +36,7 @@ from kiro_crew.apps.worker_auto_approve import WORKER_AUTO_APPROVE_GRANT_FAMILIE
 from kiro_crew.apps.worker_auto_approve import revoke_app as revoke_worker_auto_approve
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config.loader import config_dir
+from kiro_crew.jsonl_util import open_regular_nofollow
 from kiro_crew.owner_only_files import ensure_directory
 
 logger = logging.getLogger("kiro_crew.apps.manager")
@@ -147,6 +151,20 @@ def _read_schema_version(data: dict[str, Any]) -> int:
         return 1
 
 
+def _read_not_before(data: dict[str, Any]) -> float:
+    """``appTokensNotBefore`` as a float; a missing or unusable value is 0."""
+    value = data.get("appTokensNotBefore", 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    # NaN compares false with everything, so it would admit every token; a
+    # non-finite cutoff refuses them all instead.
+    try:
+        cutoff = float(value)
+    except OverflowError:  # an int too large for a float
+        return math.inf
+    return cutoff if math.isfinite(cutoff) else math.inf
+
+
 @dataclass
 class InstalledApp:
     """Metadata persisted in ``installed.json`` for each installed app.
@@ -223,6 +241,12 @@ class InstalledApp:
     # it (an install from before the set was stored) approves what its
     # manifest declares.
     approvedGrantsStored: bool = False  # noqa: N815
+    # Epoch seconds before which this app's tokens are refused. ``_write_installed``
+    # moves it forward on every write that leaves the app disabled and on the
+    # write that creates the record, so a token minted before a disable or before
+    # an uninstall stays dead after the app is enabled or installed again. 0 on a
+    # record from before the field existed: no cutoff.
+    appTokensNotBefore: float = 0.0  # noqa: N815
 
     def validate_fields(self) -> list[str]:
         """Validate classification field values. Returns error list (empty = valid)."""
@@ -237,6 +261,12 @@ class InstalledApp:
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v or isinstance(v, (bool, int))}
+
+    def to_row_dict(self) -> dict[str, Any]:
+        """``to_dict`` for an API row: without the gateway-internal token cutoff."""
+        row = self.to_dict()
+        row.pop("appTokensNotBefore", None)
+        return row
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> InstalledApp:
@@ -262,6 +292,7 @@ class InstalledApp:
             sessionApprovalConsentPending=bool(data.get("sessionApprovalConsentPending", False)),
             memberThreadsConsented=data.get(MEMBER_THREADS_CONSENT_KEY) is True,
             approvedGrantsStored=data.get("approvedGrantsStored") is True,
+            appTokensNotBefore=_read_not_before(data),
         )
         # Migrate old "managed" field to new classification fields
         if inst.schemaVersion < 2 and "origin" not in data:
@@ -501,6 +532,141 @@ def _session_approval_save_rule(
     return "as_is"
 
 
+#: Largest ``installed.json`` the token checks read; a real record is a few KB.
+_RECORD_READ_CAP = 256 * 1024
+
+
+def _read_record_bytes(path: Path) -> bytes:
+    """*path*'s bytes through :func:`open_regular_nofollow`, capped at :data:`_RECORD_READ_CAP`.
+
+    The app can replace its own record with a link, a FIFO or a huge file; each raises
+    ``OSError`` here, and absence raises ``FileNotFoundError``.
+    """
+    with open_regular_nofollow(path, max_bytes=_RECORD_READ_CAP) as fh:
+        return fh.read()
+
+
+def _next_token_cutoff(name: str, meta: InstalledApp) -> float:
+    """The ``appTokensNotBefore`` a write of *meta* stores.
+
+    Never earlier than what is on disk, so a writer holding a record read before a
+    disable cannot reopen tokens the disable closed. A write that leaves the app
+    disabled, or that creates the record, moves it to now.
+    """
+    meta_path = app_dir(name) / INSTALLED_META_FILENAME
+    try:
+        on_disk = _read_not_before(json.loads(_read_record_bytes(meta_path).decode("utf-8")))
+        exists = True
+    except FileNotFoundError:
+        on_disk, exists = 0.0, False
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        on_disk, exists = 0.0, True
+    cutoff = max(meta.appTokensNotBefore, on_disk)
+    if not meta.enabled or not exists:
+        cutoff = max(cutoff, time.time())
+    return cutoff
+
+
+def app_token_cutoff(name: str) -> float | None:
+    """When *name*'s app tokens start being accepted, or None to refuse them all.
+
+    None when the app is not installed, is disabled, or its record cannot be
+    read: an app token is honoured only while the record says the app is on.
+    Reads ``installed.json`` alone (no manifest), because the auth middleware
+    calls it on every app-token request.
+    """
+    meta_path = app_dir(name) / INSTALLED_META_FILENAME
+    try:
+        data = json.loads(_read_record_bytes(meta_path).decode("utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or not _read_enabled(data):
+        return None
+    return _read_not_before(data)
+
+
+#: How long a read of an app's token cutoff is reused. Bounds how late a disable
+#: written by another process (the CLI) is seen; this process's own writes clear
+#: the entry at once (``forget_app_token_cutoff``).
+_TOKEN_CUTOFF_TTL = 5.0
+#: A primed entry is refreshed this long before it expires, so the synchronous
+#: check that follows the prime in the same request finds it fresh.
+_TOKEN_CUTOFF_PRIME_MARGIN = 1.0
+#: Most names the cache holds. Only signed app tokens reach it, so this is far
+#: above the installed-app count; the cap keeps memory bounded regardless.
+_TOKEN_CUTOFF_MAX_ENTRIES = 256
+_token_cutoff_cache: dict[str, tuple[float, float | None]] = {}
+_token_cutoff_lock = threading.Lock()
+#: Bumped by every invalidation. A read that straddles one is not published, so
+#: an older record read cannot be cached after the write that replaced it.
+_token_cutoff_epoch = 0
+
+
+def _store_token_cutoff(name: str, read_at: float, cutoff: float | None) -> None:
+    """Insert under the lock (held by the caller), evicting to stay under the cap."""
+    if name not in _token_cutoff_cache and len(_token_cutoff_cache) >= _TOKEN_CUTOFF_MAX_ENTRIES:
+        for key, (at, _cut) in list(_token_cutoff_cache.items()):
+            if read_at - at >= _TOKEN_CUTOFF_TTL:
+                del _token_cutoff_cache[key]
+        if len(_token_cutoff_cache) >= _TOKEN_CUTOFF_MAX_ENTRIES:
+            del _token_cutoff_cache[next(iter(_token_cutoff_cache))]
+    _token_cutoff_cache[name] = (read_at, cutoff)
+
+
+def cached_app_token_cutoff(name: str) -> float | None:
+    """:func:`app_token_cutoff`, reused for :data:`_TOKEN_CUTOFF_TTL` seconds.
+
+    A name that is not a valid app name refuses without a read or an entry. A
+    refusal is cached like an acceptance, so a record that cannot be read keeps
+    refusing. On a miss it reads the record here; the auth middleware primes the
+    entry off the event loop first (:func:`prime_app_token_cutoff`). A read that
+    an invalidation overtook is read again once, then refused.
+    """
+    if not isinstance(name, str) or not APP_NAME_RE.fullmatch(name):
+        return None
+    now = time.monotonic()
+    with _token_cutoff_lock:
+        entry = _token_cutoff_cache.get(name)
+    if entry is not None and now - entry[0] < _TOKEN_CUTOFF_TTL:
+        return entry[1]
+    for _attempt in range(2):
+        with _token_cutoff_lock:
+            epoch = _token_cutoff_epoch
+        try:
+            cutoff = app_token_cutoff(name)
+        except Exception:  # noqa: BLE001 - fail closed: an unread record refuses
+            logger.warning("could not read an app's token cutoff", exc_info=True)
+            cutoff = None
+        with _token_cutoff_lock:
+            if epoch == _token_cutoff_epoch:
+                # Stamped when the read ENDS: a slow read primed off the loop must
+                # still be fresh for the check that follows it on the loop.
+                _store_token_cutoff(name, time.monotonic(), cutoff)
+                return cutoff
+    return None
+
+
+async def prime_app_token_cutoff(name: str) -> None:
+    """Read *name*'s cutoff into the cache OFF the event loop when it is stale."""
+    if not isinstance(name, str) or not APP_NAME_RE.fullmatch(name):
+        return
+    with _token_cutoff_lock:
+        entry = _token_cutoff_cache.get(name)
+        if entry is not None:
+            if time.monotonic() - entry[0] < _TOKEN_CUTOFF_TTL - _TOKEN_CUTOFF_PRIME_MARGIN:
+                return
+            del _token_cutoff_cache[name]
+    await asyncio.to_thread(cached_app_token_cutoff, name)
+
+
+def forget_app_token_cutoff(name: str) -> None:
+    """Drop *name*'s cached cutoff, for a write or removal of its record."""
+    global _token_cutoff_epoch
+    with _token_cutoff_lock:
+        _token_cutoff_epoch += 1
+        _token_cutoff_cache.pop(name, None)
+
+
 def _write_installed(
     name: str, meta: InstalledApp, *, session_approval_consent: bool = False
 ) -> None:
@@ -536,6 +702,7 @@ def _write_installed(
         )
         credential_free_meta = replace(
             meta,
+            appTokensNotBefore=_next_token_cutoff(name, meta),
             approvedGrantsStored=meta.approvedGrantsStored or _approved_grants_path(name).is_file(),
             sessionApprovalConsentPending=meta.sessionApprovalConsentPending or rule == "pending",
             source=_credential_free_source_metadata(str(meta.source or "")),
@@ -548,6 +715,7 @@ def _write_installed(
         meta_path = app_dir(name) / INSTALLED_META_FILENAME
         meta_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(meta_path, json.dumps(body, indent=2) + "\n")
+        forget_app_token_cutoff(name)
         # The credential masks the manifest declares must outlive it beside the data
         # (apps.credential_masks). Best-effort here: the update and the uninstall
         # refresh the record again, strictly, before they move the data.

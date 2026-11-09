@@ -101,6 +101,7 @@ from kiro_crew.dashboard.token_auth_tokens import (
     check_token_peer,
     claims_an_app_unverified,
     generate_token,
+    prime_app_token_cutoffs,
     required_peer_key_unverified,
     requires_verified_peer_unverified,
     validate_token_with_app,
@@ -242,6 +243,13 @@ def token_auth_middleware(
                 return valid, uid, reason, app, query_token, True
         valid, uid, reason, app = validate_token_with_app(cookie_token, use_session_exp=True)
         return valid, uid, reason, app, cookie_token, False
+
+    async def _prime_request_app_cutoffs(request: web.Request, _port: int) -> None:
+        """Prime the app-token check for the credentials ``_extract_and_validate_token`` reads."""
+        cookie_name = f"mc_token_{_cookie_port_from_host(request, _port)}"
+        await prime_app_token_cutoffs(
+            request.query.get("token") or "", request.cookies.get(cookie_name, "")
+        )
 
     def _current_direct_gate() -> tailnet_direct_types.DirectGate | None:
         if tailnet_direct is None:
@@ -699,6 +707,7 @@ def token_auth_middleware(
             # at the decision point rather than deferring to downstream.
             # NOTE: uses _extract_and_validate_token helper (defined above)
             # for cookie/query-param validation.
+            await _prime_request_app_cutoffs(request, port)
             _valid, _uid, _reason, _app, _tok, _from_query = _extract_and_validate_token(
                 request, port
             )
@@ -805,6 +814,7 @@ def token_auth_middleware(
                         if not request.headers["X-Internal-Secret"]:
                             return _deny(request, "Forbidden", "internal_secret_missing")
                         return _deny(request, "Forbidden", "internal_auth_mismatch")
+                await _prime_request_app_cutoffs(request, port)
                 _valid, _uid, _reason, _app, _tok, _from_query = _extract_and_validate_token(
                     request, port
                 )
@@ -953,6 +963,8 @@ def token_auth_middleware(
             _log_auth(request, "", "denied", "Token required")
             return _deny(request, "Token required")
 
+        # Off the loop: the app-token check reads the app's install record.
+        await prime_app_token_cutoffs(token, request.cookies.get(cookie_name, ""))
         valid, user_id, reason, app_name = validate_token_with_app(
             token, use_session_exp=from_cookie
         )
@@ -1484,11 +1496,13 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         MAX_CONCURRENT_NONCES,
         RevokedNonceStore,
         TokenStateManager,
+        _app_token_live,
         _b64url_encode,
         _evict_expired,
         _revoked_store_lock,
         _revoked_store_singleton,
         _sign,
+        _signed_app_claim,
         _token_pin_key,
         bind_token_ip,
         check_token_ip,

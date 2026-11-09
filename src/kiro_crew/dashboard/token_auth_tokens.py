@@ -714,7 +714,68 @@ def validate_token_with_app(
     app_name = data.get("app", "")
     if use_session_exp and not app_name and data.get("kind") != "session":
         return False, "", LINK_NOT_A_SESSION, ""
+    if app_name and not _app_token_live(app_name, data.get("iat")):
+        # Refused exactly like a forged token: the caller learns nothing about
+        # the app's state, and its SDK re-exchanges the secret as it does today.
+        return False, "", "invalid signature", ""
     return valid, user_id, reason, app_name
+
+
+def _app_token_live(app_name: str, iat: object) -> bool:
+    """Whether *app_name* is installed and enabled, and the token postdates its cutoff.
+
+    The HMAC key is gateway-wide, so a signature alone outlives a disable or an
+    uninstall. The record read is cached briefly; the async middleware primes it
+    off the event loop first (:func:`prime_app_token_cutoffs`). Deferred import:
+    ``apps`` imports the dashboard auth modules.
+    """
+    from kiro_crew.apps.manager import cached_app_token_cutoff
+
+    cutoff = cached_app_token_cutoff(str(app_name))
+    if cutoff is None:
+        return False
+    if isinstance(iat, bool) or not isinstance(iat, (int, float)):
+        return cutoff <= 0
+    # Strictly after: a token minted in the same clock tick as the disable is from
+    # before it, and a coarse clock (Windows) can make the two equal.
+    return iat > cutoff
+
+
+def _signed_app_claim(token: str) -> str:
+    """The ``app`` claim of *token* when its signature verifies, else ``""``.
+
+    Signature only, no expiry or revocation: it decides what to read ahead, and the
+    token is fully validated afterwards. A forged token reads nothing.
+    """
+    parts = token.split(".", 1)
+    if len(parts) != 2:
+        return ""
+    try:
+        payload = _b64url_decode(parts[0])
+    except Exception:
+        return ""
+    if not _ct_eq(parts[1], _sign(payload)):
+        return ""
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return ""
+    app = data.get("app") if isinstance(data, dict) else None
+    return app if isinstance(app, str) else ""
+
+
+async def prime_app_token_cutoffs(*tokens: str) -> None:
+    """Read the install record of each app these SIGNED tokens name, off the event loop.
+
+    :func:`_app_token_live` reads the same cache. A token whose signature fails,
+    or whose app name is not a valid one, primes nothing.
+    """
+    from kiro_crew.apps.manager import prime_app_token_cutoff
+
+    for token in tokens:
+        app = _signed_app_claim(token) if token else ""
+        if app:
+            await prime_app_token_cutoff(app)
 
 
 def claims_an_app_unverified(token: str) -> bool:

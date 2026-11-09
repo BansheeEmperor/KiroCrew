@@ -2566,9 +2566,9 @@ consults declarations.** `disable_app` flips `enabled` in `installed.json` and
 leaves `app.json` intact, so a manifest-only read would report a disabled app's
 declarations unchanged — hence enablement is read as part of the declared set, and
 a disabled or uninstalled app declares nothing. That alone does not revoke it:
-`disable_app` does not invalidate the app token (`token_auth` has no enablement
-check; each app backend route gates on `is_app_enabled` itself), so the app can
-keep an authenticated `/api/ws` socket, and `_slot_visible` grants an app its OWN
+the token check (see "An app token lives only while its app is enabled" below)
+refuses a disabled app's token on every NEW request and handshake, but a socket
+opened before the disable stays authenticated, and `_slot_visible` grants an app its OWN
 slots on the ownership check BEFORE `allowed_events` is read. Emptying the
 declaration set cannot reach that branch. So the enablement flag is also exposed
 as `ws_event_scope.app_events_revoked`, which the own-slot branches and the gate
@@ -2583,8 +2583,32 @@ Revocation therefore requires POSITIVE evidence of disablement, so an unreadable
 `app.json` on a still-enabled app declares nothing but is NOT revoked; blanking a
 working app's own chat over a transient filesystem error is the more costly error.
 
-**The CONNECT path resolves enablement too, and refuses.** Since the token
-survives `disable_app`, a disabled app can reconnect at will, and a connect-time
+**An app token lives only while its app is enabled.** The token is HMAC-signed
+with the gateway-wide key, so its signature outlives a disable or an uninstall.
+`validate_token_with_app` therefore also reads the app's `installed.json`
+(`apps.manager.app_token_cutoff`, the record alone, no manifest) and refuses the
+token, with the same `invalid signature` reason a forged one gets, when the app is
+not installed, is disabled, or its record cannot be read, or when the token's
+`iat` is not after the record's `appTokensNotBefore`. The record is read through
+`jsonl_util.open_regular_nofollow` (no link, no FIFO, 256 KB cap), and a cutoff that is
+not a finite float refuses every token. The read is cached per app for
+`_TOKEN_CUTOFF_TTL` (5 s, `cached_app_token_cutoff`; a failed read is cached as a
+refusal). The async auth middleware primes the entry with `asyncio.to_thread`
+(`prime_app_token_cutoffs`) before it validates, so the event loop never reads the
+file. It primes only for a token whose signature verifies and whose app
+name matches `APP_NAME_RE`, so a forged claim reads nothing and adds no entry; the
+cache holds at most `_TOKEN_CUTOFF_MAX_ENTRIES`. A read that an invalidation
+overtook is read again once and never cached stale. `_write_installed` and a finished uninstall clear the entry; a write from
+another process (the CLI) is seen within the TTL. `_write_installed` moves that
+cutoff to now on every write that leaves the app disabled and on the write that
+creates the record, and never moves it back, so a token minted before a disable
+or an uninstall stays dead after the app is enabled or installed again: the app
+re-exchanges its secret at `POST /api/apps/<name>/token`, as it does when a token
+expires. The record sits in the app's own directory, so this check is as strong
+as `installed.json` itself and no stronger.
+
+**The CONNECT path resolves enablement too, and refuses.** A socket a disabled
+app already holds is not re-authenticated, and a connect-time
 read of `app.json` alone would hand it a full snapshot from the intact manifest —
 which the initial `slots` push and the log replay are then judged against before
 any background refresh runs, with `app_events_revoked` reporting NOT revoked on
