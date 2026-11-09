@@ -202,12 +202,14 @@ function answerEndIndex(items: readonly TurnItem[]): number {
  * repeats it, which nothing does. An `mcp_app` row (an embedded MCP App's
  * ui/message delivery) is here for the same reason: the user's own click
  * landed it, and nothing in the fold repeats it. A `workflow` follow-up is the
- * same again: its answer is about a workflow run, not the fan-out.
+ * same again: its answer is about a workflow run, not the fan-out. A `resource`
+ * wake is a server-delivered turn about an outside change, not part of the
+ * sub-agent work being folded.
  *
  * `recovery` is deliberately NOT here: a tool-stall recovery inside a fan-out is
  * a continuation of the very work being folded.
  */
-const FOREIGN_INJECT_KINDS = new Set(['cron', 'user_replay', 'mcp_app', 'workflow'])
+const FOREIGN_INJECT_KINDS = new Set(['cron', 'user_replay', 'mcp_app', 'workflow', 'resource'])
 const isForeignInjection = (msg: ChatMessage): boolean => {
   if (msg.role !== 'inject') return false
   if (isNoteRow(msg)) return true

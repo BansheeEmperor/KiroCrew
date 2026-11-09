@@ -7524,7 +7524,8 @@
         "kas_signed_out_sign_in_below": "Not signed in to Kiro. Sign in below, then send your message again.",
         "kas_route_relay": "Your agent runs through kiro-cli.",
         "kas_route_bundle": "Your agent runs on {{productName}}'s own engine.",
-        "kas_route_lead": "{{route}} {{message}}"
+        "kas_route_lead": "{{route}} {{message}}",
+        "resource_wake_budget_paused": "Resource subscription {{subscription}} on {{server}} reached its {{limit}} wakes for {{day}} (UTC) and is paused until the next UTC day. Updates meanwhile are folded into one wake after the pause."
       },
       "userMessage": {
         "cancel": "Cancel",

@@ -13517,7 +13517,8 @@
         "kas_signed_out_sign_in_below": "No has iniciado sesión en Kiro. Inicia sesión abajo y luego envía tu mensaje de nuevo.",
         "kas_route_relay": "Tu agente funciona a través de kiro-cli.",
         "kas_route_bundle": "Tu agente funciona con el motor propio de {{productName}}.",
-        "kas_route_lead": "{{route}} {{message}}"
+        "kas_route_lead": "{{route}} {{message}}",
+        "resource_wake_budget_paused": "La suscripción al recurso {{subscription}} en {{server}} alcanzó sus {{limit}} activaciones del {{day}} (UTC) y queda en pausa hasta el siguiente día UTC. Las actualizaciones de mientras tanto se agrupan en una sola activación después de la pausa."
       },
       "turnBlock": {
         "earlier_step_many": "{{count}} pasos anteriores",
