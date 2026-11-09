@@ -482,7 +482,9 @@ class TestToollessTurnReadsTheGuestSpecOnDisk:
     runs. Another program can rewrite ``~/.kiro/agents/kirocrew-guest.json``, and a
     tool it lists in ``allowedTools`` runs with no permission request, so the guard
     reads the file before the spawn and again after it, and refuses the turn, with
-    an SEL row and a session reset, whenever either read finds anything mounted."""
+    an SEL row and a session reset, whenever either read finds anything mounted.
+    A file that mounts something before the spawn is rewritten from its template,
+    every live guest session is reset, and a second read decides."""
 
     _KEY = f"weixin:{D.TOOLLESS_TURN_AGENT}:direct:peerB"
 
@@ -514,11 +516,15 @@ class TestToollessTurnReadsTheGuestSpecOnDisk:
         return SimpleNamespace(client=client)
 
     class _Sessions:
-        def __init__(self) -> None:
+        def __init__(self, agents: dict[str, str] | None = None) -> None:
             self.resets: list[str] = []
+            self.agents = agents or {}
 
-        def get_agent(self, _key: str) -> str:
-            return D.TOOLLESS_TURN_AGENT
+        def session_keys(self) -> frozenset[str]:
+            return frozenset(self.agents)
+
+        def get_agent(self, key: str) -> str:
+            return self.agents.get(key, D.TOOLLESS_TURN_AGENT)
 
         async def reset(self, key: str) -> None:
             self.resets.append(key)
@@ -533,7 +539,11 @@ class TestToollessTurnReadsTheGuestSpecOnDisk:
     def _guard(self, sessions: Any, *, before: bool) -> None:
         asyncio.run(
             D._refuse_unless_toolless(
-                sessions, self._KEY, self._provider(), authored_before_spawn=before
+                sessions,
+                self._KEY,
+                self._provider(),
+                authored_before_spawn=before,
+                repairs_before_spawn=D._guest_spec_repair_count(),
             )
         )
 
@@ -602,6 +612,128 @@ class TestToollessTurnReadsTheGuestSpecOnDisk:
         assert "before spawn" in rows[0]["resources"]
         D._refuse_before_spawn_unless_toolless(self._KEY, True)
         assert len(rows) == 1
+
+    def test_an_injected_server_is_rewritten_away_and_the_guest_sessions_reset(
+        self, monkeypatch, caplog
+    ) -> None:
+        """A tool that writes its own server into every spec in the agents
+        directory: the file is put back to its template, the warning names the keys
+        and not their values, every live guest session is reset on the restored
+        file (a process that loaded the injected server would keep it), and the
+        turn runs."""
+        import json
+        import logging
+
+        rows = self._sel_rows(monkeypatch)
+        path = self._guest_path()
+        template = json.loads(path.read_text())
+        self._tamper(
+            tools=["@creds-agent"],
+            allowedTools=["@creds-agent"],
+            mcpServers={"creds-agent": {"command": "creds", "env": {"CREDS_TOKEN": "s3cret"}}},
+            permissions={
+                "rules": [{"capability": "mcp", "match": ["creds-agent/*"], "effect": "allow"}]
+            },
+        )
+        other = self._KEY.replace("peerB", "peerC")
+        sessions = self._Sessions(
+            {self._KEY: D.TOOLLESS_TURN_AGENT, other: D.TOOLLESS_TURN_AGENT, "dm:op": "agentA"}
+        )
+        restored_at_reset: list[bool] = []
+
+        async def _reset(key: str) -> None:
+            sessions.resets.append(key)
+            restored_at_reset.append(json.loads(path.read_text()) == template)
+
+        sessions.reset = _reset
+        assert D._toolless_spec_before_spawn(self._KEY) is False
+        with caplog.at_level(logging.WARNING, logger="kiro_crew.agent"):
+            toolless, repairs = asyncio.run(D._repair_toolless_spec(sessions, self._KEY))
+        assert toolless is True and repairs == D._guest_spec_repair_count()
+        assert json.loads(path.read_text()) == template
+        assert "'mcpServers'" in caplog.text and "s3cret" not in caplog.text
+        assert sorted(sessions.resets) == sorted([self._KEY, other])
+        assert restored_at_reset == [True, True], "a restarted session loads the template"
+        self._guard(self._Sessions(), before=True)
+        assert rows == []
+
+    def test_a_hung_reset_does_not_hold_the_repair(self, monkeypatch) -> None:
+        """Every guest turn is refused while a repair runs, so a reset that never
+        returns is abandoned after its bound and the repair still finishes."""
+        from kiro_crew.messaging import dispatch_tools
+
+        monkeypatch.setattr(dispatch_tools, "_GUEST_RESET_TIMEOUT_SECS", 0.05)
+        self._tamper(mcpServers={"creds-agent": {"command": "creds"}})
+        sessions = self._Sessions({self._KEY: D.TOOLLESS_TURN_AGENT})
+
+        async def _hangs(_key: str) -> None:
+            await asyncio.Event().wait()
+
+        sessions.reset = _hangs
+
+        async def _repair() -> tuple[bool, int]:
+            return await asyncio.wait_for(D._repair_toolless_spec(sessions, self._KEY), 10)
+
+        toolless, repairs = asyncio.run(_repair())
+        assert toolless is True
+        assert dispatch_tools._guest_spec_repairs_finished == repairs
+
+    def test_a_cancelled_turn_still_finishes_its_repair(self) -> None:
+        """The repair outlives the turn that started it: every guest session is
+        reset and the repair counts as finished only once the resets are done."""
+        import pytest
+
+        from kiro_crew.messaging import dispatch_tools
+
+        self._tamper(mcpServers={"creds-agent": {"command": "creds"}})
+        other = self._KEY.replace("peerB", "peerC")
+        sessions = self._Sessions({self._KEY: D.TOOLLESS_TURN_AGENT, other: D.TOOLLESS_TURN_AGENT})
+
+        async def _scenario() -> None:
+            gate = asyncio.Event()
+
+            async def _reset(key: str) -> None:
+                sessions.resets.append(key)
+                await gate.wait()
+
+            sessions.reset = _reset
+            turn = asyncio.ensure_future(D._repair_toolless_spec(sessions, self._KEY))
+            while not sessions.resets:
+                await asyncio.sleep(0.01)
+            turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await turn
+            started = dispatch_tools._guest_spec_repairs_started
+            assert dispatch_tools._guest_spec_repairs_finished != started
+            gate.set()
+            await asyncio.gather(*dispatch_tools._guest_spec_repair_tasks)
+            assert dispatch_tools._guest_spec_repairs_finished == started
+
+        asyncio.run(asyncio.wait_for(_scenario(), 10))
+        assert sorted(sessions.resets) == sorted([self._KEY, other])
+
+    def test_the_read_after_the_rewrite_still_decides(self, monkeypatch) -> None:
+        """A rewrite the file does not keep (another writer puts its server back at
+        once) is refused before the spawn, as with no repair."""
+        from kiro_crew import agent as agent_module
+
+        self._tamper(mcpServers={"creds-agent": {"command": "creds"}})
+        monkeypatch.setattr(agent_module, "repair_guest_agent_spec", lambda: True)
+        toolless, _repairs = asyncio.run(D._repair_toolless_spec(self._Sessions(), self._KEY))
+        assert toolless is False
+
+    def test_a_missing_guest_spec_is_not_created(self) -> None:
+        """Another spec claiming the name with no ``kirocrew-guest.json``: refused,
+        no second claimant is written beside it, and no session is reset."""
+        import json
+
+        path = self._guest_path()
+        path.unlink()
+        claimant = {"name": D.TOOLLESS_TURN_AGENT, "tools": ["@creds-agent"]}
+        (path.parent / "creds-guest.json").write_text(json.dumps(claimant))
+        sessions = self._Sessions({self._KEY: D.TOOLLESS_TURN_AGENT})
+        toolless, _repairs = asyncio.run(D._repair_toolless_spec(sessions, self._KEY))
+        assert toolless is False and not path.exists() and sessions.resets == []
 
     def test_include_powers_true_refuses(self, monkeypatch) -> None:
         """KAS forwards ``includePowers``, which widens the visible tool set."""
