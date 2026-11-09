@@ -45,6 +45,12 @@ AcpError (base, acp/transport_errors.py) — carries `transient`, the retry verd
 │                            or version-skewed install); non-retryable, and not an
 │                            AcpProcessDied, so the chat shows the reinstall
 │                            message instead of a respawn loop
+├── AcpKasEngineRefused    -- kiro-cli refused its v3 (KAS) engine on this host
+│                            ("V3 is currently not supported on this system",
+│                            acp/kas_engine_refusal.py); non-retryable, and the
+│                            runtime that met it records KAS unservable, in memory
+│                            and in the data home, so new sessions take the Kiro
+│                            CLI launch
 ├── AcpToolGateUnroutable  — tool calls would bypass the PreToolUse gate;
 │                            non-retryable, wraps acp_tool_gate.ToolGateUnroutable
 ├── PiGateExtensionTampered — a shipped gate extension (Pi or DeepSeek) failed its digest check
