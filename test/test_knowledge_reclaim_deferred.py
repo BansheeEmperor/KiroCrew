@@ -293,6 +293,10 @@ class _QuiescentStore:
         # not have the residue call raise and get swallowed as a sweep failure.
         return 0
 
+    def split_entity_candidates(self):
+        # Read by the split-entity merge the kicker runs in the same window.
+        return []
+
 
 class TestGatewayKick:
     def test_kick_runs_the_sweep_off_loop_as_a_tracked_task(self, monkeypatch):
@@ -336,6 +340,26 @@ class TestGatewayKick:
 
         asyncio.run(run())
         assert seen == ["orphans", "residue"]
+
+    def test_kick_merges_split_entities_in_the_window_after_the_sweeps(self):
+        seen: list[str] = []
+
+        class _Store(_QuiescentStore):
+            def reclaim_orphans(self):
+                seen.append("orphans")
+
+            def split_entity_candidates(self):
+                seen.append("split")
+                return []
+
+        state = SimpleNamespace(_knowledge_store=_Store(), _background_tasks=set())
+
+        async def run():
+            srv._kick_knowledge_orphan_reclaim(state)
+            await asyncio.gather(*state._background_tasks)
+
+        asyncio.run(run())
+        assert seen == ["orphans", "split"]
 
     def test_kick_does_not_build_a_store_nobody_constructed(self):
         built: list[int] = []

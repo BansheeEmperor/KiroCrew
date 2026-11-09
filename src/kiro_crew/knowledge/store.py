@@ -565,6 +565,7 @@ class KnowledgeStore:
     entity_alias_index_ready = _entity_graph.entity_alias_index_ready
     find_entity = _entity_graph.find_entity
     entity_identity_candidates = _entity_graph.entity_identity_candidates
+    split_entity_candidates = _entity_graph.split_entity_candidates
     merge_entities = _entity_graph.merge_entities
     add_entity_relation = _entity_graph.add_entity_relation
     add_mention = _entity_graph.add_mention
