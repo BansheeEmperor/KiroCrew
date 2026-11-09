@@ -133,6 +133,13 @@ one question: is the session on an `auto` the select does not list? If so it mov
 to a listed id. The select never becomes the session's advertised list, so the
 picker's entitlement narrowing and the explicit-pick guard are unchanged for KAS,
 and a concrete current model is never judged against a list that may be incomplete.
+Saving a pin is the one place the select judges a concrete id: with no `models`
+list on the newest live KAS session, the agent and role-pin validators
+(`dashboard/handlers/core_config_models.py`, `_kas_select_ids`) refuse an id the
+recorded select does not list, since the engine fails every prompt on such an id
+with `InvalidModelError`. They read it through `recorded_catalog_snapshot` with the
+vault identity the save read off the loop, so a select recorded for another
+account is no evidence and the pin is accepted as unknown.
 
 The same select IS the engine's catalog, and the shared-runtime driver records it
 as one (`agent_sdk/kas_model_catalog.py`, `record_catalog`, on a positive KAS
