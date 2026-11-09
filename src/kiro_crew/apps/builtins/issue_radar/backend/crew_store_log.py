@@ -191,9 +191,11 @@ def crew_log_units(
     header order is kept for it, and every unit absent from the order log is older
     than everything in it -- the log keeps the newest ids -- so those apply FIRST,
     except the crew's newest unit by succession, which applies last
-    (``session_ledger_control._causal_units``). The LIVE unit applies LAST whatever
-    either says: a writer knows which unit it is in, and the fold cannot be wrong
-    about it.
+    (``session_ledger_control._causal_units``). That unit holds no radar entry of its
+    own until it records, but it is where the slot carry writes the crew's whole record
+    (``session/carried``), so folded first, the units that record already holds would be
+    laid over it again. The LIVE unit applies LAST whatever either says: a writer knows
+    which unit it is in, and the fold cannot be wrong about it.
 
     ``()`` when the crew has none -- a crew that never recorded, or a gateway whose
     crew log is off -- and, unless *strict*, on every failure to LIST them, because
@@ -210,8 +212,9 @@ def crew_log_units(
         slot = slot_key_for(crew_id)
         units = session_units_for_slot(slot, strict=strict)
         # Recorded order, except the crew's newest unit by succession folds last: it
-        # holds no radar entry until it records, so its place does not change the
-        # record, and listed first its own appends would retire the warm cell.
+        # holds no radar entry until it records, but it holds the slot carry of the
+        # crew's record, and listed first the units that record already holds would be
+        # laid over it again and its own appends would retire the warm cell.
         units = _causal_units(slot, units, _recorded_unit_order(owner, repo, crew_id, root))
         if live_session_id and live_session_id in units:
             units = tuple(u for u in units if u != live_session_id) + (live_session_id,)

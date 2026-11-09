@@ -2,8 +2,9 @@
 
 The delete funnel's exclusion transaction (:func:`exclude_units`, :func:`unexclude_units`,
 :class:`LedgerExclusionError`), the legacy carry's claim and tombstone, the ledger, work and
-panel unit-order logs with their bounded read and rewrite, and the reader of a legacy
-``state.json`` document.
+panel unit-order logs with their bounded read and rewrite, the spellings a slot's ledger was
+recorded under (:func:`note_ledger_alias`), and the reader of a legacy ``state.json``
+document.
 
 An owner module of :mod:`kiro_crew.session_ledger`, the one import path: callers, tests and
 documents reach every name here as ``kiro_crew.session_ledger.<name>``, and a patch through
@@ -23,6 +24,7 @@ from typing import Any, NamedTuple
 
 from kiro_crew.atomic_write import append_line, atomic_write, fsync_dir
 from kiro_crew.session_ledger_layout import (
+    _ALIAS_FILE,
     _CARRIED_FILE,
     _CARRY_COMMITTED,
     _CARRY_PENDING,
@@ -31,6 +33,9 @@ from kiro_crew.session_ledger_layout import (
     _CLAIM_DONE,
     _CLAIM_TAKEN,
     _DELETED_UNITS_FILE,
+    _MAX_ALIAS_BYTES,
+    _MAX_ALIAS_READ_BYTES,
+    _MAX_ALIASES,
     _MAX_EXCLUDED_BYTES,
     _MAX_EXCLUDED_UNITS,
     _MAX_ORDER_BYTES,
@@ -682,6 +687,65 @@ def _note_unit_order(slot_key: str, session_id: str, *, order_file: str = _UNIT_
                 _rewrite_lines(path, kept)
     except (ValueError, OSError):
         logger.warning("ledger: could not record this slot's unit order", exc_info=True)
+
+
+def note_ledger_unit_recorded(slot_key: str, session_id: str) -> None:
+    """Publish that *session_id* just appended the ledger's newest record under its slot.
+
+    The ledger's own append publishes through :func:`_note_unit_order` directly; this is
+    the same note for a writer outside the ledger -- the slot carry, whose
+    ``session/carried`` entry is the ledger's newest state.
+    """
+    _note_unit_order(canonical_slot(slot_key, session_id), session_id)
+
+
+def note_ledger_alias(slot_key: str, alias: str) -> None:
+    """Record that *slot_key*'s ledger is reached under the caller spelling *alias*.
+
+    Written by the ledger's own writer, and by a read with a live session, when a
+    caller's key resolves to another slot (:func:`canonical_slot`): a ``cron:<id>``
+    session reaching the unit its slot heads. A read under *alias* joins the units headed
+    with it, before the slot's own, so the slot carry has to join the same units
+    (:func:`kiro_crew.session_ledger.ledger_carry_units`): carried over the slot's units
+    alone, the state it writes would replace what those units recorded for that reader
+    while they are still on disk. Already recorded, this is a bare read. The carry also
+    joins the session key the new unit's opening records its turns run under, and every
+    unit header the slot is named from (:func:`kiro_crew.session_ledger.ledger_aliases`),
+    so this record is what reaches a spelling a caller used that is neither.
+
+    SERIALIZED on the slot's lock, because the newest-kept trim is a read-modify-write.
+    Best-effort, like the unit order: a spelling this cannot write is written by the
+    next read or update under it, and a carry before then folds without its units unless
+    it is one of those two. A spelling past :data:`_MAX_ALIAS_BYTES`, or one that would
+    not stay one line, is never recorded.
+    """
+    if not slot_key or not alias or alias == slot_key:
+        return
+    if len(alias.encode("utf-8")) > _MAX_ALIAS_BYTES or "\n" in alias or "\r" in alias:
+        logger.warning("ledger: a caller spelling of this slot cannot be recorded")
+        return
+    try:
+        if alias in _recorded_aliases(slot_key):
+            return
+        path = _control_file(slot_key, _ALIAS_FILE, create=True)
+        with _locked(control_dir(slot_key)):
+            known = _recorded_aliases(slot_key)
+            if alias in known:
+                return
+            _rewrite_lines(path, (*known, alias)[-_MAX_ALIASES:])
+    except (ValueError, OSError):
+        logger.warning("ledger: could not record a spelling this slot is read under", exc_info=True)
+
+
+def _recorded_aliases(slot_key: str) -> "tuple[str, ...]":
+    """The spellings :func:`note_ledger_alias` recorded for *slot_key*, oldest first.
+
+    ``()`` when there is no file. RAISES when it cannot be read: the carry turns that into
+    no carry at all, which keeps every unit, where an empty answer would carry the slot
+    without the units those spellings join.
+    """
+    path = _control_file(slot_key, _ALIAS_FILE)
+    return _read_lines(path, limit=_MAX_ALIAS_READ_BYTES)[-_MAX_ALIASES:]
 
 
 def note_work_unit_recorded(slot_key: str, session_id: str, *, canonical: str = "") -> None:

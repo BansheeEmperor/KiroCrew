@@ -5,7 +5,7 @@ them, and the public reads the routes serve.
 from __future__ import annotations
 
 import threading
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 from kiro_crew import session_ledger
@@ -19,6 +19,7 @@ from kiro_crew.crew_log.entry_types import (
 )
 from kiro_crew.crew_log.errors import CODE_BAD_DATA, CrewLogError
 from kiro_crew.crew_log.projection_catalogue import (
+    CARRIED_FOLD_NAMES,
     KNOWN_TYPES,
     TREE_PROJECTION_NAMES,
     WORKER_FOLD_NAME,
@@ -26,7 +27,13 @@ from kiro_crew.crew_log.projection_catalogue import (
     WORKSTREAMS_FOLD_NAME,
     Projection,
 )
-from kiro_crew.crew_log.projection_kernel import Checkpoint, advance, projection_of, require_name
+from kiro_crew.crew_log.projection_kernel import (
+    Checkpoint,
+    advance,
+    carried_state,
+    projection_of,
+    require_name,
+)
 from kiro_crew.crew_log.projection_registry import _FOLDS
 from kiro_crew.crew_log.projection_session_log import open_session_log
 from kiro_crew.crew_log.projection_slot_memo import fold_slot_warm_revised
@@ -38,12 +45,14 @@ from kiro_crew.crew_log.projection_workers import (
     workers_units,
 )
 from kiro_crew.crew_log.projection_workstreams import _own_board_units, _workstreams_units
-from kiro_crew.crew_log.schema import KIND_SESSION
+from kiro_crew.crew_log.schema import KIND_SESSION, Entry
 from kiro_crew.crew_log.session_tree import OpenedRecord, log_rank_of
 from kiro_crew.crew_log.store import (
     session_units_for_slot,
     unit_header_created_at,
+    unit_header_slot,
     unit_opened_previous,
+    unit_opened_session_key,
     unit_opening,
 )
 
@@ -66,11 +75,11 @@ def fold_slot_checkpoint(name: str, unit_ids: Sequence[str], *, slot: str = "") 
     creation, and a unit with no crew log is skipped rather than refused -- a slot
     whose oldest unit was collected by retention still folds the ones it has.
 
-    A ``seq`` is comparable only WITHIN one file, so the guard :func:`advance`
-    applies is RE-BASED per unit: the state carries forward across units while the
-    seq restarts at each one. Without that, the second unit's entries would all sit
-    at or below the first unit's seq and be refused as a re-fold -- the collision
-    ``advance`` exists to name, arriving here for a legitimate reason.
+    A ``seq`` is comparable only WITHIN one file, so the position is RE-BASED per
+    unit: the state carries forward across units while the seq restarts at each one.
+    A single seq guard across them would refuse the second unit's entries as a
+    re-fold -- the collision :func:`advance` exists to name, arriving here for a
+    legitimate reason.
 
     The returned ``last_seq`` is the last entry folded from the NEWEST unit, which
     is the only figure a later read of the same slot can compare against; it is 0
@@ -85,23 +94,110 @@ def fold_slot_checkpoint(name: str, unit_ids: Sequence[str], *, slot: str = "") 
 
     *slot* is handed to a fold that declares ``bind_slot``, so a slot-keyed fold
     knows which slot it answers for before the first entry instead of guessing
-    it from that entry.
+    it from that entry. It also names whose ``session/carried`` entries apply: one
+    carried for this fold and slot replaces the state, so the units before it stop
+    changing the answer (:func:`~kiro_crew.crew_log.projection_kernel.carried_state`).
+    """
+    return fold_slot_checkpoints((name,), unit_ids, slot=slot)[name]
+
+
+def _from_record_one(unit_id: str) -> "Iterator[Entry] | None":
+    """Every entry of *unit_id* from its first record, or ``None`` when it has no log.
+
+    The one whole-unit read the cold slot folds below share
+    (:func:`fold_slot_checkpoints`, :func:`fold_joined_checkpoint`), each folding a
+    slot's units from record 1. ``test_crew_log_read_budget_gaps.py`` pins this file's
+    whole-unit read call sites, and this is one of them.
+    """
+    handle = open_session_log(unit_id)
+    if handle is None:
+        return None
+    return handle.iter_from(1, known=KNOWN_TYPES)
+
+
+def fold_slot_checkpoints(
+    names: Sequence[str], unit_ids: Sequence[str], *, slot: str = ""
+) -> "dict[str, Checkpoint]":
+    """:func:`fold_slot_checkpoint` for several folds over the SAME units, in one pass.
+
+    One read of every unit however many folds ask, which is what a carry needs when
+    several folds have no warm cell (:func:`carried_fold_states`). Each fold keeps its
+    own state and sees every entry in the order the single-fold form gives it, so each
+    answer is that form's answer; a single fold is this with one name.
+    """
+    specs = {name: _FOLDS[require_name(name)] for name in names}
+    states: dict[str, dict[str, Any]] = {}
+    for name, fold_spec in specs.items():
+        state = fold_spec.start()
+        if slot and fold_spec.bind_slot is not None:
+            fold_spec.bind_slot(state, slot)
+        states[name] = state
+    reached = 0
+    for unit_id in unit_ids:
+        entries = _from_record_one(unit_id)
+        if entries is None:
+            continue
+        last = 0
+        for entry in entries:
+            for name, fold_spec in specs.items():
+                carried = carried_state(entry, name, slot) if slot else None
+                if carried is not None:
+                    states[name] = carried
+                else:
+                    fold_spec.step(states[name], entry)
+            last = entry.seq
+        reached = last
+    return {name: Checkpoint(name=name, last_seq=reached, state=states[name]) for name in specs}
+
+
+def fold_joined_checkpoint(name: str, unit_ids: Sequence[str], *, slot: str) -> "Checkpoint | None":
+    """:func:`fold_slot_checkpoint` over a join that leads with another spelling's units.
+
+    The ledger carry's fold when the slot's readers join units headed with another
+    spelling of it (:func:`~kiro_crew.session_ledger.ledger_carry_units`). Those units
+    come first, and that spelling is a slot of its own whose newest unit may carry ITS
+    ledger over units retention has since collected. A fold of *slot* skips that carry,
+    so here a carry a unit holds for its OWN header's slot replaces the state too, while
+    the fold is still inside the leading run of units headed with that one spelling: the
+    state there holds nothing but that spelling's earlier units, which is exactly what
+    its carry replaces. A carry for *slot* applies anywhere, as in the plain fold.
+
+    ``None`` when a unit headed with some other spelling, past that leading run, holds a
+    carry for its own slot: replacing the state there would drop what the units before it
+    folded, and folding over the carry would miss what it took over. The caller carries
+    nothing then, so nothing is closed and every unit stays.
     """
     fold_spec = _FOLDS[require_name(name)]
     state = fold_spec.start()
-    if slot and fold_spec.bind_slot is not None:
+    if fold_spec.bind_slot is not None:
         fold_spec.bind_slot(state, slot)
     reached = 0
+    lead = ""
+    leading = True
     for unit_id in unit_ids:
-        handle = open_session_log(unit_id)
-        if handle is None:
+        entries = _from_record_one(unit_id)
+        if entries is None:
             continue
-        grown = advance(
-            Checkpoint(name=name, last_seq=0, state=state),
-            handle.iter_from(1, known=KNOWN_TYPES),
-        )
-        state = grown.state
-        reached = grown.last_seq
+        own = unit_header_slot(KIND_SESSION, unit_id) or ""
+        if own == slot:
+            own = ""
+        if own and leading and not lead:
+            lead = own
+        if own != lead:
+            leading = False
+        last = 0
+        for entry in entries:
+            carried = carried_state(entry, name, slot)
+            if carried is None and own:
+                carried = carried_state(entry, name, own)
+                if carried is not None and not leading:
+                    return None
+            if carried is not None:
+                state = carried
+            else:
+                fold_spec.step(state, entry)
+            last = entry.seq
+        reached = last
     return Checkpoint(name=name, last_seq=reached, state=state)
 
 
@@ -172,6 +268,99 @@ def read_slot_state(
     # Revision 0, below every cell's: a consumer that keeps the highest revision per
     # (key, fold) must never prefer this one-off value over the shared cell's.
     return fold_slot_checkpoint(require_name(name), units, slot=slot), 0
+
+
+def carried_fold_states(
+    slot: str, newest: str, names: "Sequence[str]" = tuple(CARRIED_FOLD_NAMES)
+) -> "dict[str, Checkpoint] | None":
+    """Each of *names*' own state for *slot*, with *newest* folded LAST: every carried
+    fold unless a caller names fewer.
+
+    What the ``session/carried`` entries written into *newest* record. Each fold is read
+    over the units its owner names (:func:`_carried_units`) with *newest* moved to the
+    end: the carry is written there, a reader folds that unit after the others, and the
+    state at the carry is the one those others led to. ``workers`` and ``worker`` are
+    included as cells of their own -- :func:`read_slot_projection` serves them merged,
+    but a carry replaces one cell. A tree fold is included for the tree *slot* roots,
+    over the units :func:`read_tree_projection` reads. No ``also_slots``: another slot's
+    unit carries that slot's own state.
+
+    A warm cell or a savepoint answers where one exists (``cold=False``); the folds left
+    cold are then folded together, one pass per distinct unit list, so a slot whose
+    cells are all cold is read once per list rather than once per fold. The ledger whose
+    join leads with units of another spelling that may hold that spelling's own carry is
+    folded cold through :func:`fold_joined_checkpoint`, which applies it. ``None`` when an
+    owner does not name *newest* at all, or that fold cannot apply such a carry: a carry
+    no reader of that fold would meet is not a carry, and nothing is written.
+    """
+    from kiro_crew.crew_log.projection_slot_memo import SlotFoldNotReady
+
+    states: dict[str, Checkpoint] = {}
+    cold: dict[tuple[str, ...], list[str]] = {}
+    for name in sorted(names):
+        owned = _carried_units(slot, name, newest)
+        if newest not in owned:
+            return None
+        units = tuple(unit for unit in owned if unit != newest) + (newest,)
+        joins_carries = name == LEDGER_FOLD_NAME and _may_hold_their_own_carry(
+            other_spelling_units(slot, units)
+        )
+        if joins_carries:
+            joined = fold_joined_checkpoint(name, units, slot=slot)
+            if joined is None:
+                return None
+            states[name] = joined
+            continue
+        try:
+            states[name] = fold_slot_warm_revised(name, units, slot=slot, cold=False)[0]
+        except SlotFoldNotReady:
+            cold.setdefault(units, []).append(name)
+    for units, names in cold.items():
+        states.update(fold_slot_checkpoints(names, units, slot=slot))
+    return states
+
+
+def ledger_units_of_other_spellings(slot: str, newest: str) -> "tuple[str, ...]":
+    """The units the ledger carry into *newest* joins that are headed with another spelling.
+
+    What a slot's FIRST unit carries over: it has no older unit of its own, and a ledger
+    reader in it folds these before it (:func:`~kiro_crew.session_ledger.ledger_carry_units`).
+    """
+    return other_spelling_units(slot, session_ledger.ledger_carry_units(slot, newest))
+
+
+def other_spelling_units(slot: str, units: "Sequence[str]") -> "tuple[str, ...]":
+    """*units* without the ones *slot* heads itself: the ones a join takes from other spellings."""
+    own = set(session_units_for_slot(slot))
+    return tuple(unit for unit in units if unit not in own)
+
+
+def _may_hold_their_own_carry(units: "Sequence[str]") -> bool:
+    """Whether any of *units* can hold a ledger carry for its own slot.
+
+    A ledger carry is written only into a unit whose opening states a session key
+    (:func:`~kiro_crew.session_ledger.ledger_carry_units`), so a unit whose opening states
+    none (an older build's, or a raw channel key's) holds none. One that cannot be read
+    may, so it counts.
+    """
+    return any(unit_opened_session_key(KIND_SESSION, unit) != "" for unit in units)
+
+
+def _carried_units(slot: str, name: str, newest: str) -> "tuple[str, ...]":
+    """The units the carried fold *name* is read over for *slot*: the ones its reader folds.
+
+    A slot fold's owner names them (:func:`_slot_units_for_fold`). A tree fold's reader
+    is :func:`read_tree_projection`, which folds the root board's own units
+    (:func:`tree_fold_units`) with *slot* as the root. The ledger's readers also join the
+    units headed with a caller's own spelling of the slot, so its carry is read over that
+    join, which takes the session key *newest*'s opening records
+    (:func:`~kiro_crew.session_ledger.ledger_carry_units`).
+    """
+    if name in TREE_PROJECTION_NAMES:
+        return tree_fold_units(slot, name)[0]
+    if name == LEDGER_FOLD_NAME:
+        return session_ledger.ledger_carry_units(slot, newest)
+    return _slot_units_for_fold(slot, name)
 
 
 #: Per ``(data home, crewmate slot)``, the part revisions the last ``workers`` read
@@ -523,14 +712,19 @@ def fold_tree_checkpoint(name: str, root: str) -> Checkpoint:
 
     The refused-unit count is NOT returned here. It belongs to the rendered value (the
     fold's ``dropped``), and it is folded in as the state's own ``omitted`` so that a
-    checkpoint resumed from a savepoint cannot read it as zero.
+    checkpoint resumed from a savepoint cannot read it as zero. It is added AFTER the
+    units, so a ``session/carried`` met on the way, which replaces the state, does not
+    take it with the state it replaces.
+
+    The root is also the slot a ``session/carried`` names (``carried_state``): the root
+    board's newest unit carries the tree over the units before it, and this applies it
+    the way :func:`read_tree_projection`'s cell does.
     """
     fold_spec = _FOLDS[require_name(name)]
     units, dropped = tree_fold_units(root, name)
     state = fold_spec.start()
     if fold_spec.bind_slot is not None:
         fold_spec.bind_slot(state, root)
-    state["omitted"] = state.get("omitted", 0) + dropped
     reached = 0
     for unit_id in units:
         handle = open_session_log(unit_id)
@@ -539,9 +733,11 @@ def fold_tree_checkpoint(name: str, root: str) -> Checkpoint:
         grown = advance(
             Checkpoint(name=name, last_seq=0, state=state),
             handle.iter_from(1, known=KNOWN_TYPES),
+            slot=root,
         )
         state = grown.state
         reached = grown.last_seq
+    state["omitted"] = state.get("omitted", 0) + dropped
     return Checkpoint(name=name, last_seq=reached, state=state)
 
 
@@ -550,7 +746,9 @@ def read_tree_projection(root: str, name: str) -> Projection:
 
     Folded over the root's own units (:func:`tree_fold_units`) in the root's warm cell,
     the same cell a slot fold uses: a read with nothing new appended reads no entry, and
-    after a restart the fold resumes from its savepoint.
+    after a restart the fold resumes from its savepoint. The cell is keyed by the root as
+    its slot, so a ``session/carried`` the root's newest unit holds for this fold
+    replaces the state, and the root's older units may be collected.
 
     Its production caller is the dashboard controller:
     :meth:`kiro_crew.dashboard.handlers.member_dashboard_fields.LivePage._read_trees`,
