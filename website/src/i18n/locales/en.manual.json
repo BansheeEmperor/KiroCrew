@@ -5159,6 +5159,10 @@
       "source_agent": "Agent resources",
       "reason_not_loaded": "Not included: this chat's steering load doesn't pick up this file",
       "reason_folder_cap": "Not included: the folder steering section was already full",
+      "reason_switched_off": "Switched off for this chat",
+      "switch_label": "Use {{name}} in this chat",
+      "switch_unavailable": "Can't be switched off here: the agent harness loads this file itself",
+      "switch_note": "A switch takes effect from this chat's next new session, or after it compacts.",
       "reason_harness_native": "Loaded by the agent harness, which applies its own rules for when it is included",
       "reason_member_briefing": "This crewmate's briefing decides whether it is included"
     },

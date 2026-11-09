@@ -399,6 +399,7 @@ async def test_a_codex_chat_lists_global_steering_as_not_reaching_it(home, monke
         "applies": "always",
         "reaches": "no",
         "reason": "harness_has_no_path",
+        "switch": "none",
     }
 
 

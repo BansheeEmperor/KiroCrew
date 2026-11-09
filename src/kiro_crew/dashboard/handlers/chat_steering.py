@@ -72,12 +72,16 @@ def _plan_blocking(
 
     from kiro_crew import context as ctx
     from kiro_crew.context_assembly.agent_spec import steering_resource_documents
-    from kiro_crew.context_assembly.inclusion import _folder_steering_delivery_snapshot
+    from kiro_crew.context_assembly.inclusion import (
+        _folder_steering_delivery_snapshot,
+        without_steering_off,
+    )
     from kiro_crew.dashboard.handlers.steering import (
         _display_path,
         _redact_meta,
         list_steering_blocking,
     )
+    from kiro_crew.steering_off import steering_off_for
     from kiro_crew.steering_plan import chat_steering_plan
 
     # The member identity the context builder receives (``prompt_assembly``'s
@@ -87,8 +91,10 @@ def _plan_blocking(
         binding_project = project
     agent = None if is_member else _resolved_agent(slot, session_key, binding_project)
     listed = list_steering_blocking(Path(project) if project else None)["files"]
+    steering_off = steering_off_for(session_key)
     folder: list[str] = []
     folder_cut: list[str] = []
+    folder_resolved: dict[str, str] = {}
     if steering_dirs:
         # The same skip the turn takes: the trees a harness delivers, and the
         # documents the serving process's launch record names.
@@ -108,17 +114,27 @@ def _plan_blocking(
         # does not scale with the window): a document is in it when its header is.
         # A member chat's essentials envelope decides its folder guides instead, so
         # it renders nothing here and the plan marks those rows ``briefing``.
+        # Rendered without the files this chat switched off, as the turn renders it;
+        # those still get a row, which the plan marks switched off.
         scrub = ctx._neutralize_structural_markers
         section = (
             ""
             if is_member
             else ctx.render_folder_steering(
-                collection, max_chars=ctx._resolve_caps(None).steering, scrub=scrub
+                without_steering_off(collection, steering_off),
+                max_chars=ctx._resolve_caps(None).steering,
+                scrub=scrub,
             )
         )
         for path, _body in collection.documents:
-            kept = is_member or f"# {scrub(path)}\n" in section
-            (folder if kept else folder_cut).append(_redact_meta(_display_path(path)))
+            display = _redact_meta(_display_path(path))
+            folder_resolved[display] = _resolved_str(path)
+            kept = (
+                is_member
+                or folder_resolved[display] in steering_off
+                or f"# {scrub(path)}\n" in section
+            )
+            (folder if kept else folder_cut).append(display)
     loader = [
         (_redact_meta(_display_path(path)), resolved, body is not None)
         for path, resolved, body in (
@@ -130,6 +146,8 @@ def _plan_blocking(
         folder_documents=folder,
         folder_cut=folder_cut,
         loader_documents=loader,
+        folder_resolved=folder_resolved,
+        steering_off=steering_off,
         provider_type=provider_type,
         native_steering=native_steering,
         project=project,
@@ -138,21 +156,126 @@ def _plan_blocking(
     )
 
 
+def _resolved_str(path: str) -> str:
+    """*path* resolved, the spelling :mod:`kiro_crew.steering_off` stores."""
+    from pathlib import Path
+
+    try:
+        return str(Path(path).resolve())
+    except (OSError, RuntimeError):
+        return path
+
+
+def _public(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """*rows* without the resolved paths the switch route matches on."""
+    return [{k: v for k, v in row.items() if k != "resolved"} for row in rows]
+
+
 async def api_chat_slot_steering(request: web.Request) -> web.Response:
     """List the steering files this chat receives, where each comes from, and why."""
+    found = await _chat_rows(request, "slot_steering")
+    if isinstance(found, web.Response):
+        return found
+    provider_type, _session_key, rows = found
+    return web.json_response({"provider": provider_type, "files": _public(rows)})
+
+
+async def api_chat_slot_steering_switch(request: web.Request) -> web.Response:
+    """Switch one steering file off (or back on) for this chat.
+
+    Body ``{"path": <a row's display path>, "off": bool}``. Only a row whose text Crew
+    writes can switch (``switch`` is ``on`` or ``off``); any other answers 409
+    ``not_switchable``. Stores the row's resolved path, never a body, and answers
+    the list as it now reads.
+    """
+    import asyncio
+
+    from kiro_crew.dashboard.handlers._shared import (
+        read_bounded_json,
+        require_owner_dashboard_request,
+    )
+    from kiro_crew.dashboard.slot_ownership import slot_not_found
+    from kiro_crew.steering_off import SteeringOffStoreUnreadable, set_steering_off
+    from kiro_crew.steering_plan import SWITCH_OFF, SWITCH_ON
+
+    # Owner only: an agent's own internal-API credential must not reach the record
+    # the sandbox seals against it.
+    denied = await require_owner_dashboard_request(request, "slot_steering_switch")
+    if denied is not None:
+        return denied
+    body, body_err = await read_bounded_json(request)
+    if body_err is not None:
+        return body_err
+    assert body is not None  # read_bounded_json returns (dict, None) on success
+    path, off = body.get("path"), body.get("off")
+    if not isinstance(path, str) or not path or not isinstance(off, bool):
+        return web.json_response(
+            {"error": "path must be a non-empty string and off a boolean", "code": "invalid_body"},
+            status=400,
+        )
+    state: DashboardState = request.app["state"]
+    name = request.match_info["slot"]
+    authorized = state._slots.get(name)
+    found = await _chat_rows(request, "slot_steering_switch", session_gate=True)
+    if isinstance(found, web.Response):
+        return found
+    provider_type, session_key, rows = found
+    row = next(
+        (r for r in rows if r["path"] == path and r["switch"] in (SWITCH_ON, SWITCH_OFF)), None
+    )
+    if row is None:
+        return web.json_response(
+            {"error": "this file cannot be switched off for this chat", "code": "not_switchable"},
+            status=409,
+        )
+    # The slot the gate authorized, still the one under this name: a close and
+    # re-create while the rows were built would otherwise take this write.
+    if state._slots.get(name) is not authorized:
+        return slot_not_found()
+    try:
+        await asyncio.to_thread(set_steering_off, session_key, row["resolved"], off)
+    except SteeringOffStoreUnreadable as exc:
+        return web.json_response(
+            {
+                "error": f"the switch-off record cannot be read, so it was not changed: {exc}",
+                "code": "store_unreadable",
+            },
+            status=409,
+        )
+    found = await _chat_rows(request, "slot_steering_switch")
+    if isinstance(found, web.Response):
+        return found
+    provider_type, _session_key, rows = found
+    return web.json_response({"provider": provider_type, "files": _public(rows)})
+
+
+async def _chat_rows(
+    request: web.Request, operation: str, *, session_gate: bool = False
+) -> web.Response | tuple[str, str, list[dict[str, str]]]:
+    """``(provider_type, session_key, rows)`` for the request's chat, or a refusal.
+
+    *session_gate* is the write's gate: an app must own the session the slot is
+    bound to as well as the slot (``deny_app_slot_session_access``), as the other
+    per-slot writes require.
+    """
     from kiro_crew.crewmate_harness import CrewmateHarnessUnavailable
     from kiro_crew.dashboard.chat_handlers import _configured_backend_for_slot
     from kiro_crew.dashboard.chat_utils_slots import effective_session_key
     from kiro_crew.dashboard.handlers._shared import _slot_project, session_folder_steering_dirs
     from kiro_crew.dashboard.handlers.steering import _offload
-    from kiro_crew.dashboard.slot_ownership import deny_app_slot_access, slot_not_found
+    from kiro_crew.dashboard.slot_ownership import (
+        deny_app_slot_access,
+        deny_app_slot_session_access,
+        slot_not_found,
+    )
 
     state: DashboardState = request.app["state"]
     name = request.match_info["slot"]
     slot = state._slots.get(name)
     if slot is None:
         return slot_not_found()
-    denied = deny_app_slot_access(request.get("app", ""), slot, name, "slot_steering")
+    gate = deny_app_slot_session_access if session_gate else deny_app_slot_access
+    denied = gate(request.get("app", ""), slot, name, operation)
     if denied is not None:
         return denied
     session_key = effective_session_key(slot)
@@ -181,7 +304,7 @@ async def api_chat_slot_steering(request: web.Request) -> web.Response:
         provider_type,
         native_steering,
     )
-    return web.json_response({"provider": provider_type, "files": rows})
+    return provider_type, session_key, rows
 
 
 def _plan_for_provider(

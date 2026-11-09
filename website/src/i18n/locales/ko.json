@@ -11271,6 +11271,10 @@
       "source_agent": "에이전트 리소스",
       "reason_not_loaded": "포함되지 않음: 이 채팅의 스티어링 로드가 이 파일을 불러오지 않습니다",
       "reason_folder_cap": "포함되지 않음: 폴더 스티어링 섹션이 이미 가득 찼습니다",
+      "reason_switched_off": "이 채팅에서 꺼짐",
+      "switch_label": "이 채팅에서 {{name}} 사용",
+      "switch_unavailable": "여기서는 끌 수 없음: 에이전트 하네스가 이 파일을 직접 불러옵니다",
+      "switch_note": "전환은 이 채팅의 다음 새 세션부터, 또는 압축 후에 적용됩니다.",
       "reason_harness_native": "에이전트 하네스가 불러오며, 포함 시점은 자체 규칙으로 정합니다",
       "reason_member_briefing": "포함 여부는 이 크루메이트의 브리핑이 정합니다"
     },

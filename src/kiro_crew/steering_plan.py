@@ -28,7 +28,7 @@ which documents the bounded section kept. A member chat's folder guides are
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -51,6 +51,13 @@ REASON_LINK_NOT_ADMITTED: Final = "link_not_admitted"
 REASON_NOT_LOADED: Final = "not_loaded"
 REASON_FOLDER_CAP: Final = "folder_cap"
 REASON_HARNESS_HAS_NO_PATH: Final = "harness_has_no_path"
+REASON_SWITCHED_OFF: Final = "switched_off"
+
+#: Values of ``switch``: whether this chat can switch the file off.
+SWITCH_ON: Final = "on"
+SWITCH_OFF: Final = "off"
+SWITCH_UNAVAILABLE: Final = "unavailable"
+SWITCH_NONE: Final = "none"
 
 #: Values of a document's state in the Claude Code load.
 LOADER_KEPT: Final = "kept"
@@ -189,6 +196,8 @@ def chat_steering_plan(
     is_member: bool,
     folder_cut: Sequence[str] = (),
     loader_documents: Sequence[tuple[str, Path, bool]] = (),
+    folder_resolved: Mapping[str, str] | None = None,
+    steering_off: Collection[str] = frozenset(),
 ) -> list[dict[str, str]]:
     """One row per steering file this chat may receive.
 
@@ -198,9 +207,13 @@ def chat_steering_plan(
     the same spelling. A listed file the folder delivers (a folder that declares a
     tree the harness does not load) keeps one row, marked ``yes``.
     *loader_documents* is ``(display path, resolved path, kept)`` for each document
-    the Claude Code load admits.
+    the Claude Code load admits. *folder_resolved* maps a folder document's display
+    path to its resolved path, and *steering_off* holds the resolved paths this chat
+    switched off (:mod:`kiro_crew.steering_off`); the caller still lists those.
     """
     from kiro_crew import context as ctx
+
+    folder_resolved = folder_resolved or {}
 
     declared = (
         declared_steering_targets(agent, project)
@@ -252,29 +265,42 @@ def chat_steering_plan(
             if reaches == REACHES_NO and path in cut_by_folder:
                 reason = REASON_FOLDER_CAP
         seen.add(path)
+        crew_written = (path in via_folder and not is_member) or (
+            target is not None and target in used
+        )
         rows.append(
-            {
-                "name": str(entry.get("name") or ""),
-                "path": path,
-                "source": source,
-                "applies": applies,
-                "reaches": reaches,
-                "reason": reason,
-            }
+            _switched(
+                {
+                    "name": str(entry.get("name") or ""),
+                    "path": path,
+                    "source": source,
+                    "applies": applies,
+                    "reaches": reaches,
+                    "reason": reason,
+                },
+                resolved=str(target) if target is not None else folder_resolved.get(path, ""),
+                crew_written=crew_written,
+                steering_off=steering_off,
+            )
         )
     for display, resolved, kept in loader_documents if via_seam else ():
         if resolved in used or display in seen:
             continue
         seen.add(display)
         rows.append(
-            {
-                "name": display.replace("\\", "/").rsplit("/", 1)[-1],
-                "path": display,
-                "source": "agent",
-                "applies": _ALWAYS if kept else APPLIES_UNKNOWN,
-                "reaches": REACHES_YES if kept else REACHES_NO,
-                "reason": "" if kept else REASON_INCLUSION_WITHHELD,
-            }
+            _switched(
+                {
+                    "name": display.replace("\\", "/").rsplit("/", 1)[-1],
+                    "path": display,
+                    "source": "agent",
+                    "applies": _ALWAYS if kept else APPLIES_UNKNOWN,
+                    "reaches": REACHES_YES if kept else REACHES_NO,
+                    "reason": "" if kept else REASON_INCLUSION_WITHHELD,
+                },
+                resolved=str(resolved),
+                crew_written=True,
+                steering_off=steering_off,
+            )
         )
     for path, reaches, reason in [
         *((p, *folder_yes) for p in folder_documents),
@@ -284,13 +310,41 @@ def chat_steering_plan(
             continue
         seen.add(path)
         rows.append(
-            {
-                "name": path.replace("\\", "/").rsplit("/", 1)[-1],
-                "path": path,
-                "source": "folder",
-                "applies": _ALWAYS,
-                "reaches": reaches,
-                "reason": reason,
-            }
+            _switched(
+                {
+                    "name": path.replace("\\", "/").rsplit("/", 1)[-1],
+                    "path": path,
+                    "source": "folder",
+                    "applies": _ALWAYS,
+                    "reaches": reaches,
+                    "reason": reason,
+                },
+                resolved=folder_resolved.get(path, ""),
+                crew_written=not is_member,
+                steering_off=steering_off,
+            )
         )
     return rows
+
+
+def _switched(
+    row: dict[str, str], *, resolved: str, crew_written: bool, steering_off: Collection[str]
+) -> dict[str, str]:
+    """*row* with its ``switch`` state, and the verdict a switched-off file gets.
+
+    ``on``/``off`` where Crew writes the file's text, so excluding it holds;
+    ``unavailable`` where the harness loads it natively and Crew has no lever;
+    ``none`` where nothing sends it anyway. *resolved* rides along as ``resolved``
+    for the switch route and is dropped before the response.
+    """
+    if crew_written and resolved:
+        if resolved in steering_off:
+            row.update(reaches=REACHES_NO, reason=REASON_SWITCHED_OFF, switch=SWITCH_OFF)
+        else:
+            row["switch"] = SWITCH_ON
+    elif row["reaches"] == REACHES_HARNESS:
+        row["switch"] = SWITCH_UNAVAILABLE
+    else:
+        row["switch"] = SWITCH_NONE
+    row["resolved"] = resolved
+    return row

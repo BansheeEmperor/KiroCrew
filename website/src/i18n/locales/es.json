@@ -11771,6 +11771,10 @@
       "source_agent": "Recursos del agente",
       "reason_not_loaded": "No incluido: el steering de este chat no carga este archivo",
       "reason_folder_cap": "No incluido: la sección de steering de la carpeta ya estaba llena",
+      "reason_switched_off": "Desactivado para este chat",
+      "switch_label": "Usar {{name}} en este chat",
+      "switch_unavailable": "No se puede desactivar aquí: el arnés del agente carga este archivo por sí mismo",
+      "switch_note": "Un interruptor se aplica desde la próxima sesión nueva de este chat, o después de que se compacte.",
       "reason_harness_native": "Lo carga el arnés del agente, que aplica sus propias reglas sobre cuándo se incluye",
       "reason_member_briefing": "El briefing de este crewmate decide si se incluye"
     },

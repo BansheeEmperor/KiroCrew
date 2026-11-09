@@ -11271,6 +11271,10 @@
       "source_agent": "代理资源",
       "reason_not_loaded": "未包含：此聊天的 steering 加载不会读取此文件",
       "reason_folder_cap": "未包含：文件夹 steering 部分已满",
+      "reason_switched_off": "已在此聊天中关闭",
+      "switch_label": "在此聊天中使用 {{name}}",
+      "switch_unavailable": "无法在此关闭：代理运行框架会自行加载此文件",
+      "switch_note": "切换从此聊天的下一个新会话开始生效，或在压缩后生效。",
       "reason_harness_native": "由智能体运行框架加载，并按其自身规则决定何时包含",
       "reason_member_briefing": "是否包含由此团队成员的简报决定"
     },

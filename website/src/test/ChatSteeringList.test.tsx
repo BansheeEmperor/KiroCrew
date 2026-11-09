@@ -12,13 +12,18 @@ import { sseSlots, updateSlot } from '../store/dashboardSlice'
 import { createTestStore, renderWithProviders } from './helpers'
 
 const steeringMock = vi.fn()
+const switchMock = vi.fn()
 vi.mock('../api/client', () => ({
-  api: { chatSlotSteering: (slot: string) => steeringMock(slot) },
+  api: {
+    chatSlotSteering: (slot: string) => steeringMock(slot),
+    chatSlotSteeringSwitch: (slot: string, path: string, off: boolean) => switchMock(slot, path, off),
+  },
 }))
 
 afterEach(() => {
   cleanup()
   steeringMock.mockReset()
+  switchMock.mockReset()
 })
 
 const data: ChatSteering = {
@@ -71,5 +76,33 @@ describe('ChatSteeringList', () => {
       store.dispatch(updateSlot({ key: 'chat-1', project: '/p/two' }))
     })
     await vi.waitFor(() => expect(steeringMock).toHaveBeenCalledTimes(2))
+  })
+})
+
+describe('switching a file off for this chat', () => {
+  const crewWritten = { name: 'style.md', path: '~/.kiro/steering/style.md', source: 'global' as const, applies: 'always' as const }
+
+  it('switches a file Crew writes off, and the row says so', async () => {
+    steeringMock.mockResolvedValue({ provider: 'claude_code', files: [{ ...crewWritten, reaches: 'yes', reason: '', switch: 'on' }] })
+    switchMock.mockResolvedValue({
+      provider: 'claude_code',
+      files: [{ ...crewWritten, reaches: 'no', reason: 'switched_off', switch: 'off' }],
+    })
+    renderWithProviders(<ChatSteeringList slot="chat-1" />)
+    const toggle = await screen.findByRole('switch', { name: 'Use style.md in this chat' })
+    expect(toggle).toHaveAttribute('aria-checked', 'true')
+    act(() => toggle.click())
+    expect(switchMock).toHaveBeenCalledWith('chat-1', '~/.kiro/steering/style.md', true)
+    await screen.findByText('Switched off for this chat')
+    expect(screen.getByRole('switch', { name: 'Use style.md in this chat' })).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('offers no switch where the harness loads the file, and says why', () => {
+    render(<ChatSteeringListView
+      data={{ provider: 'kas', files: [{ ...crewWritten, reaches: 'harness', reason: 'harness_native', switch: 'unavailable' }] }}
+      onSwitch={() => {}}
+    />)
+    expect(screen.queryByRole('switch')).toBeNull()
+    expect(screen.getByText("Can't be switched off here: the agent harness loads this file itself")).toBeInTheDocument()
   })
 })
