@@ -41,8 +41,10 @@ vi.mock('../pages/chat/ChatSettings', () => ({ loadChatConfig: () => ({ contentW
 // SidePanel: stub the component (pulls in xterm etc.) but keep the space
 // contract deterministic: threshold = 320 + 560 = 880, reopen at 920.
 vi.mock('../pages/chat/SidePanel', () => ({
-  default: ({ fillWidth }: { fillWidth?: number }) => (
-    <div data-testid="side-panel" data-fill-width={fillWidth ?? ''} />
+  default: ({ fillWidth, onPutPinInComposer }: { fillWidth?: number; onPutPinInComposer?: (ts: string) => void }) => (
+    <div data-testid="side-panel" data-fill-width={fillWidth ?? ''}>
+      <button type="button" aria-label="Put in composer" data-testid="put-pin" onClick={() => onPutPinInComposer?.('pin-ts')} />
+    </div>
   ),
   SIDE_PANEL_MIN_W: 320,
   SIDE_PANEL_RESERVED_W: 560,
@@ -332,6 +334,33 @@ describe('ChatPage — session-header activity toggle (relocated from the top ba
     // which the on-screen backstop sees (its matrix covers that box), and a
     // bottom-docked panel leaves the transcript on screen.
     expect(paneCovered(document)).toBe(false)
+  })
+
+  it('Put in composer closes a panel that fills the chat column, and leaves one beside the chat open', async () => {
+    const { store } = renderWithSlot()
+    fireEvent.click(await screen.findByLabelText('Open activity panel'))
+    fireEvent.click(await screen.findByTestId('put-pin'))
+    expect(store.getState().chat.activityOpen).toBe(true)
+    resizeTo(800) // 800 - 236 - 260 = 304 < 640: the panel fills the chat column
+    fireEvent.click(await screen.findByTestId('put-pin'))
+    expect(store.getState().chat.activityOpen).toBe(false)
+  })
+
+  it('Put in composer leaves a bottom-docked panel open on a narrow window, where the composer stays on screen', async () => {
+    const slot = document.createElement('div') // the shell's panel column; bottom docking lives there
+    slot.id = 'activity-bar-slot'
+    document.body.appendChild(slot)
+    setSidePanelDock('bottom')
+    try {
+      const { store } = renderWithSlot()
+      resizeTo(800)
+      fireEvent.click(await screen.findByLabelText('Open activity panel'))
+      await waitFor(() => expect(slot.contains(screen.getByTestId('side-panel'))).toBe(true))
+      fireEvent.click(screen.getByTestId('put-pin'))
+      expect(store.getState().chat.activityOpen).toBe(true)
+    } finally {
+      act(() => { setSidePanelDock('right') })
+    }
   })
 
   it('switches an already-open panel from beside to fill on resize, without remounting it', async () => {
