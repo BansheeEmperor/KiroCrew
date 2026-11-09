@@ -593,7 +593,33 @@ async def background_turn(
         from kiro_crew.agent_sdk.agent_specs import authored_spec_toolless_verdict
 
         verdict = await asyncio.to_thread(authored_spec_toolless_verdict, BACKGROUND_AGENT)
+        # Only this first read can vouch for a live session: one started before a
+        # rewrite may have loaded the old file.
         lite_before_spawn = verdict is True
+        if verdict is False:
+            # Another tool may have written its server into Crew's own file; put the
+            # template back and let a second read decide.
+            from kiro_crew.agent import repair_lite_agent_spec
+
+            if await asyncio.to_thread(repair_lite_agent_spec):
+                # The two sessions that outlive a turn can start without this read
+                # (``_ensure_background``, the next conversation a turn opens), so
+                # either may still run on the old file; a turn running on one ends.
+                # This turn's own is judged after its start.
+                from kiro_crew.session import CONSOLIDATE_KEY
+
+                for other in (BACKGROUND_KEY, CONSOLIDATE_KEY):
+                    if other == key:
+                        continue
+                    try:
+                        await sessions.reset(other)
+                    except Exception:
+                        logger.warning(
+                            "Session %s reset after a lite spec rewrite failed",
+                            other,
+                            exc_info=True,
+                        )
+            verdict = await asyncio.to_thread(authored_spec_toolless_verdict, BACKGROUND_AGENT)
         if verdict is False:
             # A spec that mounts something is refused before ``get_or_create``:
             # starting the session would run what it names (an MCP server's startup

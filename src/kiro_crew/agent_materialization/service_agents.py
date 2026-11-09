@@ -4,13 +4,15 @@
 agent a non-operator channel sender talks to, a trust boundary that mounts nothing;
 ``kirocrew-knowledge`` runs the Knowledge Library's extraction; ``kirocrew-research``
 is the Research Lab's per-cycle worker, derived from the default template so it
-inherits the governance ceiling. Each is rewritten on every rebuild, and the
-knowledge spec also before each knowledge worker spawn when the file on disk is not
-its template (:func:`repair_knowledge_agent_spec`).
+inherits the governance ceiling. Each is rewritten on every rebuild. The knowledge
+spec is also rewritten before each knowledge worker spawn when the file on disk is not
+its template (:func:`repair_knowledge_agent_spec`), and the lite spec before a
+background turn its helper would otherwise refuse (:func:`repair_lite_agent_spec`).
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -239,20 +241,24 @@ def _install_mate_worker_agent() -> None:
     _write_mate_service_spec(_MATE_WORKER_AGENT_FILENAME, config, "_install_mate_worker_agent")
 
 
-def _install_lite_agent_fallback() -> None:
-    """Write a bare kirocrew-lite config (cheap background agent)."""
-    lite_path = agent_mod.kiro_agents_dir_path() / _LITE_AGENT_FILENAME
-    lite_config = {
+def _lite_agent_config() -> dict[str, Any]:
+    """The ``kirocrew-lite`` spec as its installer and its repair build it, before the tail."""
+    return {
         "name": "kirocrew-lite",
         "model": agent_mod._background_agent_model(),
         "tools": [],
         "mcpServers": {},
         "prompt": "",
     }
+
+
+def _install_lite_agent_fallback() -> None:
+    """Write a bare kirocrew-lite config (cheap background agent)."""
+    lite_path = agent_mod.kiro_agents_dir_path() / _LITE_AGENT_FILENAME
     # Mounts nothing, so the tail has no grant to govern; what it adds here is the
     # ``includeMcpJson`` pin, without which kiro-cli merges the global ``mcp.json``.
     auto_approve.write_governed_spec(
-        lite_path, lite_config, source="_install_lite_agent_fallback", kas_policy="none"
+        lite_path, _lite_agent_config(), source="_install_lite_agent_fallback", kas_policy="none"
     )
     # Cheap model for the claude_code (CC) provider. kiro-cli resolves the lite
     # model from `model` via --agent; the CC backend can't, so the provider
@@ -383,7 +389,7 @@ def repair_knowledge_agent_spec(*, tolerate_registered_injection: bool = False) 
     path = agent_mod.kiro_agents_dir_path() / _KNOWLEDGE_AGENT_FILENAME
     try:
         config = _governed_knowledge_template("repair_knowledge_agent_spec")
-        drift, on_disk = _spec_drift(path, config)
+        drift, on_disk = _spec_drift(path, config, operation="knowledge_spec_repair")
         if drift is None:
             return False
         if tolerate_registered_injection:
@@ -413,6 +419,56 @@ def repair_knowledge_agent_spec(*, tolerate_registered_injection: bool = False) 
     return True
 
 
+def repair_lite_agent_spec() -> bool:
+    """Rewrite an existing ``kirocrew-lite.json`` from its template unless it already is it.
+
+    The background helper refuses to start a ``kirocrew-lite`` session on a spec that
+    mounts anything (``llm_helpers_parts.background_turns.background_turn``), and only
+    a rebuild re-derives the file, so a tool that writes its own MCP server into every
+    spec in the agents directory stops every background turn, history consolidation
+    included, until then. The helper calls this when it is about to refuse, then reads
+    the spec again, and that read still decides whether a session starts.
+
+    Compared and rewritten as :func:`repair_knowledge_agent_spec` does, with a WARNING
+    naming the top-level keys that differed and never their values. A missing file is
+    not created: the helper only gets here then because another spec claims the name,
+    and one more claimant would leave the harness a choice. Returns True when it
+    rewrote the file. Never raises. Blocking.
+    """
+    path = agent_mod.kiro_agents_dir_path() / _LITE_AGENT_FILENAME
+    try:
+        if not os.path.lexists(path):
+            return False
+        config = _lite_agent_config()
+        auto_approve.govern_spec(
+            config,
+            agent_filename=_LITE_AGENT_FILENAME,
+            source="repair_lite_agent_spec",
+            kas_policy="none",
+        )
+        drift, _on_disk = _spec_drift(path, config, operation="lite_spec_repair")
+        if drift is None:
+            return False
+        auto_approve.write_governed_spec(
+            path, config, source="repair_lite_agent_spec", kas_policy="none"
+        )
+    except agent_mod.SharedAgentHomeRefused:
+        agent_mod.logger.debug("lite agent spec repair declined: %s", path, exc_info=True)
+        return False
+    except Exception:
+        agent_mod.logger.warning(
+            "Could not rewrite the background agent spec %s from its template", path, exc_info=True
+        )
+        return False
+    agent_mod.logger.warning(
+        "Background agent spec %s was not the spec Kiro Crew writes (%s); rewrote it from "
+        "the template",
+        path,
+        drift,
+    )
+    return True
+
+
 def _governed_knowledge_template(source: str) -> dict[str, Any]:
     """The knowledge spec as its writers put it on disk, governed tail included."""
     config = _knowledge_agent_config()
@@ -422,7 +478,9 @@ def _governed_knowledge_template(source: str) -> dict[str, Any]:
     return config
 
 
-def _spec_drift(path: Path, expected: dict[str, Any]) -> tuple[str | None, object]:
+def _spec_drift(
+    path: Path, expected: dict[str, Any], *, operation: str
+) -> tuple[str | None, object]:
     """How the spec at *path* differs from *expected* (``None`` when it does not), and the spec.
 
     Read through the hardened reader, so a link planted at the name is screened
@@ -432,7 +490,7 @@ def _spec_drift(path: Path, expected: dict[str, Any]) -> tuple[str | None, objec
     """
     try:
         on_disk = agent_discovery.read_agent_spec_strict(
-            path, operation="knowledge_spec_repair", source="unknown"
+            path, operation=operation, source="unknown"
         )
     except FileNotFoundError:
         return "missing", None

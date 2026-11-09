@@ -635,8 +635,10 @@ class TestToollessTurnReadsTheGuestSpecOnDisk:
 
 class TestBackgroundTurnRefusesATooledLiteSpec:
     """A ``kirocrew-lite`` turn runs only on a spec that mounts nothing, on every
-    turn; otherwise the session is reset and released and the acquire fails, so
-    the caller reads it as nothing sent."""
+    turn. A ``kirocrew-lite.json`` that mounts something is rewritten from its
+    template before the spawn; one that still mounts something is refused, its
+    session reset and released, and the acquire fails, so the caller reads it as
+    nothing sent."""
 
     @staticmethod
     def _install_lite(monkeypatch) -> Path:
@@ -655,6 +657,7 @@ class TestBackgroundTurnRefusesATooledLiteSpec:
             self.provider = provider
             self.new = new
             self.calls: list[str] = []
+            self.reset_keys: list[str] = []
 
         async def get_or_create(self, _key: str, **_kw: Any):
             self.calls.append("get_or_create")
@@ -663,8 +666,9 @@ class TestBackgroundTurnRefusesATooledLiteSpec:
         def get_agent(self, _key: str) -> str:
             return "kirocrew-lite"
 
-        async def reset(self, _key: str, **_kw: Any) -> None:
+        async def reset(self, key: str, **_kw: Any) -> None:
             self.calls.append("reset")
+            self.reset_keys.append(key)
 
         def release(self, _key: str) -> None:
             self.calls.append("release")
@@ -680,28 +684,112 @@ class TestBackgroundTurnRefusesATooledLiteSpec:
         client._native_skill_projection = None
         return SimpleNamespace(client=client, last_prompt_stats=None)
 
-    async def _run(self, sessions: Any) -> bool:
+    async def _run(self, sessions: Any, session_key: str | None = None) -> bool:
         from unittest.mock import patch
 
         from kiro_crew.llm_helpers import background_turn
 
         with patch("kiro_crew.dashboard.handlers.usage.persist_token_record_async"):
-            async with background_turn(sessions, task="t", agent="kirocrew-lite"):
+            async with background_turn(
+                sessions, task="t", agent="kirocrew-lite", session_key=session_key
+            ):
                 return True
 
+    @staticmethod
+    def _decline_repair(monkeypatch) -> None:
+        """Fail the pre-spawn rewrite the way a data home that does not own the
+        agents directory does, so a tooled spec stays tooled."""
+        from kiro_crew import agent as agent_module
+        from kiro_crew.agent_materialization import auto_approve
+
+        def refuse(*_a: Any, **_k: Any) -> None:
+            raise agent_module.SharedAgentHomeRefused("this data home does not own it")
+
+        monkeypatch.setattr(auto_approve, "write_governed_spec", refuse)
+
     def _tamper(self, monkeypatch, **changes: Any) -> None:
+        """Install the lite spec, apply *changes*, and decline its repair."""
         import json
 
         path = self._install_lite(monkeypatch)
         spec = json.loads(path.read_text())
         spec.update(changes)
         path.write_text(json.dumps(spec))
+        self._decline_repair(monkeypatch)
 
     def test_the_template_spec_runs(self, monkeypatch) -> None:
         self._install_lite(monkeypatch)
         sessions = self._Sessions(self._provider(), new=True)
         assert asyncio.run(self._run(sessions)) is True
         assert "reset" not in sessions.calls
+
+    def test_an_injected_server_is_rewritten_away_and_the_next_turn_runs(self, monkeypatch) -> None:
+        """A tool that writes its own server into every spec in the agents
+        directory: the file is put back to its template. With no projection the
+        check only re-reads that file, so the turn right after the rewrite, whose
+        session may have started on the old file, is refused and reset; the next
+        turn starts."""
+        import json
+
+        import pytest
+
+        path = self._install_lite(monkeypatch)
+        template = json.loads(path.read_text())
+        injected = {
+            **template,
+            "tools": ["@creds-agent"],
+            "allowedTools": ["@creds-agent"],
+            "mcpServers": {"creds-agent": {"command": "creds", "args": ["mcp", "start-server"]}},
+            "permissions": {
+                "rules": [{"capability": "mcp", "match": ["creds-agent/*"], "effect": "allow"}]
+            },
+            "toolsSettings": {},
+        }
+        path.write_text(json.dumps(injected))
+        warm = self._Sessions(self._provider(), new=False)
+        with pytest.raises(RuntimeError, match="not acquired"):
+            asyncio.run(self._run(warm))
+        assert warm.calls == ["reset", "get_or_create", "reset", "release"]
+        assert warm.reset_keys == ["_consolidate", "_bg"]
+        assert json.loads(path.read_text()) == template
+        sessions = self._Sessions(self._provider(), new=True)
+        assert asyncio.run(self._run(sessions)) is True
+        assert "reset" not in sessions.calls
+
+    @pytest.mark.parametrize("turn_key", ["_consolidate", "memory-consolidation:x"])
+    def test_a_rewrite_resets_the_other_background_sessions(
+        self, monkeypatch, turn_key: str
+    ) -> None:
+        """``_bg`` and ``_consolidate`` outlive a turn and can start without the
+        pre-spawn read, so a rewrite made during any turn resets the ones that are
+        not that turn's own, before the turn's own refusal resets that."""
+        import json
+
+        path = self._install_lite(monkeypatch)
+        spec = json.loads(path.read_text())
+        path.write_text(json.dumps({**spec, "mcpServers": {"creds-agent": {"command": "creds"}}}))
+        sessions = self._Sessions(self._provider(), new=True)
+        with pytest.raises(RuntimeError, match="not acquired"):
+            asyncio.run(self._run(sessions, session_key=turn_key))
+        others = [k for k in ("_bg", "_consolidate") if k != turn_key]
+        assert sessions.reset_keys == [*others, turn_key]
+        assert json.loads(path.read_text()) == spec
+
+    def test_the_read_after_the_rewrite_still_decides(self, monkeypatch) -> None:
+        """A rewrite the file does not keep (another writer puts its server back
+        at once) is refused before the session starts, as with no repair."""
+        import json
+
+        from kiro_crew import agent as agent_module
+
+        path = self._install_lite(monkeypatch)
+        spec = json.loads(path.read_text())
+        path.write_text(json.dumps({**spec, "mcpServers": {"creds-agent": {"command": "creds"}}}))
+        monkeypatch.setattr(agent_module, "repair_lite_agent_spec", lambda: True)
+        sessions = self._Sessions(self._provider(), new=True)
+        with pytest.raises(RuntimeError, match="not acquired"):
+            asyncio.run(self._run(sessions))
+        assert "get_or_create" not in sessions.calls
 
     def test_a_tooled_spec_on_a_cold_start_is_refused(self, monkeypatch) -> None:
         import pytest
@@ -745,6 +833,7 @@ class TestBackgroundTurnRefusesATooledLiteSpec:
 
         path = self._install_lite(monkeypatch)
         os.link(path, path.with_name("lite-hardlink.json.bak"))
+        self._decline_repair(monkeypatch)
         sessions = self._Sessions(self._provider(), new=True)
         with pytest.raises(RuntimeError, match="not acquired"):
             asyncio.run(self._run(sessions))
@@ -773,6 +862,7 @@ class TestBackgroundTurnRefusesATooledLiteSpec:
         with pytest.raises(RuntimeError, match="not acquired"):
             asyncio.run(self._run(sessions))
         assert sessions.calls == []
+        assert not (agents / agent_module._LITE_AGENT_FILENAME).exists(), "no third claimant"
 
     def test_a_missing_lite_spec_is_left_to_the_post_start_check(self) -> None:
         from kiro_crew.agent_sdk.agent_specs import authored_spec_toolless_verdict
