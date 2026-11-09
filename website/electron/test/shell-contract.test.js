@@ -221,6 +221,7 @@ test("the local-dashboard gate has exactly one spelling", () => {
     "first-run:use-remote-crew",
     "first-run:can-use-remote-crew",
     "relay-crew:open",
+    "relay-crew:close-all",
   ]) {
     assert.match(
       IPC_REGISTRAR_SOURCE,
