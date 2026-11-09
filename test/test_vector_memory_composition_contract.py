@@ -240,7 +240,7 @@ _STORE_MEMBERS = {
         get_episodic_context get_episodic_list get_events get_lessons get_lessons_context
         get_preferences_context get_rejection_stats get_retired_episodic get_semantic
         get_semantic_context has_any_decodable_lesson has_any_lesson has_episodic_text
-        has_pending_embeddings has_stored_embeddings import_memory init
+        has_pending_embeddings has_stored_embeddings import_memory init init_for_read
         invalidate_episode_content invalidate_semantic_content list_by_facets load_faiss_index log_reject_event
         memory_stats migrate_from_markdown promote_episodic_patterns
         propose_semantic_delete read_counters read_editable_history read_history_entries
@@ -374,6 +374,7 @@ _STORE_SIGNATURES = {
     "has_stored_embeddings": "(self) -> 'bool'",
     "import_memory": "(self, data: 'dict') -> 'dict[str, int]'",
     "init": "(self) -> 'None'",
+    "init_for_read": "(self) -> 'None'",
     "invalidate_episode_content": "(self) -> 'None'",
     "invalidate_semantic_content": "(self) -> 'None'",
     "list_by_facets": "(self, filters: 'Mapping[str, str] | None' = None, *, kind: 'str' = '', limit: 'int' = 50, offset: 'int' = 0) -> 'list[dict]'",

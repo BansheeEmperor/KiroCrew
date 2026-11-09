@@ -607,6 +607,8 @@ class VectorMemoryStore:
         self._db: sqlite3.Connection | None = None
         # Whether _db's own close is kept from deleting the -wal (sqlite_wal.keep_wal_on_close).
         self._wal_kept_on_close = False
+        # True only while init_for_read runs init(), which then opens the file mode=ro.
+        self._opening_for_read = False
         # POSIX permits replacing an open SQLite file. Private V2 stores hold a
         # shared lock outside the swappable store directory for the full
         # connection lifetime so startup restore can refuse rather than move a
@@ -784,6 +786,7 @@ class VectorMemoryStore:
     _secret_bearing_files = _lifecycle._secret_bearing_files
     _restrict_memory_files = _lifecycle._restrict_memory_files
     init = _lifecycle.init
+    init_for_read = _lifecycle.init_for_read
     _init_database = _lifecycle._init_database
     _schema_steps = _lifecycle._schema_steps
     _apply_migration = _lifecycle._apply_migration

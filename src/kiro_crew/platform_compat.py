@@ -298,6 +298,7 @@ if TYPE_CHECKING:  # the forwarded names, visible to type checkers and IDEs
         is_executable_file,
         is_readonly_filesystem,
         mount_identity,
+        open_file_for_shared_read,
         open_lock_file_for_sweep,
         open_log_file_for_tail,
         path_volume_is_remote,

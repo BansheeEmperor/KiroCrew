@@ -436,7 +436,8 @@ def _memory_carve(args: argparse.Namespace) -> None:
     store = declared_store(
         db_path, store_id=name, config=cfg, embedding_dim=cfg.memory.embedding_dim
     )
-    store.init()
+    # Only reads, while the gateway may be writing this file.
+    store.init_for_read()
     try:
         # Keyed by facet NAME, read off the namespace by that name: an omitted flag
         # is absent from the mapping (the axis is unconstrained), while an
@@ -819,8 +820,12 @@ def _memory_verb(args: argparse.Namespace) -> None:
         )
         try:
             # INSIDE the try: `init()` creates `memory.db`, so an interrupt in it must
-            # still reach the settlement below.
-            store.init()
+            # still reach the settlement below. `list` and `export` only read, and the
+            # gateway may be writing this file meanwhile.
+            if action in ("list", "export"):
+                store.init_for_read()
+            else:
+                store.init()
             if action == "list":
                 entries = store.get_all_semantic()
                 if not entries:

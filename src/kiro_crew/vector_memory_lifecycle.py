@@ -3,18 +3,20 @@
 ``init`` takes namespace admission and the named-store use lock, then ``_init_database``
 opens SQLite: a member file through its canonical identity, every other file through the
 schema ladder of its lineage. It binds the lineage, applies the migrations and the shared
-record metadata, and restricts every memory-bearing file to its owner. ``close`` drops the
-connection, every pooled read-only connection and every population derived from
-them. ``StoreDbLock`` (the writer lock) and ``ReaderPool`` (the read-only
-connections the fetch helpers use in WAL mode) live here too. The V1 schema (``_SCHEMA_V1``,
-``_migrate_v2``, ``_MEMORY_META_TABLE``, ``_MIGRATIONS``) lives here with the code that
-applies it, and :mod:`kiro_crew.vector_memory` re-exports it.
+record metadata, and restricts every memory-bearing file to its owner. ``init_for_read``
+is the same open for a command that only reads: an up-to-date file is still restricted
+to its owner, then opened ``mode=ro`` with no migration or metadata write. ``close``
+drops the connection, every pooled read-only connection and every population derived
+from them. ``StoreDbLock`` (the writer lock) and ``ReaderPool`` (the read-only
+connections the fetch helpers use in WAL mode) live here too. The V1 schema
+(``_SCHEMA_V1``, ``_migrate_v2``, ``_MEMORY_META_TABLE``, ``_MIGRATIONS``) lives here
+with the code that applies it, and :mod:`kiro_crew.vector_memory` re-exports it.
 
 This module opens the connection, which ``vector_memory_runtime`` modules never do, so it
 lives beside the facade. The functions are bound on ``VectorMemoryStore`` as the class
 attributes of the same name and take the store as ``self``. Store fields written: ``_db``,
-``_memory_version``, ``_store_use_lock_fd``, ``_space_generation``, ``_faiss_index``,
-``_faiss_data_version``, ``_episodic_scoring(_refused)`` and
+``_memory_version``, ``_store_use_lock_fd``, ``_opening_for_read``, ``_space_generation``,
+``_faiss_index``, ``_faiss_data_version``, ``_episodic_scoring(_refused)`` and
 ``_semantic_scoring(_refused)``, and the lineage fields through ``_bind_lineage``. Read:
 ``_db_path``, ``_faiss_path``, ``_faiss_id_map``, ``_memory_store_name``,
 ``_member_identity``, ``_db_lock`` and ``_readers``.
@@ -421,6 +423,25 @@ def init(self: VectorMemoryStore) -> None:
         raise
 
 
+def init_for_read(self: VectorMemoryStore) -> None:
+    """:meth:`init` for a command that only reads, holding no writable descriptor.
+
+    A CLI read can run while the gateway writes the same file. An existing file at
+    the current schema still gets the owner-only lockdown of :meth:`init`, which
+    restricts its directory and every memory-bearing file by path, and is then
+    opened ``mode=ro``: nothing is switched to WAL, migrated, backfilled or written
+    to FAISS, and a read-only descriptor cannot take the exclusive lock a close
+    needs to checkpoint and delete the ``-wal``. A file that does not exist yet, or
+    still needs a schema step, is opened the ordinary way, which creates or upgrades
+    it.
+    """
+    self._opening_for_read = True
+    try:
+        self.init()
+    finally:
+        self._opening_for_read = False
+
+
 def _init_database(self: VectorMemoryStore) -> None:
     """Create DB, apply migrations, and set permissions under admission."""
 
@@ -432,11 +453,13 @@ def _init_database(self: VectorMemoryStore) -> None:
     from kiro_crew.memory_startup import require_memory_ready
 
     require_memory_ready(self._memory_store_name)
+    for_read = getattr(self, "_opening_for_read", False)
     expected = getattr(self, "_member_identity", None)
     if expected is not None:
-        # mode=rw is intentional: admission never provisions a missing file.
+        # mode=rw (mode=ro for init_for_read) is intentional: admission never
+        # provisions a missing file.
         self._db = sqlite3.connect(
-            self._db_path.resolve().as_uri() + "?mode=rw",
+            self._db_path.resolve().as_uri() + ("?mode=ro" if for_read else "?mode=rw"),
             uri=True,
             check_same_thread=False,
         )
@@ -482,6 +505,23 @@ def _init_database(self: VectorMemoryStore) -> None:
     # BEFORE the connect so the migrations do not run against a file another
     # local user can still write; repeated after it to cover what SQLite created.
     self._restrict_memory_files()
+    if for_read and self._db_path.exists():
+        # See init_for_read. Both lockdown calls above work by path, so they open no
+        # descriptor on the file. No second pass follows this connect: a `-wal` or
+        # `-shm` it creates takes the database's mode, owner-only by now, on POSIX
+        # and the directory's inheritable owner-only DACL on Windows. A file with a
+        # schema step pending falls through to the ordinary open below, which
+        # applies it.
+        self._db = sqlite3.connect(
+            self._db_path.resolve().as_uri() + "?mode=ro", uri=True, check_same_thread=False
+        )
+        self._db.row_factory = sqlite3.Row
+        self._db.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        self._wal_kept_on_close = sqlite_wal.keep_wal_on_close(self._db)
+        if not self._schema_steps([]):
+            return
+        db, self._db = self._db, None
+        db.close()
     # And a NEW database is created 0600 before SQLite opens it, so none of
     # its files exists readable even briefly (SQLite copies the database's
     # mode onto -wal/-shm).

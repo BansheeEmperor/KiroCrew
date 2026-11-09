@@ -71,6 +71,9 @@ class _EmptyVectorStore:
     def init(self) -> None:
         pass
 
+    def init_for_read(self) -> None:
+        pass
+
     def close(self) -> None:
         pass
 

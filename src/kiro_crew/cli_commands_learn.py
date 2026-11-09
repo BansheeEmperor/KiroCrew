@@ -152,7 +152,11 @@ def _learn(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
     vs = VectorMemoryStore(embedding_dim=cfg.memory.embedding_dim, config=cfg)
-    vs.init()
+    # `list` only reads, and the gateway may be writing this file meanwhile.
+    if action == "list":
+        vs.init_for_read()
+    else:
+        vs.init()
     try:
         if action == "add":
             # The sanitized values the schema validated and capped, not the raw
