@@ -182,8 +182,10 @@ async def test_provider_carries_agent_through_background_start_to_audited_channe
     # The start gate prepares a remote workspace once Session Environments is set up,
     # which needs the developer flag.
     monkeypatch.setenv("KIROCREW_DEV_MODE", "1")
-    section = SimpleNamespace(coder_url="https://coder.example", profiles=[])
+    section = SimpleNamespace(coder_url="https://coder.example", profiles=[], copy_skills=True)
     monkeypatch.setattr(live, "snapshot", lambda: SimpleNamespace(session_environments=section))
+    copy_skills = AsyncMock()
+    monkeypatch.setattr("kiro_crew.remote_session.skills_copy.copy_for_session", copy_skills)
     prepare = AsyncMock(return_value=remote)
     monkeypatch.setattr("kiro_crew.coder.session_launch.prepare_for_session", prepare)
     monkeypatch.setattr("kiro_crew.session_environment.remember_remote_workspace", Mock())
@@ -217,6 +219,11 @@ async def test_provider_carries_agent_through_background_start_to_audited_channe
         assert decision["outcome"] == "denied" and decision["agent"] == governed
         # The cloud and workspace start gate judges the same identity.
         assert prepare.await_args.kwargs["agent"] == governed
+        # The start copies the session's skills over the launch's own shell, scoped
+        # by the template the session runs (its skills), before the engine spawns.
+        copy_skills.assert_awaited_once_with(
+            "dashboard:git", agent, tmp_path, launch.shell, enabled=True
+        )
     finally:
         await asyncio.wait_for(launch.stop_git_proxy(), 30)
 
