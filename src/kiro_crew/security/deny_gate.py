@@ -779,12 +779,13 @@ def is_denied(
         pattern = _rules._SELF_PROTECTION_FLOOR_BY_ID.get(rule_id)
         if pattern is None or pattern not in floor_enabled:
             continue
-        # The mint predicate also gets the command AS SUBMITTED: it decodes base64
-        # literals to read the name they hide, and base64 does not survive the
-        # lower-casing every other predicate reads.
+        # The mint and kill predicates also get the command AS SUBMITTED: mint
+        # decodes base64 literals to read the name they hide, and the kill check
+        # reads ``git grep`` options, which git parses with case. Neither survives
+        # the lower-casing every other predicate reads.
         hit = (
-            _argv._is_credential_mint(lower, raw_text=tool_name)
-            if predicate is _argv._is_credential_mint
+            predicate(lower, raw_text=tool_name)
+            if predicate in (_argv._is_credential_mint, _argv._is_self_kill)
             else predicate(lower)
         )
         if hit:  # never waived: a self-guard rule (``_DenyWaiver``)

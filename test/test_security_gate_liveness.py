@@ -739,7 +739,11 @@ def _url_payload_command(n: int) -> str:
 #: ``max_address_space_mb``. Re-measured.
 #: Raised by 3, from 35,143, for the ``crew-oauth-bridge`` leaf on the read-gate floor
 #: in ``paths_lists`` (Connection bridge snapshots, fenced from file tools). Re-measured.
-_PACKAGE_LINE_BUDGET = 35_146
+#: Raised by 245, from 35,146, for the self-kill floor's ``git grep`` pager read in
+#: ``argv_floor_self`` (``-O`` / ``--open-files-in-pager``, ``-c core.pager`` /
+#: ``pager.grep``, ``GIT_PAGER`` / ``PAGER``, array elements), parsed as git parses
+#: the invocation, from the command as submitted. Re-measured.
+_PACKAGE_LINE_BUDGET = 35_391
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

@@ -28,6 +28,7 @@ from typing import NamedTuple
 # the reader module rather than bound here at import: the facade mirrors a patch
 # onto the owning module's namespace, so a name bound into THIS namespace would
 # keep resolving the unpatched object and the instrument would count nothing.
+from . import argv_rules as _argv_rules
 from . import shell_normalizer as _shell_normalizer
 from .inline_payload import (
     _INLINE_DYNAMIC_EXEC_RE,
@@ -35,12 +36,14 @@ from .inline_payload import (
     _has_self_importing_inline_program,
 )
 from .shell_normalizer import (
+    _ARRAY_EXPAND_RE,
     _PYTHON_INLINE_PROGRAM_FLAGS,
     _PYTHON_OPERAND_FLAGS,
     _PYTHON_PROGRAM_RE,
     _REDIRECT_START_RE,
     _SHELL_WRAPPER_CHARS,
     _argv_programs,
+    _array_assignments,
     _backtick_closer,
     _data_consumer_exempt,
     _debracket,
@@ -710,7 +713,240 @@ def _bare_kill_raw_bodies(source: str) -> "list[str]":
     return bodies
 
 
-def _is_self_kill(text_lower: str) -> bool:
+#: git's global options (before the subcommand) whose value is the NEXT word, so that
+#: word is skipped rather than read as the subcommand.
+_GIT_GLOBAL_VALUE_OPTIONS = frozenset(
+    {
+        *("-C", "-c", "--git-dir", "--work-tree", "--namespace"),
+        *("--super-prefix", "--config-env", "--attr-source"),
+    }
+)
+#: git's global options that, written bare, print or show something and exit
+#: without running the subcommand after them.
+_GIT_GLOBAL_EXIT_OPTIONS = frozenset({"--exec-path", "--version", "--help", "-v", "-h"})
+#: ``git -c <key>=<cmd>`` global-option keys whose value ``git grep`` runs as its pager.
+_GIT_GREP_PAGER_CONFIG_KEYS = ("core.pager=", "pager.grep=")
+#: Assignment words before ``git`` whose value git runs as its pager. Matched
+#: with the case as submitted: POSIX environment names are case-sensitive.
+_GIT_PAGER_ENV_WORDS = ("GIT_PAGER=", "PAGER=")
+#: ``git grep`` short options that take a VALUE (``builtin/grep.c``): a pattern
+#: (``-e``), a file (``-f``), a count (``-m``) or a context size (``-A``/``-B``/
+#: ``-C``). In a cluster the rest of the word is that value, else it is the next
+#: word, so either way it is never a pager. Case-sensitive: ``-E`` and ``-F`` are
+#: flags that take none.
+_GIT_GREP_VALUE_SHORT = frozenset("efmABC")
+#: The long options of the same kind. git also accepts a unique prefix of a long
+#: name, so a word is matched as a prefix of one of these.
+_GIT_GREP_VALUE_LONG = (
+    "--regexp",
+    "--file",
+    "--max-count",
+    "--max-depth",
+    "--threads",
+    "--context",
+    "--after-context",
+    "--before-context",
+)
+
+
+#: The other ``git grep`` long options that begin ``--o``. git takes a long option's
+#: unique prefix only, so a prefix shared with one of these (``--o``) is ambiguous and
+#: git refuses the command instead of running a pager.
+_GIT_GREP_OPEN_RIVALS = ("--or", "--only-matching")
+
+
+def _grep_arg_pager(word: str) -> "tuple[str, str]":
+    """How ``git grep`` parses *word*, as submitted: ``(role, pager)``.
+
+    Roles: ``pager`` with the command git would run as its pager; ``skip_next`` when
+    *word* is an option whose value is the FOLLOWING word (so that word is not read as
+    a pager); ``plain`` otherwise. Only ``-O`` / ``--open-files-in-pager`` carry a
+    pager, and always GLUED to the option, so a pager is never a separate word. A
+    short cluster is walked one letter at a time, the way git's parse-options walks
+    it: ``O`` is the pager only before the first letter that takes a value, since
+    everything after that letter is its value.
+    """
+    if word.startswith("--"):
+        name, sep, value = word.partition("=")
+        if (
+            len(name) > 2
+            and "--open-files-in-pager".startswith(name)
+            and not any(rival.startswith(name) for rival in _GIT_GREP_OPEN_RIVALS)
+        ):
+            return ("pager", value) if sep else ("plain", "")
+        if not sep and len(name) > 2 and any(o.startswith(name) for o in _GIT_GREP_VALUE_LONG):
+            return ("skip_next", "")
+        return ("plain", "")
+    if word.startswith("-") and len(word) > 1:
+        j = 1
+        while j < len(word) and word[j].isascii() and word[j].isalnum():
+            if word[j] == "O":
+                rest = word[j + 1 :]
+                return ("pager", rest) if rest else ("plain", "")
+            if word[j] in _GIT_GREP_VALUE_SHORT:
+                return ("plain", "") if j + 1 < len(word) else ("skip_next", "")
+            j += 1
+    return ("plain", "")
+
+
+def _scan_grep_args(args: "list[str]") -> "list[str]":
+    """The pager commands among a ``git grep``'s own arguments *args*, left to right.
+
+    A value-taking option's value is skipped, so ``-e '-O<cmd>'`` reads ``-O<cmd>`` as
+    a pattern, not a pager. ``--`` is not treated as ending option parsing here: the
+    issue names ``-O`` placed after the pathspec, and a word that both begins ``-O``
+    and spells a product kill is that bypass, not a real pathspec.
+    """
+    commands: "list[str]" = []
+    k = 0
+    while k < len(args):
+        role, pager = _grep_arg_pager(args[k])
+        if role == "skip_next":
+            k += 2
+            continue
+        if role == "pager" and pager.strip():
+            commands.append(pager)
+        k += 1
+    return commands
+
+
+#: Characters that end a command when they appear outside quotes.
+_RAW_COMMAND_ENDS = frozenset(";|&\n")
+
+
+def _raw_commands(source: str) -> "list[list[str]]":
+    """*source* cut into commands of words, with the shell's quoting kept in force.
+
+    A quoted ``;`` / ``|`` / ``&`` is part of its word, so ``-e 'x|y'`` does not end
+    the command it is in; an unquoted one, or a newline, does. Quotes are removed
+    from each word the way the shell removes them: single quotes are literal, a
+    backslash escapes the next character outside quotes and ``"`` ``\\`` ``$`` and a
+    backtick inside double quotes. An unquoted ``#`` that starts a word starts a
+    comment to the end of the line. One pass over the text.
+    """
+    commands: "list[list[str]]" = []
+    words: "list[str]" = []
+    word: "list[str]" = []
+    in_word = False
+    quote = ""
+    n = len(source)
+    i = 0
+    while i < n:
+        ch = source[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+            else:
+                word.append(ch)
+        elif quote == '"':
+            if ch == '"':
+                quote = ""
+            elif ch == "\\" and i + 1 < n and source[i + 1] in '"\\$`':
+                i += 1
+                word.append(source[i])
+            else:
+                word.append(ch)
+        elif ch in "'\"":
+            quote = ch
+            in_word = True
+        elif ch == "\\" and i + 1 < n:
+            i += 1
+            if source[i] != "\n":
+                word.append(source[i])
+                in_word = True
+        elif ch == "#" and not in_word:
+            while i + 1 < n and source[i + 1] != "\n":
+                i += 1
+        elif ch.isspace() or ch in _RAW_COMMAND_ENDS:
+            if in_word:
+                words.append("".join(word))
+                word, in_word = [], False
+            if ch in _RAW_COMMAND_ENDS and words:
+                commands.append(words)
+                words = []
+        else:
+            word.append(ch)
+            in_word = True
+        i += 1
+    if in_word:
+        words.append("".join(word))
+    if words:
+        commands.append(words)
+    return commands
+
+
+def _git_grep_pager_commands(source: str, tokens: "list[str]") -> "list[str]":
+    """The pager commands every ``git grep`` in *source* can run, for the kill check.
+
+    ``git grep`` runs its pager on the matching files, so a pager that kills the
+    product is a self-kill no argv position shows. Parsed the way git parses it, one
+    invocation at a time and only from positions git reads as options for THAT grep:
+    a ``GIT_PAGER=`` / ``PAGER=`` assignment, a ``-c core.pager=`` / ``-c
+    pager.grep=`` global option between ``git`` and ``grep``, and ``-O`` /
+    ``--open-files-in-pager=`` among grep's own arguments (each element of a literal
+    array expanded there included). The commands are rebuilt from *source*, the
+    frame's text as submitted, by :func:`_raw_commands`, so a quoted ``;`` or ``|``
+    inside an argument does not cut one ``git grep`` in two. *tokens* is the frame's
+    shared argv, read only for its literal array assignments. One pass per frame.
+    """
+    commands: "list[str]" = []
+    arrays: "dict[str, list[str]] | None" = None
+    for sub in _raw_commands(source):
+        # The program after any wrapper (``sudo``, ``env``, ``timeout 5`` ...) and
+        # ``VAR=x`` words, the same step-over the argv rules use.
+        found = _argv_rules._program_args(sub)
+        # The program name is folded: a case-insensitive filesystem runs ``GIT``.
+        if found is None or found[0].lower() != "git":
+            continue
+        i = len(sub) - len(found[1])
+        # Every ``GIT_PAGER=`` / ``PAGER=`` word before ``git`` is in its environment,
+        # whether it leads the command or follows ``env`` or ``sudo``.
+        env_pagers = [
+            word.partition("=")[2] for word in sub[: i - 1] if word.startswith(_GIT_PAGER_ENV_WORDS)
+        ]
+        global_pagers: "list[str]" = []
+        grep = False
+        while i < len(sub):
+            token = sub[i]
+            if token == "grep":
+                grep = True
+                i += 1
+                break
+            if token in _GIT_GLOBAL_EXIT_OPTIONS:
+                break  # git runs ``version`` / ``help`` or prints a path, never grep
+            if token in _GIT_GLOBAL_VALUE_OPTIONS:
+                # git config keys are case-insensitive, so the key is folded.
+                if (
+                    token == "-c"
+                    and i + 1 < len(sub)
+                    and sub[i + 1].lower().startswith(_GIT_GREP_PAGER_CONFIG_KEYS)
+                ):
+                    global_pagers.append(sub[i + 1].partition("=")[2])
+                i += 2
+                continue
+            if token.startswith("-"):
+                i += 1
+                continue
+            break  # a non-option that is not ``grep``: another subcommand
+        if not grep:
+            continue
+        args: "list[str]" = []
+        while i < len(sub):
+            match = _ARRAY_EXPAND_RE.search(sub[i])
+            if match:
+                if arrays is None:
+                    arrays = _array_assignments(tokens)
+                args.extend(arrays.get(match.group(1), (sub[i],)))
+            else:
+                args.append(sub[i])
+            i += 1
+        for command in env_pagers + global_pagers + _scan_grep_args(args):
+            if command.strip():
+                commands.append(command)
+    return commands
+
+
+def _is_self_kill(text_lower: str, *, raw_text: "str | None" = None) -> bool:
     """True if *text_lower* terminates a Kiro Crew process.
 
     Two shapes, matched separately because the two kill families take different
@@ -732,6 +968,14 @@ def _is_self_kill(text_lower: str) -> bool:
     # holds, so a miss skips both descents.
     if not _self_floor_can_fire(text_lower):
         return False
+    # A ``git grep`` pager is a command no argv position shows. git parses its
+    # options with case, so they are read from the command AS SUBMITTED; a pager
+    # string is a substring of one word, so strictly shorter and the recursion ends.
+    submitted = raw_text if raw_text is not None else text_lower
+    for source, tokens in _shell_payload_walk(submitted):
+        for command in _git_grep_pager_commands(source, tokens):
+            if _is_self_kill(command.lower(), raw_text=command):
+                return True
     for tokens in _self_token_frames(text_lower):
         programs = _argv_programs(tokens)
         # Once per FRAME, not once per trigger token: see ``_is_credential_mint``.

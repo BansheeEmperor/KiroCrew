@@ -1532,7 +1532,7 @@ def _nested_shell_payloads(
             for match in _ARRAY_EXPAND_RE.finditer(token):
                 value = arrays.get(match.group(1))
                 if value:
-                    payloads.append(value)
+                    payloads.append(" ".join(value))
     # GNU ``sed`` runs the REPLACEMENT of an ``s///e`` command as a shell command, so
     # that text is a payload.  It lives INSIDE one token, which is why withdrawing the
     # data-consumer exemption is not enough on its own: there are no two adjacent

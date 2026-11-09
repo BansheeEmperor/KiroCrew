@@ -439,13 +439,13 @@ _ARRAY_ASSIGN_RE = re.compile(r"\A([A-Za-z_]\w*)=\((.*)\Z", re.DOTALL)
 _ARRAY_EXPAND_RE = re.compile(r"\$\{?([A-Za-z_]\w*)\[[@*]\]\}?")
 
 
-def _array_assignments(tokens: "list[str]") -> "dict[str, str]":
-    """Literal array assignments in *tokens*, as name -> the elements joined by a space.
+def _array_assignments(tokens: "list[str]") -> "dict[str, list[str]]":
+    """Literal array assignments in *tokens*, as name -> the elements, one word each.
 
     ``a=(<name> <verb>)`` tokenizes to ``['a=(<name>', '<verb>)']``, so the elements are
     gathered from the opening token up to the one that closes the paren.
     """
-    arrays: dict[str, str] = {}
+    arrays: dict[str, list[str]] = {}
     i = 0
     while i < len(tokens):
         match = _ARRAY_ASSIGN_RE.match(tokens[i])
@@ -467,7 +467,7 @@ def _array_assignments(tokens: "list[str]") -> "dict[str, str]":
             if part:
                 elements.append(part)
         if closed and elements:
-            arrays.setdefault(name, " ".join(elements))
+            arrays.setdefault(name, elements)
         i += 1
     return arrays
 
