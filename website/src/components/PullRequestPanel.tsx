@@ -55,6 +55,7 @@ import { Btn } from './ui'
 import { useRovingTabs } from './Tablist'
 
 
+import { fmtList } from '../i18n/format'
 import { i18nT } from '../i18n/t'
 import { pullRequestErrorDetails } from '../utils/pullRequestErrors'
 import ErrorNotice from './ErrorNotice'
@@ -1412,8 +1413,8 @@ export default function PullRequestPanel({
               <AlertCircle className="lucide-inline shrink-0 mt-0.5 text-warn" />
               <span>
                 {sourceProviderMeta(source.provider).pullRequestWording
-                  ? i18nT('components.pullRequestPanel.provider_results_may_be_partial_pull_request', { sections: source.partialSections.join(', ') })
-                  : i18nT('components.pullRequestPanel.provider_results_may_be_partial_merge_request', { sections: source.partialSections.join(', ') })}
+                  ? i18nT('components.pullRequestPanel.provider_results_may_be_partial_pull_request', { sections: fmtList(source.partialSections, { style: 'narrow' }) })
+                  : i18nT('components.pullRequestPanel.provider_results_may_be_partial_merge_request', { sections: fmtList(source.partialSections, { style: 'narrow' }) })}
               </span>
             </div>
           )}
