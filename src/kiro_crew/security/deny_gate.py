@@ -775,6 +775,7 @@ def is_denied(
         ("self-protection-kill", _argv._is_self_kill),
         ("self-protection-dev-mode-out-of-root-confirm", _argv._is_dev_mode_out_of_root_confirm),
         ("sandbox-escape-ssh-self", _argv._is_ssh_to_self),
+        ("sandbox-escape-git-tar-self", _argv._is_git_tar_to_self),
     ):
         pattern = _rules._SELF_PROTECTION_FLOOR_BY_ID.get(rule_id)
         if pattern is None or pattern not in floor_enabled:

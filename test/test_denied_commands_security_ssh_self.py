@@ -587,11 +587,13 @@ class TestSandboxEscapeSshSelf:
     def test_other_hosts_and_mentions_stay_allowed(self, cmd):
         assert _denied_by(cmd) is None, cmd
 
-    def test_rsync_detached_rsh_floor_allows_plain_ssh(self):
-        # THIS floor must not deny the normal detached remote-shell selector, and
-        # neither does the ``reverse-shell-nc`` catalog row: it is anchored to the
-        # ``nc`` command token, so the letters ``nc -e`` inside ``rsync -e`` are not
-        # a match.  Pinned end-to-end here as well as at the floor.
+    def test_multi_name_exports_feed_rsync_remote_shell(self):
+        for builtin in ("export", "declare -x", "typeset -x"):
+            cmd = f"{builtin} A=1 RSYNC_RSH='ssh localhost'; rsync far:/x ."
+            assert _denied_by(cmd) == self._RULE, cmd
+
+        # The normal detached selector remains allowed when it names no self host,
+        # including through the separate reverse-shell catalog rule.
         cmd = "rsync " + "-e ssh /tmp/f far.example.com:/p"
         assert not security._is_ssh_to_self(cmd)
         assert _denied_by(cmd) is None
