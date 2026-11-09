@@ -929,7 +929,10 @@ Project shadowing is kiro-cli's rule, not a universal one. kiro-cli resolves
 `--agent` against its cwd before the user directory, which is why `list_agents`
 lets a project spec win. The KAS projection is handed `kiro_agents_dir()` alone
 (`acp/harness/kas.py`), so a project spec of the same name does not shadow
-anything there — the user-level spec is what gets projected. The worker spawn
+anything there — the user-level spec is what gets projected, with only the
+project spec's switch-off keys (`disabledTools`, and `disabled` when it mutes)
+added to the servers the user-level spec already declares. A server muted that
+way is also withdrawn from the session's broker stubs. The worker spawn
 gate refuses outright rather than choosing, when a checkout ships its own
 `kirocrew-worker` spec.
 

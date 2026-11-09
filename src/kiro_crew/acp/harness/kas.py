@@ -230,6 +230,27 @@ def _is_operator_override(binary: str, environ: Mapping[str, str]) -> bool:
 PROJECT_SPEC_HONOURED_KEYS = ("name", "description", "prompt", "tools", "excludedTools", "model")
 
 
+def _with_project_switch_offs(spec: dict[str, Any], project: dict[str, Any]) -> dict[str, Any]:
+    """*spec* with the checkout spec's switch-off keys layered on its own servers.
+
+    Only narrows: a mute or switched-off tools from *project* reach a server *spec*
+    already declares, and nothing else of the checkout does. A name *spec* does not
+    declare is skipped, so the checkout can add no entry. The same keys the
+    mirrored hosts layer on (``session_mcp._with_restrictions``).
+    """
+    from kiro_crew.acp.session_mcp import _project_restrictions, _with_restrictions
+
+    declared = spec.get("mcpServers")
+    if not isinstance(declared, dict):
+        return spec
+    kept = {
+        name: keys
+        for name, keys in _project_restrictions(project).items()
+        if isinstance(declared.get(name), dict)
+    }
+    return _with_restrictions(spec, kept)
+
+
 def resolve_projected_spec(
     agents_dir: Path,
     agent: str,
@@ -239,7 +260,9 @@ def resolve_projected_spec(
     """The spec KAS is handed for *agent*, and the directory its prompt anchors to.
 
     A name the user level declares resolves to the user-level spec in
-    *agents_dir*, whatever the checkout holds. Only a name the user level does
+    *agents_dir*; a checkout spec of the same name adds only its switch-off keys
+    (a mute, switched-off tools) for the servers that spec declares, as the
+    mirrored hosts do (:func:`_with_project_switch_offs`). Only a name the user level does
     NOT declare is looked up in ``<work_dir>/.kiro/agents/``, through the
     resolver the mirrored hosts use (``acp.session_mcp.project_agent_spec``).
 
@@ -283,12 +306,15 @@ def resolve_projected_spec(
         from kiro_crew.template_mcp_additions import merge_at_spawn
 
         spec = merge_at_spawn(agent, kas_agents_mod.load_agent_spec(agents_dir, agent))
-        if notices is not None and work_dir and project_agent_spec(agent, work_dir)[0]:
+        declared, project = project_agent_spec(agent, work_dir) if work_dir else (False, None)
+        if declared and notices is not None:
             notices.append(
                 f"ℹ Agent {agent} is defined in this folder's .kiro/agents and in "
                 "your own agents folder. Your own one runs here. kiro-cli would run "
                 "the folder's, but Crew does not let a cloned folder replace your agent."
             )
+        if isinstance(project, dict):
+            spec = _with_project_switch_offs(spec, project)
         # A user-level custom agent gets Crew's default servers, through the helper
         # the kiro-cli skill view applies too, so the two paths cannot drift.
         return with_default_crew_servers(agent, spec), agents_dir
@@ -392,14 +418,7 @@ def resolve_projected_spec(
     # an approved server (a mute, switched-off tools) are kept, and only those, and
     # are layered onto the servers that one merge produced, so the record is read
     # once and a server approved meanwhile cannot launch unmuted.
-    from kiro_crew.acp.session_mcp import _project_restrictions
-
-    spec = merge_at_spawn(agent, spec)
-    merged = spec.get("mcpServers")
-    if isinstance(merged, dict):
-        for name, kept in _project_restrictions(project).items():
-            if isinstance(merged.get(name), dict):
-                merged[name] = {**merged[name], **kept}
+    spec = _with_project_switch_offs(merge_at_spawn(agent, spec), project)
     if work_dir is None:  # unreachable: ``project_agent_spec`` declares nothing without one
         return spec, agents_dir
     return spec, paths_mod.project_agents_dir(work_dir)
@@ -503,6 +522,26 @@ def withdrawn_worker_stubs(spec: dict[str, Any], stub_names: frozenset[str]) -> 
         or mcp_entry_is_muted(servers[name])
         or mcp_server_alias(name) in scope_muted
         or mcp_entry_is_registry_governed(servers[name])
+    )
+
+
+def muted_stubs(spec: dict[str, Any], stub_names: frozenset[str]) -> frozenset[str]:
+    """The names in *stub_names* whose ``mcpServers`` entry in *spec* is muted.
+
+    Narrower than :func:`withdrawn_worker_stubs`: a stub whose server *spec* does
+    not declare is kept, because an ordinary agent's stubs come from the same
+    user-level spec this payload reads and only a mute layered on it since
+    (a checkout's switch-off) can disagree.
+    """
+    from kiro_crew.mcp_cleanup import mcp_entry_is_muted
+
+    servers = spec.get("mcpServers")
+    if not isinstance(servers, dict):
+        return frozenset()
+    return frozenset(
+        name
+        for name in stub_names
+        if isinstance(servers.get(name), dict) and mcp_entry_is_muted(servers[name])
     )
 
 
@@ -1090,6 +1129,11 @@ class KasHarness(MembershipHarness):
                 # so a server muted or removed in between is withdrawn from the
                 # session-level array too: this payload is the later reading.
                 withdrawn = withdrawn_worker_stubs(spec, worker_stub_names)
+            else:
+                # A server this spec declares muted (a checkout's switch-off,
+                # ``_with_project_switch_offs``) is withdrawn from the session-level
+                # array too, or its broker stub would still mount it.
+                withdrawn = muted_stubs(spec, stubbed)
             if member_dispatch:
                 # The member's dashboard server arrives as a session-level entry
                 # too, so it joins the subtraction set for the same reason: an
