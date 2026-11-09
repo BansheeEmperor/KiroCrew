@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from aiohttp import web
 
 from kiro_crew.dashboard import ws_chunk_scope as chunk_scope
+from kiro_crew.dashboard import ws_snapshot_hold as snapshot_hold
 from kiro_crew.dashboard.kiro_relay.caller import RELAY_TEAMMATE_WS_FLAG
 from kiro_crew.dashboard.turn_heartbeat import TurnHeartbeat
 from kiro_crew.write_buffer_level import level_is_progress_signal
@@ -306,6 +307,9 @@ class WebSocketHub:
         # this loop only when startup has not already bound an authoritative one.
         self._serving_loop_provider()
         if self._drop_if_stalled(ws):
+            return
+        # A socket still waiting for its connect snapshot gets this frame right after it.
+        if snapshot_hold.held(ws, msg):
             return
         task = asyncio.ensure_future(ws.send_str(msg))
         self._owner._background_tasks.add(task)
@@ -774,7 +778,12 @@ class WebSocketHub:
         reads, or once the send has taken ``WS_OWNER_SEND_MAX_S`` in all. Where the
         level shows no reading (``level_is_progress_signal``, or a transport that
         reports no level), only ``WS_OWNER_SEND_MAX_S`` ends it.
+
+        A tab still waiting for its connect snapshot gets ``msg`` right after it
+        (``ws_snapshot_hold``), so the send counts as made.
         """
+        if snapshot_hold.held(ws, msg):
+            return
         if isinstance(msg, (bytes, bytearray, memoryview)):
             send = asyncio.ensure_future(ws.send_bytes(bytes(msg)))
         else:
