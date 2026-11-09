@@ -1110,6 +1110,16 @@ export function AgentBackendTab() {
     probe(value)?.tool_approval === APPROVAL_UNVERIFIED || value === CLAUDE
 
   /**
+   * Why every session start refuses this harness on this host, in first-run setup's
+   * words: the setting's sentence when `agent.sandbox` leaves the host's sandbox off,
+   * the host's when it has none. The two remedies are opposite, so they never share one.
+   */
+  const sandboxRefusalLine = (value: string): string =>
+    probe(value)?.sandbox_refusal === 'setting'
+      ? i18nT('components.kiroPrerequisiteGate.sandbox_off_agent_detail', { name: nameOf(value) })
+      : i18nT('components.kiroPrerequisiteGate.sandbox_blocked_agent_detail', { name: nameOf(value) })
+
+  /**
    * The one status sentence a harness carries, derived rather than authored per agent.
    *
    * The order is strict, because the reasons are not equally actionable. A
@@ -1119,7 +1129,8 @@ export function AgentBackendTab() {
    * it is the line that tells the user what to DO, and it names the components
    * without the command — the command gets its own copyable block, so folding it
    * into a sentence would put the one string an operator has to run somewhere they
-   * cannot click. `unknown` follows and must never read as missing; it reports a
+   * cannot click. A sandbox refusal goes before `missing`, for the reason `lead`
+   * gives. `unknown` follows and must never read as missing; it reports a
    * failed check, not an absent binary. Only then do the default/experimental lines
    * apply. `DEFAULT_ACP_BACKEND` gets the default sentence; Kiro CLI is stable but
    * not the default, so it says only what the probe measured; anything else gets
@@ -1132,6 +1143,7 @@ export function AgentBackendTab() {
   const status = (value: string): string => {
     const row = probe(value)
     if (buildExcluded(value)) return i18nT('pages.developer.agentBackendTab.not_offered_by_this_build')
+    if (row?.sandbox_refusal) return sandboxRefusalLine(value)
     if (row?.installed === 'missing' && row.found_version)
       return i18nT('components.kiroPrerequisiteGate.agent_wrong_version_detail', {
         name: nameOf(value),
@@ -1188,9 +1200,11 @@ export function AgentBackendTab() {
   const busy = patchMut.isPending || recheckMut.isPending
   // Every state the re-check can help with, and only those. A build-excluded harness
   // is not one: nothing this machine holds is why it is not on offer, so a button
-  // that re-measured the machine would answer a question nobody asked.
+  // that re-measured the machine would answer a question nobody asked. Nor is a
+  // sandbox refusal: no install the re-check finds makes that harness start here.
   const canRecheck =
     !buildExcluded(shown) &&
+    !shownProbe?.sandbox_refusal &&
     (notInstalled(shown) || needsRestart(shown) || shownProbe?.installed === 'unknown')
 
   /**
@@ -1201,7 +1215,10 @@ export function AgentBackendTab() {
    * The order is strict, because the reasons are not equally actionable. A
    * build-excluded agent comes first: nothing about installing or re-checking is
    * worth telling someone about an option this build will never offer, and the
-   * folded tool-approval line below says why. `missing` comes next because it
+   * folded tool-approval line below says why. A sandbox refusal is next, for the
+   * same reason: every session start refuses the harness on this host, so an
+   * install command or a "can still switch" line would send the reader to a
+   * remedy that cannot help. `missing` comes next because it
    * is the block that tells the user what to DO — the install command, copyable,
    * and what to press afterwards. `unknown` follows and must never read as
    * missing; it reports a failed check, and says the switch stays live, because
@@ -1226,6 +1243,8 @@ export function AgentBackendTab() {
           {i18nT('pages.developer.agentBackendTab.not_offered_by_this_build')}
         </p>
       )
+    if (row?.sandbox_refusal)
+      return <p className="text-[13px] leading-relaxed text-text">{sandboxRefusalLine(value)}</p>
     if (row?.installed === 'missing') return <AgentInstallDetail name={name} probe={row} />
     // A failed probe, so `ErrorNotice`.
     if (row?.installed === 'unknown')
@@ -1640,6 +1659,7 @@ export function AgentBackendTab() {
                         probe={row}
                         blocked={false}
                         notOffered={buildExcluded(value)}
+                        refused={row.sandbox_refusal}
                       />
                     )}
                   </span>
