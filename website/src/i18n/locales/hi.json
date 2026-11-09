@@ -20522,6 +20522,7 @@
         "save_stopped_note": "इंतज़ार बंद कर दिया। वह सहेजना हुआ या नहीं, कहा नहीं जा सकता; सूची मौजूदा स्थिति दिखाती है। तुम्हारे बदलाव अभी भी यहाँ हैं। फिर से सहेजो या रद्द करो।",
         "saving": "सहेजा जा रहा है…",
         "service_missing": "Not available with this profile yet — the launch needs permission for this service.",
+        "service_not_checked": "अभी जाँचा नहीं गया — पहले काम करने वाले AWS क्रेडेंशियल चाहिए।",
         "service_ok": "Reachable with this profile.",
         "set_up_a_new_one": "Set up a new one",
         "setting_up": "Setting up",

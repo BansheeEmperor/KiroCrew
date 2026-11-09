@@ -519,7 +519,7 @@ export function SettingUpRow({ job, onCancel, cancelling }: { job: LaunchJob; on
   )
 }
 
-/** One AWS prerequisite row (ok / warn) with optional command + actions. */
+/** One AWS prerequisite row (ok / warn / not checked) with optional command + actions. */
 export function PrereqRow({
   ok,
   title,
@@ -537,7 +537,8 @@ export function PrereqRow({
   steps,
   commandNote,
 }: {
-  ok: boolean
+  /** `null`: not checked, because a check it depends on failed. */
+  ok: boolean | null
   title: string
   detail: string
   command?: string
@@ -571,8 +572,8 @@ export function PrereqRow({
 }) {
   return (
     <li className="flex items-start gap-3 py-2.5 border-b border-border last:border-b-0">
-      <span className={`mt-0.5 w-[18px] h-[18px] shrink-0 grid place-items-center rounded-full ${ok ? 'bg-ok text-ok-fg' : 'bg-warn text-warn-fg'}`}>
-        {ok ? <Check size={11} /> : <AlertTriangle size={11} />}
+      <span className={`mt-0.5 w-[18px] h-[18px] shrink-0 grid place-items-center rounded-full ${ok === null ? 'border border-border-strong' : ok ? 'bg-ok text-ok-fg' : 'bg-warn text-warn-fg'}`}>
+        {ok === null ? null : ok ? <Check size={11} /> : <AlertTriangle size={11} />}
       </span>
       <div className="min-w-0 flex-1">
         <div className="text-[13px] font-medium text-text-strong">{title}</div>

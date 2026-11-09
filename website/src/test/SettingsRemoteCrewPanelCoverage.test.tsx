@@ -733,6 +733,16 @@ describe('RemoteCrewPanel — AWS prerequisites', () => {
     expect(await screen.findByText('Credentials for this profile have expired.')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByRole('button', { name: 'Launch' })).toBeDisabled())
     expect(screen.getByText(/Finish the AWS setup above/i)).toBeInTheDocument()
+    // The EC2, CloudFormation and SSM checks run with those credentials, so none
+    // of them ran: no row blames a permission, warns, or offers a policy to copy.
+    const notChecked = screen.getAllByText('Not checked yet — needs working AWS credentials first.')
+    expect(notChecked).toHaveLength(3)
+    for (const el of notChecked) {
+      expect(el.closest('li')?.querySelector('.lucide-triangle-alert')).toBeNull()
+      expect(el.closest('li')?.querySelector('.lucide-check')).toBeNull()
+    }
+    expect(screen.queryByText(/needs permission for this service/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /Copy policy JSON/ })).toBeNull()
   })
 
   it('offers a re-check when the preflight request itself fails', async () => {

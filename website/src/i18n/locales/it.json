@@ -21020,6 +21020,7 @@
         "save_stopped_note": "Attesa interrotta. Quel salvataggio potrebbe essere andato a buon fine oppure no; l'elenco mostra lo stato attuale. Le tue modifiche sono ancora qui. Salva di nuovo o annulla.",
         "saving": "Salvataggio…",
         "service_missing": "Not available with this profile yet — the launch needs permission for this service.",
+        "service_not_checked": "Non ancora verificato — servono prima credenziali AWS funzionanti.",
         "service_ok": "Reachable with this profile.",
         "set_up_a_new_one": "Set up a new one",
         "setting_up": "Setting up",
