@@ -913,6 +913,11 @@ async def deliver_note(
             row_meta["appLabel"] = display_source
         if merged_from is not None:
             row_meta[MERGED_FROM_META_KEY] = dict(merged_from)
+        # A hold can outlive the turn it waited on: a restart restores it onto a
+        # slot that is now idle. Deliver it first, so an older acknowledged note
+        # never lands below this one and its context is queued ahead of this one.
+        if slot._deferred_notes:
+            _flush_held_notes_if_idle(state, slot)
         slot.append(
             role="inject",
             content=visible_content,
