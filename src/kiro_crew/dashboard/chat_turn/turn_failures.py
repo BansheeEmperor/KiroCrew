@@ -468,9 +468,10 @@ async def _on_acp_error_card(turn: _ChatTurn, exc) -> None:
             slot._last_turn_structural_terminal_loop_id = _directive_loop_id
             slot._last_turn_structural_terminal_loop_gen = _directive_loop_gen
         # A cycle that never obtained a model session. Only the loop's own
-        # cycle counts, a recovery it queued for itself included
-        # (``_wake_cycle``); a human turn that happened to be starved would
-        # otherwise spend an unrelated loop's stand-down budget. The streak
+        # cycle counts, a recovery it queued for itself or a turn carrying its
+        # steered wake included (``_wake_cycle``); any other human turn that
+        # happened to be starved would otherwise spend an unrelated loop's
+        # stand-down budget. The streak
         # itself lives on the loop (``notify_cycle_start_failed``), which backs
         # the loop off and eventually stands it down instead of firing cycle
         # after cycle that can only fail the same way. Read with getattr: the
@@ -553,7 +554,8 @@ async def _on_session_closing(turn: _ChatTurn) -> None:
 
 async def _on_error(turn: _ChatTurn, exc) -> None:
     """Any other error the turn raised."""
-    # As in _on_acp_error_card: a recovery the loop's cycle queued is that cycle.
+    # As in _on_acp_error_card: a recovery the loop's cycle queued, or a turn that
+    # carries its steered wake, is that cycle.
     _wake_cycle = turn._wake_cycle
     _wake_id, _wake_gen = _wake_cycle or ("", 0)
     slot = turn.slot
