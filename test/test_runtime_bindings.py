@@ -72,7 +72,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     # Takes ``launch_agent``: the app launch copy kiro-cli is asked for (``apps.agent_launch``),
     # and ``native_skill_projection``: off for the warm mint process, whose specs sit in ``run/``,
     # and ``harness_pin``: the session's own Bot pin, which KAS's route rule 2 reads.
-    "__init__": ("function", False, "e6317032e444", "runtime_class"),
+    "__init__": ("function", False, "37816a535af9", "runtime_class"),
     "_activate_mode_bracketed": ("function", True, "3dc699e8b0af", "runtime_mode_activation"),
     "_activates_agent_by_mode": ("function", False, "a6632a57e602", "runtime_mode_activation"),
     "_adopt_skill_projection": ("function", False, "5c4748bee6c5", "runtime_mode_activation"),
@@ -983,9 +983,11 @@ def test_every_base_import_stays_bound_on_the_facade() -> None:
 _INIT_HINTS = {
     "acp_backend": "<class 'str'>",
     "agent": "<class 'str'>",
+    "agent_env": "dict[str, str] | None",
     "crew_agent": "<class 'str'>",
     "expect_mcp_reports": "<class 'bool'>",
     "extra_env": "dict[str, str] | None",
+    "forward_ssh_auth_sock": "bool | None",
     "harness_pin": "<class 'str'>",
     "max_age_secs": "<class 'float'>",
     "max_rss_mb": "<class 'float'>",

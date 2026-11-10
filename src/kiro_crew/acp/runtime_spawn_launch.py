@@ -24,8 +24,8 @@ Instance fields written: ``_agent``, ``_agent_capabilities``, ``_agent_version``
 ``_with_mcp_sign_in_storage`` (a plain function handed the runtime) also writes
 ``_mcp_secret_server``.
 
-Instance fields read: ``_acp_backend``, ``_extra_env``, ``_harness_pin``, ``_launch_agent``, ``_member_context``,
-``_model``, ``_native_skill_projection_enabled``, ``_refuse_over_ceiling_launch``, ``_sandbox_mode``, ``_scratch_dir``, ``_shared_scratch``, ``_tool_search``,
+Instance fields read: ``_acp_backend``, ``_agent_env_override``, ``_extra_env``, ``_forward_ssh_auth_sock_override``,
+``_harness_pin``, ``_launch_agent``, ``_member_context``, ``_model``, ``_native_skill_projection_enabled``, ``_refuse_over_ceiling_launch``, ``_sandbox_mode``, ``_scratch_dir``, ``_shared_scratch``, ``_tool_search``,
 ``_work_dir``.
 """
 
@@ -658,8 +658,9 @@ async def _spawn_admitted(self: AcpRuntime) -> None:
     # spec read is the generation the child will load. Every other host reads
     # its constant directly: no new await, no new step on that path.
     client_capabilities = self._harness.client_capabilities
-    # Set by the handshake below when it read agent.env; None lets launch read it.
-    self._spawn_agent_env = None
+    # The frozen snapshot a chat-sharing placement keyed on, else set by the
+    # handshake below when it read agent.env; None lets launch read it.
+    self._spawn_agent_env = getattr(self, "_agent_env_override", None)
     if self._harness.client_meta_settings:
         client_capabilities = await self._handshake_client_capabilities()
 
@@ -797,6 +798,7 @@ async def _spawn_admitted(self: AcpRuntime) -> None:
             internal_sandbox=internal_sandbox,
             pod_home_remap=self._harness.pod_home_remap,
             guard_scratch_hops=True,
+            forward_ssh_auth_sock_override=getattr(self, "_forward_ssh_auth_sock_override", None),
         ),
         _launch_tools(),
     )
@@ -1254,7 +1256,10 @@ async def _handshake_client_capabilities(self: AcpRuntime) -> dict[str, Any]:
         # KAS takes the opt-out only at initialize. It is judged on the child's own
         # environment, in launch's order: the gateway's, agent.env, then extra_env.
         # The agent.env snapshot read here is the one launch applies.
-        self._spawn_agent_env = await asyncio.to_thread(agent_env_overlay)
+        override = getattr(self, "_agent_env_override", None)
+        self._spawn_agent_env = (
+            dict(override) if override is not None else await asyncio.to_thread(agent_env_overlay)
+        )
         telemetry_on = await asyncio.to_thread(
             kas_cli_settings.kiro_cli_telemetry_enabled,
             self._work_dir,
