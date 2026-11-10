@@ -746,7 +746,19 @@ def _url_payload_command(n: int) -> str:
 #: (``/owa/?ItemID=<id>&exvsurl=1&...``) in ``redaction_entropy``, its use by
 #: the exfil gate and its five names in the ``redaction`` facade manifest, so
 #: Graph's own message and event links are not masked or blocked. Re-measured.
-_PACKAGE_LINE_BUDGET = 35_227
+#: Raised by 134, to 35,361, for the ``self-protection-git-pager`` floor: a
+#: structural predicate refusing any git command that opens or configures a pager, its
+#: ungated-floor id, note and facade exports; a cheap git-absent gate plus an exception
+#: guard on the payload walk so a raising helper cannot escape ``is_denied``; and the
+#: package facade and ``argv_floor`` ``TYPE_CHECKING`` manifests restating
+#: ``_is_git_pager`` and the four pager helpers it forwards. Re-measured.
+#: Raised by 86 more, to 35,447, for the cross-review rework (TALOS Option A): the floor
+#: now parses ORIGINAL-case argv so ``-O`` (opens a pager) is told from ``-o`` (ordinary
+#: output) and a short-option cluster stops at an operand, and it refuses a pager route
+#: only when a program would actually run -- allowing an empty ``core.pager`` / ``GIT_PAGER``
+#: / ``PAGER``, a git-false ``pager.<cmd>``, and ``--no-pager`` / ``-P`` (never for
+#: ``grep -O``). Value-insensitivity is kept: any named program is still refused. Re-measured.
+_PACKAGE_LINE_BUDGET = 35_447
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
