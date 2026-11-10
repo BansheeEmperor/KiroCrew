@@ -1225,46 +1225,11 @@
       "description": "Client ID, client secret and redirect URI for a provider that needs a registered OAuth app"
     },
     {
-      "id": "connections.oauth-client-gmail",
+      "id": "connections.oauth-client-google",
       "label": "OAuth app",
       "tab": "connections",
-      "route": "/settings/connections?highlight=connections.oauth-client-gmail",
-      "description": "Client ID, client secret and redirect URI for a provider that needs a registered OAuth app"
-    },
-    {
-      "id": "connections.oauth-client-google-drive",
-      "label": "OAuth app",
-      "tab": "connections",
-      "route": "/settings/connections?highlight=connections.oauth-client-google-drive",
-      "description": "Client ID, client secret and redirect URI for a provider that needs a registered OAuth app"
-    },
-    {
-      "id": "connections.oauth-client-google-calendar",
-      "label": "OAuth app",
-      "tab": "connections",
-      "route": "/settings/connections?highlight=connections.oauth-client-google-calendar",
-      "description": "Client ID, client secret and redirect URI for a provider that needs a registered OAuth app"
-    },
-    {
-      "id": "connections.oauth-client-google-sheets",
-      "label": "OAuth app",
-      "tab": "connections",
-      "route": "/settings/connections?highlight=connections.oauth-client-google-sheets",
-      "description": "Client ID, client secret and redirect URI for a provider that needs a registered OAuth app"
-    },
-    {
-      "id": "connections.oauth-client-google-docs",
-      "label": "OAuth app",
-      "tab": "connections",
-      "route": "/settings/connections?highlight=connections.oauth-client-google-docs",
-      "description": "Client ID, client secret and redirect URI for a provider that needs a registered OAuth app"
-    },
-    {
-      "id": "connections.oauth-client-google-slides",
-      "label": "OAuth app",
-      "tab": "connections",
-      "route": "/settings/connections?highlight=connections.oauth-client-google-slides",
-      "description": "Client ID, client secret and redirect URI for a provider that needs a registered OAuth app"
+      "route": "/settings/connections?highlight=connections.oauth-client-google",
+      "description": "One Google OAuth client for Gmail, Drive, Calendar, Sheets, Docs and Slides"
     },
     {
       "id": "developer.agent-harness-for-worker-chats",
@@ -1379,7 +1344,7 @@
       "label": "GitHub sign-in by Kiro Crew",
       "tab": "developer",
       "route": "/settings/developer/feature-previews?highlight=developer.github-sign-in-by-kiro-crew",
-      "description": "Lets Kiro Agent chats use your GitHub profile, orgs and public repos. Turn it on, then connect GitHub in Customize > Connections.",
+      "description": "Lets Kiro Agent chats use your GitHub profile, orgs and public repos. Turn it on, then connect GitHub in Settings > Connections.",
       "hint": "Kiro Crew signs in to GitHub itself. Disconnect GitHub on Connections to remove access."
     },
     {

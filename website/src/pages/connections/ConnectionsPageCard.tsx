@@ -25,12 +25,10 @@ import {
   Lock,
   RotateCw,
   Settings2,
+  ChevronDown,
   Unplug,
   X,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
-import { settingsPath } from '../../components/settingsPath'
-import { connectionsOAuthClientEntryId } from '../../components/commandPalette/settingsManual'
 import type { McpServer } from '../../types'
 import { fmtDate, fmtList } from '../../i18n/format'
 import { Btn } from '../../components/ui'
@@ -113,6 +111,11 @@ interface ConnectionCardProps {
   testingProvider?: string
   feedbackSlots: ReadonlyArray<{ slug: string; value: Feedback }>
   highlighted: boolean
+  /** Clicking the card's name opens its configuration in place: the actions
+   *  and, for a pre-registered provider, `oauthPanel`. Undefined renders the
+   *  card always open, for a product row inside the Google entry. */
+  expand?: { expanded: boolean; onToggle: () => void; panelId: string }
+  oauthPanel?: ReactNode
   onConnect: () => Promise<unknown>
   onCancel: () => Promise<unknown>
   onDisconnect: () => Promise<unknown>
@@ -294,6 +297,8 @@ function ConnectionCard({
   testingProvider,
   feedbackSlots,
   highlighted,
+  expand,
+  oauthPanel,
   onConnect,
   onCancel,
   onDisconnect,
@@ -652,11 +657,14 @@ function ConnectionCard({
     if (delivered) setReturnAddress('')
   }
 
+  // A consent in flight stays open: its Re-open and Cancel are the way out,
+  // and a flow started from a chat banner must not hide behind a click.
+  const open = expand === undefined || expand.expanded || state === 'waiting-for-approval'
   return (
     <article
       id={`connection-${provider.slug}`}
       data-state={state}
-      className={`relative flex flex-col rounded-lg border bg-card p-3.5 shadow-sm transition-colors ${
+      className={`relative flex flex-col rounded-lg border bg-card p-3.5 shadow-sm transition-colors ${open && oauthPanel !== undefined ? 'xl:col-span-2 2xl:col-span-3 ' : ''}${
         highlighted ? 'border-accent ring-1 ring-accent/40' : state === 'needs-attention' ? 'border-danger/40' : 'border-border'
       }`}
     >
@@ -673,7 +681,20 @@ function ConnectionCard({
             </span>
           )}
         </span>
-        <h3 className="m-0 min-w-0 flex-1 truncate text-[14px] font-semibold text-text-strong">{provider.name}</h3>
+        <h3 className="m-0 min-w-0 flex-1 truncate text-[14px] font-semibold text-text-strong">
+          {expand ? (
+            <button
+              type="button"
+              onClick={expand.onToggle}
+              aria-expanded={expand.expanded}
+              aria-controls={expand.panelId}
+              className="inline-flex max-w-full items-center gap-1 border-none bg-transparent p-0 text-left font-semibold text-text-strong hover:text-accent"
+            >
+              <span className="min-w-0 truncate">{provider.name}</span>
+              <ChevronDown className={`h-3.5 w-3.5 shrink-0 transition-transform ${expand.expanded ? 'rotate-180' : ''}`} aria-hidden="true" />
+            </button>
+          ) : provider.name}
+        </h3>
         <span className={`inline-flex shrink-0 items-center gap-1 text-[11px] font-medium ${meta.tone}`}>
           {meta.icon}
           {meta.label}
@@ -703,7 +724,11 @@ function ConnectionCard({
         {valueProp}
       </p>
 
-      <div className="mt-auto">
+      {/* Closed, a card shows its name, status and value prop, plus the one
+          next step a new user needs: Connect on a not-connected card, Configure
+          (which is the expand) on a missing client. Every other action and the
+          OAuth app form open with the card. */}
+      {(open || state === 'needs-configuration' || state === 'not-connected') && <div id={expand?.panelId} className="mt-auto">
         {state === 'not-connected' && (
           <div className="flex items-center justify-between gap-3">
             <a href={provider.docs_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[12px] text-muted hover:text-text">
@@ -843,16 +868,21 @@ function ConnectionCard({
                 heading={t('pages.connectionsPage.before_you_connect')}
                 text={t('pages.connectionsPage.needs_configuration_help', { provider: provider.name })}
               />
-              {/* A route, not a Connect button: the missing step lives on the
-                  Settings tab, and only the owner can complete it. The highlight
-                  lands on this provider's card there. */}
-              <Link
-                to={settingsPath({ tab: 'connections', highlight: connectionsOAuthClientEntryId(provider.slug) })}
-                className="inline-flex items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-[12px] font-medium text-accent-fg hover:opacity-90"
-              >
-                <Settings2 className="w-3.5 h-3.5" aria-hidden="true" />
-                {t('pages.connectionsPage.configure_oauth_app')}
-              </Link>
+              {/* Not a Connect button: the missing step is the OAuth app part,
+                  which opens in place on this card. Only the owner can save it. */}
+              {/* Shown only while closed: once open, the form below is the
+                  next step and the name toggle closes the card. */}
+              {expand && !open && oauthPanel !== undefined && (
+                <Btn
+                  primary
+                  onClick={expand.onToggle}
+                  aria-expanded={expand.expanded}
+                  aria-controls={expand.panelId}
+                >
+                  <Settings2 className="w-3.5 h-3.5" aria-hidden="true" />
+                  {t('pages.connectionsPage.configure_oauth_app')}
+                </Btn>
+              )}
             </div>
           </div>
         )}
@@ -1001,7 +1031,15 @@ function ConnectionCard({
             </div>
           </div>
         )}
-      </div>
+      </div>}
+
+      {/* Hidden, not unmounted, while closed: closing the card keeps a typed
+          but unsaved Client ID and secret. */}
+      {oauthPanel !== undefined && (
+        <div className="mt-3 border-t border-border pt-3" hidden={!open}>
+          {oauthPanel}
+        </div>
+      )}
 
       {feedbackSlots.length > 0 && (
         <div data-slot="connection-feedback" className="mt-3 grid text-[11px]">

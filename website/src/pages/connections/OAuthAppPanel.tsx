@@ -1,9 +1,10 @@
-// Settings → OAuth Apps: the operator's OAuth clients for providers whose
-// remote MCP server refuses dynamic client registration (GitHub, Asana, ...).
+// The OAuth app part of a Connections card: the operator's OAuth client for a
+// provider whose remote MCP server refuses dynamic client registration (GitHub,
+// Asana, ...). It opens in place on that provider's card in Settings →
+// Connections; the Google entry has one for all six Google products.
 //
-// One card per pre-registered registry provider. Each card is the single place
-// a registration runbook points to ("enter the credentials under Settings →
-// Connections → <Provider>"), so it carries everything that runbook's last step
+// It is the single place a registration runbook points to ("enter the
+// credentials under Settings → Connections → <Provider>"), so it carries everything that runbook's last step
 // needs: the exact redirect URI to copy into the vendor console, the Client ID
 // field, the Client secret field, where the stored halves came from (dashboard
 // vs environment) and a link back to the runbook itself.
@@ -14,8 +15,8 @@
 // grant -- that stays with kiro-cli, unchanged.
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { BookOpen, Check, Copy, Lock, Trash2 } from 'lucide-react'
-import { SettingsCard, SettingsInput, SettingsSection, SettingsToggle } from '../../components/settings'
+import { BookOpen, Check, Copy, Lock, Terminal, Trash2 } from 'lucide-react'
+import { SettingsInput, SettingsToggle } from '../../components/settings'
 import { SecretField } from '../../components/SecretField'
 import { Btn } from '../../components/ui'
 import ErrorNotice from '../../components/ErrorNotice'
@@ -23,22 +24,21 @@ import AgentSpecNotRewrittenNotice, { agentSpecNotRewritten } from '../../compon
 import { api, type ConnectionOAuthClient, type ConnectionOAuthClientSave } from '../../api/client'
 import { copyToClipboard } from '../../utils/clipboard'
 import { i18nT } from '../../i18n/t'
-import { CONNECTION_PROVIDERS } from '../connections/registry'
+import { CONNECTION_PROVIDERS } from './registry'
+import { isGoogleSlug } from './connectionsLinks'
 
 export const OAUTH_CLIENTS_QUERY_KEY = ['connections', 'oauth-clients'] as const
 
 /** Repository docs are the runbook's home; the link resolves against main. */
 const RUNBOOK_BASE = 'https://github.com/kirodotdev/KiroCrew/blob/main/docs/guides/'
 
-/** `[data-setting-id]` the gallery card deep-links to for one provider. */
+/** The Google entry's setup scripts and private-app guide, on main. */
+const GOOGLE_SETUP_SCRIPT = 'https://github.com/kirodotdev/KiroCrew/blob/main/scripts/google-oauth-setup'
+const GOOGLE_PRIVATE_APP_GUIDE = `${RUNBOOK_BASE}oauth-app-registration/google.md`
+
+/** `[data-setting-id]` the settings search entry for one card waits for. */
 export function oauthClientSettingId(slug: string): string {
   return `connections-oauth-client-${slug}`
-}
-
-/** The six Google cards (Gmail, Drive, Calendar, Sheets, Docs, Slides) can all
- *  use one Google OAuth client, so a save on one may fill the others. */
-export function isGoogleSlug(slug: string): boolean {
-  return slug === 'gmail' || slug.startsWith('google-')
 }
 
 function envName(slug: string, half: 'CLIENT_ID' | 'CLIENT_SECRET'): string {
@@ -101,10 +101,22 @@ class PartialShareError extends Error {
   }
 }
 
-function ClientCard({ client, index, readOnly, shareWith }: { client: ConnectionOAuthClient; index: number; readOnly: boolean; shareWith: ConnectionOAuthClient[] }) {
+interface RedirectRow { slug: string; name: string; uri: string }
+
+function ClientCard({ client, readOnly, shareWith, settingSlug, redirects }: {
+  client: ConnectionOAuthClient
+  readOnly: boolean
+  shareWith: ConnectionOAuthClient[]
+  /** The settings search id this part answers to (`google` for the Google entry). */
+  settingSlug: string
+  /** Every product's redirect URI for the Google entry; one row otherwise. */
+  redirects: RedirectRow[]
+}) {
   const qc = useQueryClient()
   const provider = CONNECTION_PROVIDERS.find(p => p.slug === client.slug)
-  const name = provider?.name ?? client.slug
+  const google = redirects.length > 1
+  // The Google entry's one part speaks for every Google product, not the first.
+  const name = google ? i18nT('pages.connectionsPage.google_entry_name') : provider?.name ?? client.slug
   // Draft state mirrors the channel panels: the id is edited in place, the
   // secret is write-only with a deferred clear, and a save remounts the secret
   // field (formKey) so a stored value never lingers in the draft.
@@ -192,8 +204,28 @@ function ClientCard({ client, index, readOnly, shareWith }: { client: Connection
       setError(e instanceof Error ? e.message : String(e))
     },
   })
+  // The Google part removes every Google product's stored client, as its Save
+  // writes them all; an environment-set half is not stored, so it stays.
+  const storedPeers = shareWith.filter(peer => peer.client_id_source === 'config' || peer.client_secret_source === 'vault')
+  const ownStored = !!(client.client_id || client.client_secret_set) && !(envId && envSecret)
   const deleteMut = useMutation({
-    mutationFn: () => api.connectionsOAuthClientDelete(client.slug),
+    mutationFn: async () => {
+      let result = ownStored ? await api.connectionsOAuthClientDelete(client.slug) : undefined
+      let firstError: unknown
+      for (const peer of storedPeers) {
+        try {
+          const r = await api.connectionsOAuthClientDelete(peer.slug)
+          if (agentSpecNotRewritten(r)) result = r
+        } catch (e) {
+          firstError ??= e
+        }
+      }
+      if (firstError !== undefined) {
+        void qc.invalidateQueries({ queryKey: OAUTH_CLIENTS_QUERY_KEY })
+        throw firstError
+      }
+      return result
+    },
     onSuccess: (r) => {
       setNotApplied(agentSpecNotRewritten(r))
       setClientId('')
@@ -233,18 +265,18 @@ function ClientCard({ client, index, readOnly, shareWith }: { client: Connection
     : i18nT('pages.settings.connectionsPanel.client_secret_optional', { provider: name })
 
   return (
-    <SettingsCard index={index}>
+    <>
       {/* `data-setting-label` is the anchor the settings search registry's manual
-          entry for this card (settingsManual.ts, labelKey oauth_app + the provider
-          name as suffix) resolves to; `data-setting-id` is what the gallery's deep
-          link waits for. */}
+          entry for this part (settingsManual.ts, labelKey oauth_app + the provider
+          name as suffix) resolves to; `data-setting-id` is what a search hit or an
+          old OAuth Apps link waits for once the card has opened this part. */}
       <div
-        data-setting-id={oauthClientSettingId(client.slug)}
+        data-setting-id={oauthClientSettingId(settingSlug)}
         data-setting-label={i18nT('pages.settings.connectionsPanel.oauth_app')}
         className="space-y-3"
       >
         <div className="flex items-center justify-between gap-3">
-          <h4 className="m-0 text-sm font-semibold text-text-strong">{name}</h4>
+          <h4 className="m-0 text-[13px] font-semibold text-text-strong">{i18nT('pages.settings.connectionsPanel.oauth_app')}</h4>
           <span className={`inline-flex items-center gap-1 text-[11px] font-medium ${client.configured ? 'text-ok' : 'text-muted'}`}>
             {client.configured ? <Check className="w-3.5 h-3.5" aria-hidden="true" /> : <Lock className="w-3.5 h-3.5" aria-hidden="true" />}
             {client.configured
@@ -254,20 +286,46 @@ function ClientCard({ client, index, readOnly, shareWith }: { client: Connection
         </div>
         <p className="m-0 text-[12.5px] text-muted">
           {i18nT('pages.settings.connectionsPanel.card_intro', { provider: name })}{' '}
-          <a
-            href={`${RUNBOOK_BASE}${client.registration_guide}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-accent hover:underline"
-          >
-            <BookOpen className="w-3.5 h-3.5" aria-hidden="true" />
-            {i18nT('pages.settings.connectionsPanel.open_runbook', { provider: name })}
-          </a>
+          {google ? (
+            <>
+              <a href={GOOGLE_PRIVATE_APP_GUIDE} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent hover:underline">
+                <BookOpen className="w-3.5 h-3.5" aria-hidden="true" />
+                {i18nT('pages.connectionsPage.google_private_app_guide')}
+              </a>{' '}
+              {/* The PowerShell twin on Windows, the shell script elsewhere. */}
+              <a
+                href={`${GOOGLE_SETUP_SCRIPT}${typeof navigator !== 'undefined' && /Win/.test(navigator.platform) ? '.ps1' : '.sh'}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-accent hover:underline"
+              >
+                <Terminal className="w-3.5 h-3.5" aria-hidden="true" />
+                {i18nT('pages.connectionsPage.google_setup_script')}
+              </a>
+            </>
+          ) : (
+            <a
+              href={`${RUNBOOK_BASE}${client.registration_guide}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-accent hover:underline"
+            >
+              <BookOpen className="w-3.5 h-3.5" aria-hidden="true" />
+              {i18nT('pages.settings.connectionsPanel.open_runbook', { provider: name })}
+            </a>
+          )}
         </p>
 
         <div className="space-y-1">
-          <div className="text-[12px] font-medium text-text">{i18nT('pages.settings.connectionsPanel.redirect_uri')}</div>
-          <CopyRedirectUri value={client.redirect_uri} />
+          <div className="text-[12px] font-medium text-text">
+            {google ? i18nT('pages.connectionsPage.google_redirect_uris') : i18nT('pages.settings.connectionsPanel.redirect_uri')}
+          </div>
+          {redirects.map(row => (
+            <div key={row.slug} className="min-w-0">
+              {google && <div className="text-[11.5px] text-muted">{row.name}</div>}
+              <CopyRedirectUri value={row.uri} />
+            </div>
+          ))}
           <p className="m-0 text-[11.5px] text-muted">{i18nT('pages.settings.connectionsPanel.redirect_uri_help')}</p>
         </div>
 
@@ -327,7 +385,8 @@ function ClientCard({ client, index, readOnly, shareWith }: { client: Connection
               ? i18nT('pages.settings.connectionsPanel.share_google_partial_title', { products: partialFailed.join(', ') })
               : i18nT('pages.settings.connectionsPanel.save_failed')}
             message={partialFailed
-              ? i18nT('pages.settings.connectionsPanel.share_google_partial', { provider: name })
+              // The product the save landed on, not the entry's "Google".
+              ? i18nT('pages.settings.connectionsPanel.share_google_partial', { provider: provider?.name ?? client.slug })
               : error}
           />
         )}
@@ -355,7 +414,7 @@ function ClientCard({ client, index, readOnly, shareWith }: { client: Connection
             ) : (
               <Btn
                 onClick={() => setRemoveConfirm(true)}
-                disabled={deleteMut.isPending || (!client.client_id && !client.client_secret_set) || (envId && envSecret)}
+                disabled={deleteMut.isPending || (!ownStored && storedPeers.length === 0)}
                 aria-label={i18nT('pages.settings.connectionsPanel.remove_client', { provider: name })}
               >
                 <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
@@ -373,45 +432,50 @@ function ClientCard({ client, index, readOnly, shareWith }: { client: Connection
           </div>
         )}
       </div>
-    </SettingsCard>
+    </>
   )
 }
 
-export function ConnectionsPanel({ readOnly = false }: { readOnly?: boolean }) {
+/**
+ * The OAuth app part for `slugs`: one provider, or the six Google products,
+ * which share one form (a save fills every product unless the person opts out)
+ * and list every product's redirect URI.
+ */
+export function OAuthAppPanel({ slugs, settingSlug, readOnly = false }: { slugs: string[]; settingSlug: string; readOnly?: boolean }) {
   const { data, isLoading, error } = useQuery({
     queryKey: OAUTH_CLIENTS_QUERY_KEY,
     queryFn: api.connectionsOAuthClients,
   })
-  const clients = data?.clients ?? []
-  const googleClients = clients.filter(c => isGoogleSlug(c.slug))
-
+  if (error) {
+    // A list-load failure: nothing is typed yet, so the hand-off can destroy
+    // nothing and the agent is the right next step.
+    return (
+      <ErrorNotice
+        title={i18nT('pages.settings.connectionsPanel.load_failed')}
+        message={error instanceof Error ? error.message : String(error)}
+        askAgent
+      />
+    )
+  }
+  if (isLoading) return <p className="m-0 text-[12.5px] text-muted">{i18nT('pages.settings.connectionsPanel.loading')}</p>
+  // In `slugs` order: the first listed slug is the one this part saves.
+  const clients = slugs.flatMap(slug => (data?.clients ?? []).filter(c => c.slug === slug))
+  // The form edits the first product the environment does not own, so an
+  // environment-set Gmail does not lock the shared Google form.
+  const primary = clients.find(c => c.client_id_source !== 'env' && c.client_secret_source !== 'env') ?? clients[0]
+  if (!primary) return <p className="m-0 text-[12.5px] text-muted">{i18nT('pages.settings.connectionsPanel.none')}</p>
   return (
-    <div className="space-y-6">
-      <SettingsSection title={i18nT('pages.settings.connectionsPanel.title')}>
-        <p className="m-0 text-[12.5px] text-muted">{i18nT('pages.settings.connectionsPanel.intro')}</p>
-        {error && (
-          // A list-load failure: nothing is typed yet, so the hand-off can destroy
-          // nothing and the agent is the right next step.
-          <ErrorNotice
-            title={i18nT('pages.settings.connectionsPanel.load_failed')}
-            message={error instanceof Error ? error.message : String(error)}
-            askAgent
-          />
-        )}
-        {isLoading && <p className="m-0 text-[12.5px] text-muted">{i18nT('pages.settings.connectionsPanel.loading')}</p>}
-        {!isLoading && !error && clients.length === 0 && (
-          <p className="m-0 text-[12.5px] text-muted">{i18nT('pages.settings.connectionsPanel.none')}</p>
-        )}
-        {clients.map((client, index) => (
-          <ClientCard
-            key={client.slug}
-            client={client}
-            index={index + 1}
-            readOnly={readOnly}
-            shareWith={isGoogleSlug(client.slug) ? googleClients.filter(c => c.slug !== client.slug) : []}
-          />
-        ))}
-      </SettingsSection>
-    </div>
+    <ClientCard
+      key={primary.slug}
+      client={primary}
+      readOnly={readOnly}
+      shareWith={isGoogleSlug(primary.slug) ? clients.filter(c => c.slug !== primary.slug) : []}
+      settingSlug={settingSlug}
+      redirects={clients.map(c => ({
+        slug: c.slug,
+        name: CONNECTION_PROVIDERS.find(p => p.slug === c.slug)?.name ?? c.slug,
+        uri: c.redirect_uri,
+      }))}
+    />
   )
 }

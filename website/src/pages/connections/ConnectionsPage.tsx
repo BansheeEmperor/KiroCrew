@@ -1,11 +1,11 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useLocation } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { uiLocation } from '../../uiLocations/uiLocation'
-import { GuideRevealScope } from '../../guide/GuideRevealScope'
-import { Link2, Server } from 'lucide-react'
-import { useConnectionsSubTab } from './useConnectionsSubTab'
+import { ChevronDown } from 'lucide-react'
+import { CONNECTION_PROVIDER_PARAM, GOOGLE_ENTRY_SLUG, isGoogleSlug } from './connectionsLinks'
+import { OAuthAppPanel } from './OAuthAppPanel'
+import ProviderLogo from './ProviderLogo'
 import { api, ApiError, type ConnectionMintState, type ConnectionStatus } from '../../api/client'
 import { useAppSelector } from '../../store'
 import type { McpApplyChange, McpServer } from '../../types'
@@ -16,14 +16,12 @@ import { fmtList } from '../../i18n/format'
 import { findReport, parseErrorCode } from '../../utils/errorReport'
 import { OAUTH_ENDPOINT_ALLOWLIST_GUIDE_URL } from '../../utils/docsLink'
 import { safeGetSessionItem, safeSetSessionItem } from '../../utils/safeStorage'
-import McpTab from '../overview/McpTab'
-import { McpStagedEditsProvider } from './mcpStagedEditsContext'
 import {
   CONNECTION_PROVIDERS,
+  isPreregisteredProvider,
   serverForConnection,
   type ConnectionProvider,
 } from './registry'
-import { guideAnchor } from '../../uiLocations/targetRegistry'
 import { ConnectionCard } from './ConnectionsPageCard'
 import {
   confirmedGrantPresent, connectionStateFor, disconnectFeedback, effectiveOAuth, latestOAuthByServer, mintOutcome,
@@ -31,9 +29,16 @@ import {
   type PendingConnect,
 } from './connectionsPageCardState'
 
-/** Lazy: MCP Management (gateway status, servers and footprint queries) loads
- *  only when the MCP Servers sub-tab renders it. */
-const McpManagement = lazy(() => import('../settings/McpManagement').then(m => ({ default: m.McpManagement })))
+/** How a settings search hit or an old OAuth Apps link names one OAuth app. */
+const OAUTH_HIGHLIGHT_PREFIX = 'connections.oauth-client-'
+
+/** The card (or the Google entry) a provider slug lives in on this page. */
+/** Every Google product the one Google OAuth app part saves and removes. */
+const GOOGLE_PANEL_SLUGS = CONNECTION_PROVIDERS.filter(provider => isGoogleSlug(provider.slug)).map(provider => provider.slug)
+
+function entryOf(slug: string): string {
+  return isGoogleSlug(slug) ? GOOGLE_ENTRY_SLUG : slug
+}
 
 // A provider card renders from `ConnectionsPageCard.tsx`, and what it shows is
 // decided in `connectionsPageCardState.ts`; neither imports this module. Callers
@@ -74,19 +79,26 @@ const CONNECTION_STATUS_POLL_MS = 30_000
  * the instance pulled the `connections_ui` escape hatch: the Services panel
  * offers no providers, so no card, Connect button or OAuth flow is reachable.
  *
- * A closed panel still RENDERS rather than being removed, which is deliberate.
- * Hiding the sub-tab and defaulting to the MCP Servers table was tried and
- * reverted: it makes that table the default-rendered surface and so exposes its
- * pre-existing i18n debt to the render-time gate, which measured
- * `capabilities-mcp` going 44 -> 102 findings. Emptying the list keeps the
- * measured surface comparable (568 -> 558 overall, gate PASS) while still
- * removing every way to actually connect a provider.
+ * A closed panel still RENDERS rather than being removed, so the page keeps
+ * one shape with the gallery empty.
+ *
+ * A pre-registered provider's card opens its OAuth app part in place; the six
+ * Google products are one entry with one OAuth app part for all of them.
  */
 export default function ConnectionsPage({ servicesEnabled = false }: { servicesEnabled?: boolean } = {}) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [activeTab, setActiveTab] = useConnectionsSubTab()
-  const { hash, key: navKey } = useLocation()
+  const [params, setParams] = useSearchParams()
+  const providerParam = params.get(CONNECTION_PROVIDER_PARAM)
+  const highlightParam = params.get('highlight')
+  /** Entries (a provider slug, or the Google entry) whose OAuth app part is open. */
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  const toggleExpanded = (entry: string) => setExpanded(prev => {
+    const next = new Set(prev)
+    if (next.has(entry)) next.delete(entry)
+    else next.add(entry)
+    return next
+  })
   // Kept for the browser tab: opening a chat unmounts this page, and the
   // search must still be there on the way back (#25962).
   const [search, setSearch] = useState(() => safeGetSessionItem(SERVICES_SEARCH_KEY) ?? '')
@@ -121,7 +133,7 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
   const { data: servers = [], isLoading, isError } = useQuery<McpServer[]>({
     queryKey: ['mcp-servers'],
     queryFn: () => api.mcpServers(),
-    refetchInterval: activeTab === 'services' && Object.values(locallyWaiting).some(Boolean) ? 5_000 : false,
+    refetchInterval: Object.values(locallyWaiting).some(Boolean) ? 5_000 : false,
   })
 
   // Authorization verdict + first-connect time per visible provider. Polled while
@@ -139,10 +151,8 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
       return next
     },
     enabled: servicesEnabled,
-    // Only while the gallery is the visible surface. On the MCP Servers tab no
-    // card is rendered, so a background poll would stat every provider's grant
-    // artifacts every 30s for a surface nobody is looking at.
-    refetchInterval: activeTab === 'services' ? CONNECTION_STATUS_POLL_MS : false,
+    // Only while this page is mounted, which is while the gallery is on screen.
+    refetchInterval: CONNECTION_STATUS_POLL_MS,
     // A cached verdict from before a Connect would show Connect again on
     // navigating back, and a click would replace the live sign-in.
     refetchOnMount: 'always',
@@ -375,31 +385,45 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
     return value ? [{ slug: provider.slug, value }] : []
   })
 
+  // `?provider=<slug>` (a managed row on the MCP Servers page links with it)
+  // rings that card, clears a search that would hide it and opens its OAuth app
+  // part. The param is then dropped with a replace, so a reload does not repeat it.
   useEffect(() => {
-    if (activeTab !== 'services' || !highlightedSlug) return
-    requestAnimationFrame(() => {
-      document.getElementById(`connection-${highlightedSlug}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    })
-  }, [activeTab, highlightedSlug])
+    if (!providerParam) return
+    setSearch('')
+    setHighlightedSlug(providerParam)
+    setExpanded(prev => new Set(prev).add(entryOf(providerParam)))
+    setParams(prev => {
+      const next = new URLSearchParams(prev)
+      next.delete(CONNECTION_PROVIDER_PARAM)
+      return next
+    }, { replace: true })
+  }, [providerParam, setParams])
 
-  // Land the MCP-Management link (MCP_MANAGEMENT_PATH's `#mcp-management`
-  // fragment, followed from the share-refused notice, the /developer?tab=mcp-pool
-  // redirect and the "Open MCP Gateway" tip) ON the section rather than at the
-  // top of the servers list. react-router does not scroll to a fragment on a
-  // client-side navigation, and the section mounts only on the MCP Servers
-  // sub-tab, so it is done here once both hold. rAF waits a frame for the panel
-  // to render after the sub-tab switch. `navKey` is in the deps so clicking the
-  // same `#mcp-management` link again (a repeat navigation to an unchanged URL,
-  // where neither `activeTab` nor `hash` changes) still re-runs the scroll.
-  // It also waits for the shared `['mcp-servers']` query McpTab renders the list
-  // from: while it loads, McpTab shows a short skeleton, and a scroll then would
-  // clamp at the top and be left behind when the taller table replaces it.
+  // A settings search hit or an old OAuth Apps link (`?highlight=
+  // connections.oauth-client-<slug>`) names an OAuth app part: open it so the
+  // settings highlight finds the anchor. SettingsPage's highlight hook owns the
+  // ring and strips the param.
   useEffect(() => {
-    if (activeTab !== 'mcp-servers' || hash !== '#mcp-management' || isLoading) return
-    requestAnimationFrame(() => {
-      document.getElementById('mcp-management')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    if (!highlightParam?.startsWith(OAUTH_HIGHLIGHT_PREFIX)) return
+    const slug = highlightParam.slice(OAUTH_HIGHLIGHT_PREFIX.length)
+    setSearch('')
+    setExpanded(prev => new Set(prev).add(entryOf(slug)))
+  }, [highlightParam])
+
+  // Retried when the list lands: on a cold load the card is not rendered on
+  // the first frame. Scrolls once per highlight.
+  const scrolledFor = useRef('')
+  useEffect(() => {
+    if (!highlightedSlug || scrolledFor.current === highlightedSlug || isLoading) return
+    const frame = requestAnimationFrame(() => {
+      const el = document.getElementById(`connection-${highlightedSlug}`)
+      if (!el) return
+      scrolledFor.current = highlightedSlug
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     })
-  }, [activeTab, hash, navKey, isLoading])
+    return () => cancelAnimationFrame(frame)
+  }, [highlightedSlug, isLoading])
 
   const run = async (
     provider: ConnectionProvider,
@@ -772,74 +796,26 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
     await queryClient.invalidateQueries({ queryKey: ['mcp-servers'] })
   })
 
-  const selectTab = (tab: 'services' | 'mcp-servers') => setActiveTab(tab)
-  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
-    event.preventDefault()
-    setActiveTab(activeTab === 'services' ? 'mcp-servers' : 'services')
-  }
-  const openProvider = (slug: string) => {
-    setSearch('')
-    setHighlightedSlug(slug)
-    setActiveTab('services')
-  }
+  // The six Google products render together as one entry, where the first one
+  // the filter keeps would have stood; every other provider is its own card.
+  const googleProviders = filteredProviders.filter(provider => isGoogleSlug(provider.slug))
+  const entries = filteredProviders.filter(
+    provider => !isGoogleSlug(provider.slug) || provider === googleProviders[0],
+  )
+  const oauthPanelId = (entry: string) => `connection-oauth-app-${entry}`
 
   return (
     <section className="min-w-0" aria-label={t('pages.connectionsPage.connections')}>
-      {/* Apply & Restart lives here because this is where MCP server changes
-          are made: a newly enabled server reaches a chat that is already
-          running only after its session is relaunched. Outside the tablist so
-          the tab roles stay a clean pair. The muted line beside it says what
-          restarts and what is kept BEFORE the click — "Restart" alone reads as
-          "interrupts whatever is running", and the confirm is too late for the
-          reader deciding whether to press at all. */}
-      {/* Narrow-first: at 320px the tablist, the hint and the button cannot
-          share one row, so they stack (tabs, then the restart controls beneath
-          them) and only join into one header band from `sm` up. */}
-      <div className="mb-4 flex flex-col gap-2 border-b border-border sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-        <div className="flex" role="tablist" aria-label={t('pages.connectionsPage.connection_views')}>
-          <button
-            id="connections-services-tab"
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'services'}
-            aria-controls="connections-services-panel"
-            tabIndex={activeTab === 'services' ? 0 : -1}
-            onClick={() => selectTab('services')}
-            onKeyDown={onTabKeyDown}
-            className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] font-medium transition-colors ${activeTab === 'services' ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-text'}`}
-          >
-            <Link2 className="h-4 w-4" aria-hidden="true" /> {t('pages.connectionsPage.services')}
-          </button>
-          <button
-            id="connections-mcp-tab"
-            // One spread: the anchor's registering ref rides in as the location's own.
-            {...uiLocation('connections.mcp-servers-tab', guideAnchor('mcp.servers-tab').ref)}
-            data-guide-anchor="mcp.servers-tab"
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'mcp-servers'}
-            aria-controls="connections-mcp-panel"
-            tabIndex={activeTab === 'mcp-servers' ? 0 : -1}
-            onClick={() => selectTab('mcp-servers')}
-            onKeyDown={onTabKeyDown}
-            className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] font-medium transition-colors ${activeTab === 'mcp-servers' ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-text'}`}
-          >
-            <Server className="h-4 w-4" aria-hidden="true" /> {t('pages.connectionsPage.mcp_servers')}
-          </button>
-        </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 pb-2 sm:justify-end sm:pb-1.5">
-          <span className="min-w-0 max-w-[34rem] text-[11.5px] leading-snug text-muted">{t('components.restartButton.beside_hint')}</span>
-          <RestartButton />
-        </div>
+      {/* Apply & Restart lives here because a Connect adds an MCP server: a
+          newly enabled server reaches a chat that is already running only after
+          its session is relaunched. The muted line beside it says what restarts
+          and what is kept BEFORE the click. */}
+      <div className="mb-4 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border pb-2 sm:justify-end sm:pb-1.5">
+        <span className="min-w-0 max-w-[34rem] text-[11.5px] leading-snug text-muted">{t('components.restartButton.beside_hint')}</span>
+        <RestartButton />
       </div>
 
-      {/* The MCP servers panel's scope owner: a guide walking to a control
-          on that panel points at its tab until this reads open. Outside the
-          panel conditional, so it says "closed" while the panel is unmounted. */}
-      <GuideRevealScope id="open:connections.mcp-servers-tab" open={activeTab === 'mcp-servers'}>
-      {activeTab === 'services' ? (
-        <div id="connections-services-panel" role="tabpanel" aria-labelledby="connections-services-tab">
+      <div id="connections-services-panel">
           {servicesEnabled && <div className="mb-4 flex items-center gap-3">
             <SearchInput
               value={search}
@@ -848,7 +824,7 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
               aria-label={t('pages.connectionsPage.search_services')}
               className="max-w-[520px] flex-1"
             />
-            <Badge variant="muted">{t('pages.connectionsPage.services_available', { value: filteredProviders.length })}</Badge>
+            <Badge variant="muted">{t('pages.connectionsPage.services_available', { value: entries.length })}</Badge>
           </div>}
 
           {/* No hand-off: a card waiting for approval can hold an unsaved return address while this status re-polls. */}
@@ -864,7 +840,8 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3 xl:grid-cols-2 2xl:grid-cols-3">
-              {filteredProviders.map(provider => {
+              {(() => {
+                const cardModel = (provider: ConnectionProvider) => {
                 const server = serverForConnection(provider, servers)
                 const pending = locallyWaiting[provider.slug]
                 // A new Connect supersedes an earlier Cancel. Only the chat
@@ -900,6 +877,10 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
                   status?.needsClientConfig === true,
                   dismissedTs !== undefined,
                 )
+                return { server, oauth, status, grantPresent, unproven, state }
+                }
+                const renderCard = (provider: ConnectionProvider): ReactNode => {
+                const { server, oauth, status, grantPresent, unproven, state } = cardModel(provider)
                 const cardBusy = busy?.slug === provider.slug ? busy.action : undefined
                 // Named only when a DIFFERENT card owns the running test: this
                 // card's own in-flight test is already covered by `cardBusy`,
@@ -929,6 +910,16 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
                     testingProvider={testingProvider}
                     feedbackSlots={feedbackSlots}
                     highlighted={highlightedSlug === provider.slug}
+                    // Clicking a card opens it in place. A Google product is a
+                    // row of the open Google entry, so it has no toggle of its own.
+                    expand={isGoogleSlug(provider.slug) ? undefined : {
+                      expanded: expanded.has(provider.slug),
+                      onToggle: () => toggleExpanded(provider.slug),
+                      panelId: oauthPanelId(provider.slug),
+                    }}
+                    oauthPanel={isPreregisteredProvider(provider) && !isGoogleSlug(provider.slug)
+                      ? <OAuthAppPanel slugs={[provider.slug]} settingSlug={provider.slug} />
+                      : undefined}
                     onConnect={() => connect(provider)}
                     onCancel={() => cancelConnection(provider, server)}
                     onDisconnect={() => server ? disconnect(provider, server) : Promise.resolve()}
@@ -937,41 +928,66 @@ export default function ConnectionsPage({ servicesEnabled = false }: { servicesE
                     onRelay={returnAddress => relayReturnAddress(provider, returnAddress, oauth?.minted === true)}
                   />
                 )
-              })}
+                }
+                return entries.map(provider => {
+                  if (!isGoogleSlug(provider.slug)) return renderCard(provider)
+                  // A Google consent in flight or a Google product to reconnect
+                  // keeps the entry open, as such a card stays open on its own.
+                  const open = expanded.has(GOOGLE_ENTRY_SLUG) || googleProviders.some(provider => {
+                    const { state } = cardModel(provider)
+                    return state === 'waiting-for-approval' || state === 'needs-attention'
+                  })
+                  return (
+                    // One entry for the six Google products. Open, it holds the
+                    // one OAuth app part they share, then one row per product
+                    // with its own status, Connect and Disconnect.
+                    <section
+                      key={GOOGLE_ENTRY_SLUG}
+                      id={`connection-${GOOGLE_ENTRY_SLUG}`}
+                      aria-labelledby="connection-google-heading"
+                      className={`min-w-0 rounded-lg border border-border bg-bg-accent p-3.5 ${open ? 'xl:col-span-2 2xl:col-span-3' : ''}`}
+                    >
+                      <header className="flex items-center gap-2.5">
+                        <ProviderLogo slug="gmail" />
+                        <h3 id="connection-google-heading" className="m-0 min-w-0 flex-1 truncate text-[14px] font-semibold text-text-strong">
+                          <button
+                            type="button"
+                            onClick={() => toggleExpanded(GOOGLE_ENTRY_SLUG)}
+                            aria-expanded={open}
+                            aria-controls={oauthPanelId(GOOGLE_ENTRY_SLUG)}
+                            className="inline-flex max-w-full items-center gap-1 border-none bg-transparent p-0 text-left font-semibold text-text-strong hover:text-accent"
+                          >
+                            <span className="min-w-0 truncate">{t('pages.connectionsPage.google_entry_name')}</span>
+                            <ChevronDown className={`h-3.5 w-3.5 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} aria-hidden="true" />
+                          </button>
+                        </h3>
+                      </header>
+                      {/* Closed, the entry names the products it holds. Brand
+                          names, not prose: kept out of the i18n scan. */}
+                      {!open && (
+                        <p className="mb-0 mt-1.5 text-[12.5px] leading-[17px] text-muted" data-i18n-opaque="">
+                          {googleProviders.map(p => p.name).join(' · ')}
+                        </p>
+                      )}
+                      {/* Hidden, not unmounted, while closed: closing the entry
+                          keeps a typed but unsaved Client ID and secret. The OAuth
+                          app part always covers all six products, whatever the
+                          search shows, so one Save and one Remove reach them all. */}
+                      <div id={oauthPanelId(GOOGLE_ENTRY_SLUG)} className="mt-3" hidden={!open}>
+                        <div className="mb-3 rounded-lg border border-border bg-card p-3.5">
+                          <OAuthAppPanel slugs={GOOGLE_PANEL_SLUGS} settingSlug={GOOGLE_ENTRY_SLUG} />
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 xl:grid-cols-2 2xl:grid-cols-3">
+                          {googleProviders.map(renderCard)}
+                        </div>
+                      </div>
+                    </section>
+                  )
+                })
+              })()}
             </div>
           )}
-        </div>
-      ) : (
-        <div id="connections-mcp-panel" role="tabpanel" aria-labelledby="connections-mcp-tab">
-          <McpStagedEditsProvider>
-            <McpTab onManagedProviderClick={openProvider} />
-            {/* MCP Management (stubbing MCP servers and sharing their backends)
-                lives with the MCP Servers list it acts on — the
-                list is "what servers exist", this is "stub / share them" — and NOT
-                under the Services sub-tab, whose cards are a different thing. The
-                `mcp-management` anchor is what MCP_MANAGEMENT_PATH's fragment
-                scrolls to, so the share-refused notice's link lands on the section
-                rather than the top of the list. The provider lets McpManagement
-                withhold its "Ask the agent" hand-off while the list above holds
-                unapplied edits a /chat navigation would drop. The section and
-                its anchor render at once; only the panel body waits for its
-                chunk, so a Services visit never downloads it. */}
-            <section
-              id="mcp-management"
-              aria-labelledby="mcp-management-heading"
-              className="mt-8 min-w-0 border-t border-border pt-6"
-            >
-              <h2 id="mcp-management-heading" className="mb-4 text-[15px] font-semibold text-text-strong">
-                {t('pages.connectionsPage.mcp_management_heading')}
-              </h2>
-              <Suspense fallback={<ContentSkeleton rows={6} />}>
-                <McpManagement />
-              </Suspense>
-            </section>
-          </McpStagedEditsProvider>
-        </div>
-      )}
-      </GuideRevealScope>
+      </div>
     </section>
   )
 }

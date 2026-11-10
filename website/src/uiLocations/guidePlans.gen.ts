@@ -3,7 +3,7 @@
 import type { UiGuidePlan } from './types'
 
 /** The `build_digest` of the packaged index this bundle was built with (see `guideBuildDigest`). */
-export const GUIDE_BUILD_DIGEST = "sha256:fa787d1ba34083d65c08a9b9918e12a3f359883696c8c4d7823ce14c5db2cf2b"
+export const GUIDE_BUILD_DIGEST = "sha256:f1cb3b83b7b46cd316c5928075c9670b190c1a5ae0d84bc544cfc2493bb44f96"
 
 /** Curated location ids: the only ids a live observation may name. */
 export const GUIDE_OBSERVABLE_IDS: readonly string[] = [
@@ -68,10 +68,10 @@ export const GUIDE_OBSERVABLE_IDS: readonly string[] = [
   "composer.send",
   "composer.stop",
   "composer.voice",
-  "connections.mcp-servers-tab",
   "mcp.add-custom",
   "mcp.add-server",
   "mcp.probe",
+  "mcp.servers-view",
   "members.add-menu",
   "members.add-menu.import",
   "members.add-menu.new",
@@ -273,9 +273,9 @@ export const GUIDE_REVEAL_SCOPES = {
     "kind": "open",
     "revealer": "composer.automation"
   },
-  "open:connections.mcp-servers-tab": {
+  "open:mcp.servers-view": {
     "kind": "open",
-    "revealer": "connections.mcp-servers-tab"
+    "revealer": "mcp.servers-view"
   },
   "shell.nav-rail": {
     "kind": "state",
@@ -1694,36 +1694,19 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
       }
     ]
   },
-  "connections.mcp-servers-tab": {
-    "version": 2,
-    "label_key": "pages.connectionsPage.mcp_servers",
-    "placements": [
-      {
-        "id": "any",
-        "route": "/capabilities?tab=mcp",
-        "steps": [
-          {
-            "id": "any:connections.mcp-servers-tab",
-            "location": "connections.mcp-servers-tab",
-            "label_key": "pages.connectionsPage.mcp_servers"
-          }
-        ]
-      }
-    ]
-  },
   "mcp.add-server": {
     "version": 2,
     "label_key": "pages.overview.mcpTab.add_server",
     "placements": [
       {
         "id": "any",
-        "route": "/capabilities?tab=mcp",
+        "route": "/mcp",
         "steps": [
           {
-            "id": "any:connections.mcp-servers-tab",
-            "location": "connections.mcp-servers-tab",
-            "label_key": "pages.connectionsPage.mcp_servers",
-            "scope": "open:connections.mcp-servers-tab"
+            "id": "any:mcp.servers-view",
+            "location": "mcp.servers-view",
+            "label_key": "pages.mcpPage.view_servers",
+            "scope": "open:mcp.servers-view"
           },
           {
             "id": "any:mcp.add-server",
@@ -1740,18 +1723,35 @@ export const GUIDE_PLANS: Readonly<Record<string, UiGuidePlan>> = {
     "placements": [
       {
         "id": "any",
-        "route": "/capabilities?tab=mcp",
+        "route": "/mcp",
         "steps": [
           {
-            "id": "any:connections.mcp-servers-tab",
-            "location": "connections.mcp-servers-tab",
-            "label_key": "pages.connectionsPage.mcp_servers",
-            "scope": "open:connections.mcp-servers-tab"
+            "id": "any:mcp.servers-view",
+            "location": "mcp.servers-view",
+            "label_key": "pages.mcpPage.view_servers",
+            "scope": "open:mcp.servers-view"
           },
           {
             "id": "any:mcp.probe",
             "location": "mcp.probe",
             "label_key": "pages.overview.mcpTab.probe_mcp_servers"
+          }
+        ]
+      }
+    ]
+  },
+  "mcp.servers-view": {
+    "version": 2,
+    "label_key": "pages.mcpPage.view_servers",
+    "placements": [
+      {
+        "id": "any",
+        "route": "/mcp",
+        "steps": [
+          {
+            "id": "any:mcp.servers-view",
+            "location": "mcp.servers-view",
+            "label_key": "pages.mcpPage.view_servers"
           }
         ]
       }

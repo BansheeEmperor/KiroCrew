@@ -17,8 +17,9 @@ vi.mock('../api/client', () => ({
   },
 }))
 
-vi.mock('../pages/overview/McpTab', () => ({
-  default: () => <p>mcp servers list</p>,
+// The OAuth app part a card opens is its own unit (OAuthAppPanel.test.tsx).
+vi.mock('../pages/connections/OAuthAppPanel', () => ({
+  OAuthAppPanel: ({ settingSlug }: { settingSlug: string }) => <div data-testid={`oauth-app-${settingSlug}`} />,
 }))
 
 import ConnectionsPage from '../pages/connections/ConnectionsPage'

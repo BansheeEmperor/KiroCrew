@@ -1141,11 +1141,7 @@ export default function McpTab({ onManagedProviderClick }: McpTabProps = {}) {
                       {i18nT('pages.overview.mcpTab.agent_dropped_not_found', { command: s.agentDropped.command })}
                       <span className="block mt-0.5">
                         {i18nT('pages.overview.mcpTab.agent_dropped_fix', {
-                          page: [
-                            i18nT('nav.agent_capabilities'),
-                            i18nT('pages.capabilitiesPage.connections_label'),
-                            i18nT('pages.connectionsPage.mcp_servers'),
-                          ].join(' → '),
+                          page: i18nT('nav.mcp_servers'),
                         })}
                       </span>
                     </div>

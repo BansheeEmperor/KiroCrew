@@ -22,7 +22,8 @@ vi.mock('../../utils/clipboard', () => ({
 
 import { api, type ConnectionOAuthClient } from '../../api/client'
 import { copyToClipboard } from '../../utils/clipboard'
-import { ConnectionsPanel, oauthClientSettingId, OAUTH_CLIENTS_QUERY_KEY } from './ConnectionsPanel'
+import { OAuthAppPanel, oauthClientSettingId, OAUTH_CLIENTS_QUERY_KEY } from './OAuthAppPanel'
+import { GOOGLE_ENTRY_SLUG, isGoogleSlug } from './connectionsLinks'
 
 type Mock = ReturnType<typeof vi.fn>
 const listMock = api.connectionsOAuthClients as unknown as Mock
@@ -76,10 +77,38 @@ function cardFor(slug: string): HTMLElement {
   return el
 }
 
+/** One part per listed provider, as the Connections cards open them; the
+ *  Google products share one part, as the Google entry opens it. */
 async function mount(clients: ConnectionOAuthClient[] = [github(), asana()], readOnly = false) {
   listMock.mockResolvedValue(listResponse(clients))
-  const utils = renderWithProviders(<ConnectionsPanel readOnly={readOnly} />)
-  // Wait for the list to land: the section title renders during loading too.
+  const google = clients.map(c => c.slug).filter(isGoogleSlug)
+  const utils = renderWithProviders(
+    <>
+      {clients.filter(c => !isGoogleSlug(c.slug)).map(c => (
+        <OAuthAppPanel key={c.slug} slugs={[c.slug]} settingSlug={c.slug} readOnly={readOnly} />
+      ))}
+      {google.length > 0 && <OAuthAppPanel slugs={google} settingSlug={GOOGLE_ENTRY_SLUG} readOnly={readOnly} />}
+    </>,
+  )
+  // Wait for the list to land.
+  await waitFor(() => expect(screen.queryByText('Loading…')).not.toBeInTheDocument())
+  return utils
+}
+
+/** One part per Google product too: the page shows one Google entry, but a
+ *  second tab or an older link can still hold a draft on a single product. */
+async function mountEach(clients: ConnectionOAuthClient[]) {
+  listMock.mockResolvedValue(listResponse(clients))
+  const google = clients.map(c => c.slug).filter(isGoogleSlug)
+  const utils = renderWithProviders(
+    <>{clients.map(c => (
+      <OAuthAppPanel
+        key={c.slug}
+        slugs={isGoogleSlug(c.slug) ? [c.slug, ...google.filter(s => s !== c.slug)] : [c.slug]}
+        settingSlug={c.slug}
+      />
+    ))}</>,
+  )
   await waitFor(() => expect(screen.queryByText('Loading…')).not.toBeInTheDocument())
   return utils
 }
@@ -91,22 +120,21 @@ beforeEach(() => {
   copyMock.mockClear()
 })
 
-describe('ConnectionsPanel — one card per pre-registered provider', () => {
-  it('renders a card per client with its configured state and settings anchor', async () => {
+describe('OAuthAppPanel — one part per pre-registered provider', () => {
+  it('renders each part with its configured state and settings anchor, from one list read', async () => {
     await mount()
 
-    expect(screen.getByText('OAuth apps for Connections')).toBeInTheDocument()
     expect(listMock).toHaveBeenCalledTimes(1)
 
     const gh = cardFor('github')
     expect(gh.getAttribute('data-setting-id')).toBe('connections-oauth-client-github')
-    expect(within(gh).getByRole('heading', { name: 'GitHub' })).toBeInTheDocument()
+    expect(within(gh).getByRole('heading', { name: 'OAuth app' })).toBeInTheDocument()
     expect(within(gh).getByText('Needs configuration')).toBeInTheDocument()
     expect(within(gh).queryByText('Configured')).not.toBeInTheDocument()
 
     const as = cardFor('asana')
     expect(as.getAttribute('data-setting-id')).toBe('connections-oauth-client-asana')
-    expect(within(as).getByRole('heading', { name: 'Asana' })).toBeInTheDocument()
+    expect(within(as).getByText(/Register an app in the Asana developer console/)).toBeInTheDocument()
     expect(within(as).getByText('Configured')).toBeInTheDocument()
     expect(within(as).queryByText('Needs configuration')).not.toBeInTheDocument()
 
@@ -134,18 +162,19 @@ describe('ConnectionsPanel — one card per pre-registered provider', () => {
     expect(link).toHaveAttribute('target', '_blank')
   })
 
-  it('explains the empty and failed list states', async () => {
-    await mount([])
-    expect(screen.getByText(/nothing to configure here/)).toBeInTheDocument()
+  it('explains a provider the gateway does not list, and a failed list read', async () => {
+    listMock.mockResolvedValue(listResponse([]))
+    renderWithProviders(<OAuthAppPanel slugs={['github']} settingSlug="github" />)
+    expect(await screen.findByText(/nothing to configure here/)).toBeInTheDocument()
 
     listMock.mockRejectedValue(new Error('gateway down'))
-    renderWithProviders(<ConnectionsPanel />)
+    renderWithProviders(<OAuthAppPanel slugs={['asana']} settingSlug="asana" />)
     expect(await screen.findByText('Could not load OAuth apps')).toBeInTheDocument()
     expect(screen.getByText('gateway down')).toBeInTheDocument()
   })
 })
 
-describe('ConnectionsPanel — saving a client', () => {
+describe('OAuthAppPanel — saving a client', () => {
   it('keeps Save disabled until the Client ID changes, then sends only the id', async () => {
     await mount()
     const gh = cardFor('github')
@@ -241,7 +270,7 @@ describe('ConnectionsPanel — saving a client', () => {
   })
 })
 
-describe('ConnectionsPanel — environment-sourced halves', () => {
+describe('OAuthAppPanel — environment-sourced halves', () => {
   it('disables the Client ID input and names the overriding variable', async () => {
     await mount([github({ client_id: 'from-env', client_id_source: 'env' })])
     const gh = cardFor('github')
@@ -270,7 +299,7 @@ describe('ConnectionsPanel — environment-sourced halves', () => {
   })
 })
 
-describe('ConnectionsPanel — removing a client', () => {
+describe('OAuthAppPanel — removing a client', () => {
   it('arms on the first press and only deletes on the danger confirm', async () => {
     await mount([github({ client_id: 'abc', client_id_source: 'config', client_secret_set: true, client_secret_source: 'vault', configured: true })])
     const gh = cardFor('github')
@@ -314,7 +343,7 @@ describe('ConnectionsPanel — removing a client', () => {
   })
 })
 
-describe('ConnectionsPanel — read-only mount', () => {
+describe('OAuthAppPanel — read-only mount', () => {
   it('hides Save and Remove and locks both inputs', async () => {
     await mount([github()], true)
     const gh = cardFor('github')
@@ -325,22 +354,33 @@ describe('ConnectionsPanel — read-only mount', () => {
   })
 })
 
-describe('ConnectionsPanel — exported handles', () => {
+describe('OAuthAppPanel — exported handles', () => {
   it('derives the deep-link anchor id the gallery card routes to', () => {
     expect(oauthClientSettingId('github')).toBe('connections-oauth-client-github')
     expect(OAUTH_CLIENTS_QUERY_KEY).toEqual(['connections', 'oauth-clients'])
   })
 })
 
-describe('ConnectionsPanel — one Google app for every Google card', () => {
+describe('OAuthAppPanel — one Google app for every Google card', () => {
   function googleCard(slug: string, port: number): ConnectionOAuthClient {
     return github({ slug, redirect_uri: `http://127.0.0.1:${port}/callback`, registration_guide: 'oauth-app-registration/google.md' })
   }
   const googleCards = () => [googleCard('gmail', 48104), googleCard('google-drive', 48103), googleCard('google-docs', 48110), github()]
 
+  it('is one part for every Google product, listing each redirect URI and both setup links', async () => {
+    await mount(googleCards())
+    const google = cardFor(GOOGLE_ENTRY_SLUG)
+    for (const port of [48104, 48103, 48110]) expect(within(google).getByText(`http://127.0.0.1:${port}/callback`)).toBeInTheDocument()
+    expect(within(google).getByText('Gmail')).toBeInTheDocument()
+    expect(within(google).getByRole('link', { name: /Private Google app guide/ })).toHaveAttribute(
+      'href', 'https://github.com/kirodotdev/KiroCrew/blob/main/docs/guides/oauth-app-registration/google.md')
+    expect(within(google).getByRole('link', { name: /Setup script/ }).getAttribute('href')).toMatch(/scripts\/google-oauth-setup\.(sh|ps1)$/)
+    expect(document.querySelectorAll('[data-setting-id^="connections-oauth-client-"]')).toHaveLength(2)
+  })
+
   it('saves one Google card and fills every other Google card, not GitHub', async () => {
     await mount(googleCards())
-    const gmail = cardFor('gmail')
+    const gmail = cardFor(GOOGLE_ENTRY_SLUG)
     expect(within(gmail).getByRole('switch', { name: 'Also save on Google Drive, Google Docs' })).toBeChecked()
     expect(within(cardFor('github')).queryByRole('switch', { name: /Also save on/ })).not.toBeInTheDocument()
 
@@ -354,7 +394,7 @@ describe('ConnectionsPanel — one Google app for every Google card', () => {
   })
 
   it('shows the shared Client ID on an untouched card once the list refreshes', async () => {
-    await mount(googleCards())
+    await mountEach(googleCards())
     listMock.mockResolvedValue(listResponse([
       { ...googleCard('gmail', 48104), client_id: 'g-id', client_id_source: 'config' },
       { ...googleCard('google-drive', 48103), client_id: 'g-id', client_id_source: 'config' },
@@ -377,7 +417,7 @@ describe('ConnectionsPanel — one Google app for every Google card', () => {
       { ...googleCard('gmail', 48104), client_id: 'g-id', client_id_source: 'config', client_secret_set: true, client_secret_source: 'vault', configured: true },
       googleCard('google-drive', 48103), googleCard('google-docs', 48110), github(),
     ]))
-    const gmail = cardFor('gmail')
+    const gmail = cardFor(GOOGLE_ENTRY_SLUG)
     fireEvent.change(within(gmail).getByLabelText('Client ID'), { target: { value: 'g-id' } })
     fireEvent.change(within(gmail).getByLabelText('Client secret'), { target: { value: 'g-secret' } })
     fireEvent.click(within(gmail).getByRole('button', { name: 'Save' }))
@@ -402,7 +442,7 @@ describe('ConnectionsPanel — one Google app for every Google card', () => {
       { ...googleCard('google-drive', 48103), client_id: 'env-id', client_id_source: 'env' },
       googleCard('google-docs', 48110),
     ])
-    const gmail = cardFor('gmail')
+    const gmail = cardFor(GOOGLE_ENTRY_SLUG)
     fireEvent.change(within(gmail).getByLabelText('Client ID'), { target: { value: 'g-id' } })
     fireEvent.change(within(gmail).getByLabelText('Client secret'), { target: { value: 'g-secret' } })
     fireEvent.click(within(gmail).getByRole('button', { name: 'Save' }))
@@ -413,7 +453,7 @@ describe('ConnectionsPanel — one Google app for every Google card', () => {
 
   it('keeps a Client ID change alone on its own card, so no other card gets a mismatched pair', async () => {
     await mount(googleCards())
-    const gmail = cardFor('gmail')
+    const gmail = cardFor(GOOGLE_ENTRY_SLUG)
     fireEvent.change(within(gmail).getByLabelText('Client ID'), { target: { value: 'g-id' } })
     fireEvent.click(within(gmail).getByRole('button', { name: 'Save' }))
 
@@ -423,7 +463,7 @@ describe('ConnectionsPanel — one Google app for every Google card', () => {
 
   it('keeps a secret saved without a Client ID, or a cleared secret, on its own card', async () => {
     await mount(googleCards())
-    const gmail = cardFor('gmail')
+    const gmail = cardFor(GOOGLE_ENTRY_SLUG)
     fireEvent.change(within(gmail).getByLabelText('Client secret'), { target: { value: 'g-secret' } })
     fireEvent.click(within(gmail).getByRole('button', { name: 'Save' }))
 
@@ -432,7 +472,7 @@ describe('ConnectionsPanel — one Google app for every Google card', () => {
   })
 
   it('keeps another card\'s unsaved Client ID when a shared save refreshes the list', async () => {
-    await mount(googleCards())
+    await mountEach(googleCards())
     const drive = cardFor('google-drive')
     fireEvent.change(within(drive).getByLabelText('Client ID'), { target: { value: 'd-id' } })
     // The refetch after Gmail's shared save reports Drive on Gmail's id.
@@ -452,7 +492,7 @@ describe('ConnectionsPanel — one Google app for every Google card', () => {
   })
 
   it('keeps another card\'s id with its unsaved secret, so its next Save sends that whole pair', async () => {
-    await mount([
+    await mountEach([
       googleCard('gmail', 48104),
       { ...googleCard('google-drive', 48103), client_id: 'a-id', client_id_source: 'config', client_secret_set: true, client_secret_source: 'vault', configured: true },
     ])
@@ -478,7 +518,7 @@ describe('ConnectionsPanel — one Google app for every Google card', () => {
 
   it('saves only its own card when the toggle is off', async () => {
     await mount(googleCards())
-    const gmail = cardFor('gmail')
+    const gmail = cardFor(GOOGLE_ENTRY_SLUG)
     fireEvent.click(within(gmail).getByRole('switch', { name: /Also save on/ }))
     fireEvent.change(within(gmail).getByLabelText('Client ID'), { target: { value: 'g-id' } })
     fireEvent.click(within(gmail).getByRole('button', { name: 'Save' }))
@@ -492,11 +532,37 @@ describe('ConnectionsPanel — one Google app for every Google card', () => {
       { ...googleCard('gmail', 48104), client_id: 'g-id', client_id_source: 'config' },
       { ...googleCard('google-drive', 48103), client_id: 'old', client_id_source: 'config' },
     ])
-    const gmail = cardFor('gmail')
+    const gmail = cardFor(GOOGLE_ENTRY_SLUG)
     fireEvent.change(within(gmail).getByLabelText('Client secret'), { target: { value: 'g-secret' } })
     fireEvent.click(within(gmail).getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(saveMock).toHaveBeenCalledTimes(2))
     expect(saveMock.mock.calls).toEqual([['gmail', { client_id: 'g-id', client_secret: 'g-secret' }], ['google-drive', { client_secret: 'g-secret', client_id: 'g-id' }]])
+  })
+
+  it('removes every stored Google client, and leaves an environment-set one alone', async () => {
+    const stored = { client_id: 'g-id', client_id_source: 'config' as const, client_secret_set: true, client_secret_source: 'vault' as const, configured: true }
+    await mount([
+      { ...googleCard('gmail', 48104), ...stored },
+      { ...googleCard('google-drive', 48103), ...stored },
+      { ...googleCard('google-docs', 48110), client_id: 'env-id', client_id_source: 'env', client_secret_source: 'env', client_secret_set: true, configured: true },
+    ])
+    const google = cardFor(GOOGLE_ENTRY_SLUG)
+    fireEvent.click(within(google).getByRole('button', { name: /Remove the Google OAuth app/ }))
+    fireEvent.click(within(google).getByRole('button', { name: 'Remove OAuth app' }))
+    await waitFor(() => expect(deleteMock).toHaveBeenCalledTimes(2))
+    expect(deleteMock.mock.calls.map(c => c[0])).toEqual(['gmail', 'google-drive'])
+  })
+
+  it('edits the first Google product the environment does not own', async () => {
+    await mount([
+      { ...googleCard('gmail', 48104), client_id: 'env-id', client_id_source: 'env', client_secret_source: 'env', client_secret_set: true, configured: true },
+      googleCard('google-drive', 48103),
+    ])
+    const google = cardFor(GOOGLE_ENTRY_SLUG)
+    expect(within(google).getByLabelText('Client ID')).toBeEnabled()
+    fireEvent.change(within(google).getByLabelText('Client ID'), { target: { value: 'g-id' } })
+    fireEvent.click(within(google).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith('google-drive', { client_id: 'g-id' }))
   })
 })
