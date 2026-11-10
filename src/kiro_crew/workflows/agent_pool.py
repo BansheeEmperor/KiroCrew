@@ -60,6 +60,7 @@ from kiro_crew.workflows.agent_exec import (
     WorkflowSpawnRefused,
     persist_step_usage_row,
     step_backend_kwargs,
+    step_directive_refuser,
     step_effort_kwargs,
     step_session_name,
     vet_step_spawn,
@@ -89,6 +90,7 @@ async def _run_step(
     provider: Any,
     prompt: str,
     *,
+    key: str,
     timeout: Optional[float] = None,
     stop: Optional[StepStopWatch] = None,
 ) -> str:
@@ -101,24 +103,28 @@ async def _run_step(
     wedged turn is terminated instead of holding a permit until the run ceiling),
     and canonical output redaction (parity with ``agent_exec`` — prevents
     credential or exfiltration-URL leakage into workflow results stored in
-    history / injected into parent chat).
+    history / injected into parent chat). A person-only directive the step
+    calls is refused and audited on *key*, the step's session, and the refusal
+    leads the text (``step_directive_refuser``).
 
     A caller that writes the turn's usage row passes its own ``stop`` and calls
     ``stop.raise_if_interrupted()`` after that write, so a turn cut off from outside
     is still billed; without one, a cut-off turn raises here.
     """
     watch = stop if stop is not None else StepStopWatch()
+    refusals: list[str] = []
     coro = stream_and_collect(
         provider,
         prompt,
         approval_policy=ToolApprovalPolicy.AUTO_APPROVE,
         max_turns=_MAX_TURNS_PER_STEP,
         on_complete=watch.on_complete,
+        on_event=step_directive_refuser(key, refusals),
     )
     text = await (asyncio.wait_for(coro, timeout) if timeout is not None else coro)
     if stop is None:
         watch.raise_if_interrupted()
-    return redact(text)
+    return redact("\n\n".join([*refusals, text]))
 
 
 class _WorkflowSessionWorker:
@@ -227,7 +233,7 @@ class _WorkflowSessionWorker:
         # started right before the turn so session reuse is not charged to it.
         _turn_t0 = time.monotonic()
         stop = StepStopWatch()
-        result = await _run_step(self._provider, prompt, timeout=timeout, stop=stop)
+        result = await _run_step(self._provider, prompt, key=self._key, timeout=timeout, stop=stop)
         # Per-turn usage row on the warm pool's REAL key (wf-pool:…), through the
         # same shared writer the cold path uses — surface/trigger "workflow".
         await persist_step_usage_row(
@@ -497,7 +503,7 @@ def build_pooled_agent_fn(
             # Wall clock for this turn only (acp leaves TurnUsage.duration_ms at 0).
             _turn_t0 = time.monotonic()
             stop = StepStopWatch()
-            result = await _run_step(provider, prompt, stop=stop)
+            result = await _run_step(provider, prompt, key=key, stop=stop)
             # Per-turn usage row on this overflow session's REAL key
             # (wf-unpooled:… or the named session= key), through the same shared
             # writer the cold and pooled paths use — surface/trigger "workflow".

@@ -1527,6 +1527,18 @@ never spawns `kiro-cli` in tests. Two production adapters:
   `surface="workflow"` on a best-effort basis, with deliberately **narrow** guards:
   one wide try around import plus context read plus persist would let a single
   import failure silently drop every row from the workflow surface.
+
+  **Person-only directives are refused out loud.** A step is never a person's
+  turn and no session applier reads its stream, so a `USER_ORIGIN_DIRECTIVES`
+  call (`set_project`, `reset_conversation`, `chat_tag`, `suggest_followup`)
+  would otherwise leave only the tool's own "requested" text and no audit row
+  (#32461). Every executor path streams with
+  `agent_exec.step_directive_refuser` as `on_event`, the same
+  `person_only_directive_refuser` the cron turn uses: each completed call is
+  refused with `refuse_user_origin_directive` (its wording, and a SEL `denied`
+  row on the step's own session key), and the refusals lead the step's text
+  before redaction. Nothing is applied. Covered by
+  `test/test_workflow_user_origin_directive_refusal.py`.
 - **`agent_pool.build_pooled_agent_fn`** (warm sessions; the service default,
   `pool_agents=True`). Per-call sessions make every call pay a full cold start
   (subprocess spawn plus ACP `initialize` plus `session/new`, which loads the MCP
