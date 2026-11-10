@@ -1081,6 +1081,200 @@ def _is_self_skills_authority_retire(text_lower: str) -> bool:
     return _matches_self_subcommand(text_lower, ("skills", "authority-retire"))
 
 
+#: A git config key that sets the pager: ``core.pager`` or any ``pager.<command>``.
+_GIT_PAGER_CONFIG_KEY_RE = re.compile(r"^(?:core\.pager|pager\.[^=\s]+)$")
+
+
+def _env_sets_git_pager(token: str) -> bool:
+    """True if an environment word sets git's pager to a program that would run.
+
+    ``GIT_PAGER`` / ``PAGER`` name the pager directly: an EMPTY value runs no program and
+    is allowed, any non-empty value is refused (the name is swappable, so the value is
+    never trusted and there is no program allowlist). A bare name with no ``=`` sets
+    nothing and is allowed. ``GIT_CONFIG_PARAMETERS`` packs config
+    into one string the floor cannot parse, so it is refused closed; a ``GIT_CONFIG_KEY_n``
+    naming ``core.pager`` / ``pager.<cmd>`` is the env config trio, also refused closed
+    (its value lives in a separate ``GIT_CONFIG_VALUE_n`` word the floor does not pair).
+    The env-var NAME is matched case-insensitively; the pager value's case is preserved.
+    """
+    key, eq, value = token.partition("=")
+    key_l = key.lower()
+    if key_l in ("git_pager", "pager"):
+        return bool(eq) and value != ""
+    if key_l == "git_config_parameters" and eq:
+        return True
+    if key_l.startswith("git_config_key_") and eq:
+        return bool(_GIT_PAGER_CONFIG_KEY_RE.match(value.lower()))
+    return False
+
+
+def _git_args_set_pager(args: "list[str]") -> bool:
+    """True if a git command's ORIGINAL-case arguments open or configure a pager
+    that would actually run a program.
+
+    ``git grep -O`` / ``--open-files-in-pager`` opens the matching files in a program
+    and is ALWAYS refused -- ``-O`` is read case-sensitively (the lowercase ``-o`` prints
+    matching text and runs no pager), and a short-option cluster is scanned only until an
+    option that consumes the rest as its operand (``-e<pat>``, ``-f<file>``), so a pattern
+    spelled with an ``O`` is not mistaken for the pager option.
+
+    A ``core.pager`` / ``pager.<cmd>`` config set through ``-c`` or ``--config-env`` is
+    refused when it names a program, and allowed only when it provably runs none:
+    ``core.pager`` set to the empty string, or ``pager.<cmd>`` set to a git false
+    (``false`` / ``no`` / ``off`` / ``0``). A key with no value is ``=true`` and runs a
+    pager, so it is refused. ``--config-env`` sources the value from an env var the floor
+    cannot read, so a pager key there is refused closed. There is NO program allowlist:
+    any named program (``cat`` included) is refused, because the name is swappable.
+
+    ``--no-pager`` / ``-P`` disable output paging and CANCEL a pager-config route, but
+    they do NOT cancel ``grep -O`` (``-O`` opens files whatever the output paging does).
+    Options are read only before a ``--`` operand terminator.
+    """
+    grep_operand_opts = frozenset("efmABC")  # git grep short opts that take an operand
+    git_false = frozenset(("false", "no", "off", "0"))
+
+    def _config_refused(key_eq_value: str, *, env_sourced: bool) -> bool:
+        key, eq, value = key_eq_value.partition("=")
+        key_l = key.lower()
+        if key_l == "core.pager":
+            if env_sourced or not eq:
+                return True  # --config-env value is unknowable; no '=' means =true
+            return value != ""  # empty runs no pager; any program is refused
+        if key_l.startswith("pager.") and _GIT_PAGER_CONFIG_KEY_RE.match(key_l):
+            if env_sourced or not eq:
+                return True
+            return value.lower() not in git_false
+        return False
+
+    is_grep = any(a == "grep" for a in args)
+    opens_pager = False
+    configs_pager = False
+    disables_pager = False
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            break
+        low = token.lower()
+        if low == "--no-pager" or token == "-P":
+            disables_pager = True
+            index += 1
+            continue
+        if is_grep:
+            if low.startswith("--"):
+                name = low[2:].split("=", 1)[0]
+                if name and "open-files-in-pager".startswith(name):
+                    opens_pager = True
+            elif token.startswith("-") and len(token) > 1 and token[1] != "-":
+                for ch in token[1:]:
+                    if ch == "O":
+                        opens_pager = True
+                        break
+                    if ch in grep_operand_opts:
+                        break
+        if low == "-c" and index + 1 < len(args):
+            if _config_refused(args[index + 1], env_sourced=False):
+                configs_pager = True
+        elif token.startswith("-c") and not token.startswith("--") and len(token) > 2:
+            if _config_refused(token[2:], env_sourced=False):
+                configs_pager = True
+        if low.startswith("--config-env="):
+            if _config_refused(token[len("--config-env=") :], env_sourced=True):
+                configs_pager = True
+        index += 1
+    if opens_pager:
+        return True
+    return configs_pager and not disables_pager
+
+
+def _is_git_pager(text_lower: str, *, raw_text: "str | None" = None) -> bool:
+    """True if a git command opens or configures a pager, a program git would run.
+
+    ``git grep -O`` / ``--open-files-in-pager`` runs the pager on the matching files,
+    and ``core.pager`` / ``pager.<cmd>`` set through ``-c``, ``--config-env``,
+    ``GIT_PAGER``, ``PAGER``, ``GIT_CONFIG_PARAMETERS`` or a ``GIT_CONFIG_KEY_n`` env
+    word all name the program git pages through. The agent chooses that program, so each
+    is a route to run an arbitrary command through git; the operation is refused whatever
+    the pager VALUE names (the name is swappable, so there is no program allowlist), and
+    inside a nested ``eval`` / ``sh -c`` payload too.
+
+    Refused ONLY when a program actually runs. The no-program forms are allowed: the
+    lowercase ``git grep -o`` (prints matching text, not a pager), ``core.pager`` /
+    ``GIT_PAGER`` / ``PAGER`` set to the empty string, ``pager.<cmd>`` set to a git false
+    (``false`` / ``no`` / ``off`` / ``0``), and ``--no-pager`` / ``-P`` on a paging command
+    (which does not, however, cancel ``grep -O``).
+
+    *raw_text* is the command AS SUBMITTED. The argv is walked in ORIGINAL case so ``-O``
+    is distinguished from ``-o``; ``text_lower`` is used only for the cheap can-fire gate,
+    because the deny gate passes already-lower-cased text that has lost that distinction.
+    """
+    source = raw_text if raw_text is not None else text_lower
+    # Perf + robustness gate: a git pager route always carries the substring
+    # ``git`` -- the program basename git pages through, or a ``GIT_PAGER`` /
+    # ``GIT_CONFIG_*`` env word -- so when neither the raw text nor its
+    # quote-stripped form contains it, the floor provably cannot fire and the
+    # recursive payload walk is skipped. This mirrors ``_self_floor_can_fire``
+    # and keeps the floor from propagating an exception out of the gate on a
+    # command that could never match (e.g. a raising payload helper under test).
+    if "git" not in text_lower and "git" not in _SELF_FLOOR_QUOTE_JUNK_RE.sub(
+        "", _shell_join_continuations(text_lower)
+    ):
+        return False
+    # The gate must return a DECISION, never propagate. Unlike the self-name
+    # floors (which _self_floor_can_fire keeps away from the payload walk for
+    # non-self commands), this floor walks for every git command, so a raising
+    # walk would otherwise escape is_denied -- the rm floor guards the same way.
+    # Abstaining (False) is sound: a real pager route does not depend on a
+    # raising walk, and the regex/other tiers still decide.
+    try:
+        for tokens in _self_token_frames(source):
+            command: list[str] = []
+            for token in tokens:
+                command.append(token)
+                if _ends_argv(token):
+                    if _git_command_sets_pager(command):
+                        return True
+                    command = []
+            if command and _git_command_sets_pager(command):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _git_command_sets_pager(command: "list[str]") -> bool:
+    """True if one argv *command* (program plus args) is a git pager route.
+
+    *command* carries ORIGINAL-case tokens so ``-O`` is told from ``-o``. The leading
+    ``NAME=value`` env words are split off; the program basename is matched
+    case-insensitively against ``git``. ``git grep -O`` and a program-naming config
+    route are refused by :func:`_git_args_set_pager`; an env pager (``GIT_PAGER`` /
+    ``PAGER`` / the ``GIT_CONFIG`` trio) is refused too, UNLESS ``--no-pager`` / ``-P``
+    on the command disables paging and so cancels it.
+    """
+    index = 0
+    env: list[str] = []
+    while index < len(command) and _shell_normalizer.ENV_ASSIGNMENT_RE.match(command[index]):
+        env.append(command[index])
+        index += 1
+    if (
+        index >= len(command)
+        or _shell_normalizer._program_basename(command[index]).lower() != "git"
+    ):
+        return False
+    args = command[index + 1 :]
+    if _git_args_set_pager(args):
+        return True
+    disables_pager = False
+    for token in args:
+        if token == "--":
+            break
+        if token.lower() == "--no-pager" or token == "-P":
+            disables_pager = True
+            break
+    return (not disables_pager) and any(_env_sets_git_pager(word) for word in env)
+
+
 _DEV_MODE_CONFIRM_FLAG = "--confirm-out-of-install-root"
 
 
