@@ -1052,6 +1052,23 @@ class ArtifactKnowledgeSync:
         )
         self._reconcile_task = asyncio.create_task(self._run_reconcile(source_id))
 
+    async def stop(self) -> None:
+        """Cancel the start-time reconcile pass if it is still running, and wait for it.
+
+        The pass can walk the whole artifact store, so a teardown that only
+        detached the listener left it running against a pipeline the gateway is
+        shutting down, or beside a fresh sync a re-enable starts. Cancelling is
+        safe: the pass is re-run on every start and skips unchanged content.
+        """
+        task = self._reconcile_task
+        self._reconcile_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
     async def _run_reconcile(self, source_id: str) -> None:
         try:
             await self.reconcile_now(source_id)

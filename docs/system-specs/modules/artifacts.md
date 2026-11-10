@@ -2068,6 +2068,12 @@ adding a parallel watcher (see `kiro_crew.knowledge.artifact_ingest`):
   **unconditionally**, comparing the artifact store against
   `artifact_item_state`: ingest what is missing or changed, drop state for
   artifacts that no longer exist. `created` is now reported for logging only.
+  The pass runs as the sync's own task, and `ArtifactKnowledgeSync.stop()`
+  cancels and awaits it: `_stop_artifact_ingest` calls it both when
+  `knowledge.auto_ingest_artifacts` is switched off and at app exit
+  (`on_cleanup`, registered before the knowledge pools shut down), so a
+  pass never outlives the sync that started it or extracts through a
+  stopped pool.
   - **Converged is free.** `ingest_artifact` already skips unchanged content, so
     the steady state spends no extraction calls and logs at debug.
   - **Removals are judged against every artifact, not the eligible kinds.**

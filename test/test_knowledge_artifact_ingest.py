@@ -842,6 +842,74 @@ class TestReconcile:
             "it would be deferred on every start")
 
 
+# A lost-run deadline: a regression fails the awaiting assertion instead
+# of hanging the xdist worker.
+_STOP_DEADLINE_S = 60.0
+
+
+class TestArtifactKnowledgeSyncStop:
+    """The start-time reconcile pass is cancelled when the sync is stopped.
+
+    Detaching the store listener alone left the pass running, against a
+    pipeline being torn down at gateway exit or beside a fresh sync a
+    re-enable starts.
+    """
+
+    @staticmethod
+    async def _blocked_sync(pipeline, art_store, monkeypatch):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _reconcile(source_id):
+            started.set()
+            await asyncio.wait_for(release.wait(), _STOP_DEADLINE_S)
+
+        sync = ArtifactKnowledgeSync(
+            art_store=art_store, pipeline=pipeline, kinds=DEFAULT_KINDS,
+            loop=asyncio.get_running_loop())
+        monkeypatch.setattr(sync, "reconcile_now", _reconcile)
+        await sync.start()
+        task = sync._reconcile_task
+        await asyncio.wait_for(started.wait(), _STOP_DEADLINE_S)
+        return sync, task
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_the_running_reconcile(self, pipeline, art_store, monkeypatch):
+        sync, task = await self._blocked_sync(pipeline, art_store, monkeypatch)
+        await asyncio.wait_for(sync.stop(), _STOP_DEADLINE_S)
+        assert sync._reconcile_task is None
+        assert task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_turning_auto_ingest_off_stops_the_reconcile(
+        self, pipeline, art_store, monkeypatch
+    ):
+        from kiro_crew.dashboard.handlers import knowledge_lifecycle
+
+        sync, task = await self._blocked_sync(pipeline, art_store, monkeypatch)
+        monkeypatch.setattr(knowledge_lifecycle, "get_default_store", lambda: art_store)
+        app = {"artifact_knowledge_sync": sync}
+        await asyncio.wait_for(
+            knowledge_lifecycle._stop_artifact_ingest(app), _STOP_DEADLINE_S)
+        assert "artifact_knowledge_sync" not in app
+        assert task.cancelled()
+
+    def test_app_exit_runs_the_same_stop(self):
+        from aiohttp import web
+
+        from kiro_crew.dashboard.handlers import knowledge_lifecycle
+
+        app = web.Application()
+        app["state"] = MagicMock()
+        app["knowledge_pipeline"] = MagicMock()
+        knowledge_lifecycle.setup_knowledge_routes(app)
+        cleanup = list(app.on_cleanup)
+        assert knowledge_lifecycle._stop_artifact_ingest in cleanup
+        # The reconcile extracts through the pools, so it stops first.
+        assert cleanup.index(knowledge_lifecycle._stop_artifact_ingest) < cleanup.index(
+            knowledge_lifecycle._shutdown_knowledge_pools)
+
+
 class TestArtifactKnowledgeSync:
     @pytest.mark.asyncio
     async def test_handle_upsert_then_delete(self, pipeline, art_store, kstore):
