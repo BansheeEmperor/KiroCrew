@@ -36,6 +36,19 @@ logger = logging.getLogger(_FACADE)
 _BOOT_SPAWN_MAX_WORKERS = 8
 
 
+def _disable_denied_app(name: str) -> None:
+    """Persist a boot refusal without letting a failed record write abort boot."""
+    from kiro_crew.apps.manager import disable_app
+
+    try:
+        disabled = disable_app(name)
+    except OSError as exc:
+        logger.error("Boot: could not disable denied app %s: %s", name, exc)
+    else:
+        if not disabled.ok:
+            logger.error("Boot: could not disable denied app %s: %s", name, disabled.error)
+
+
 def start_enabled_app_backends() -> list[str]:
     """Start backends for all enabled apps that declare one.
 
@@ -110,7 +123,7 @@ def start_enabled_app_backends() -> list[str]:
         try:
             gov_denied = _app_activation_denied(name)
             adm_denied = None
-            if not gov_denied and app_info.get("origin") != "builtin":
+            if not gov_denied and shipped_builtin_app_root(name) is None:
                 adm_denied = app_admission_denied(
                     name, manifest=get_app_manifest(name), action="boot"
                 )
@@ -129,6 +142,9 @@ def start_enabled_app_backends() -> list[str]:
 
         denied = gov_denied or adm_denied or execution_denied
         if denied:
+            if adm_denied:
+                app_info["enabled"] = False
+                _disable_denied_app(name)
             try:
                 _deregister_agents(name)
                 _deregister_skills(name)
@@ -183,10 +199,9 @@ def start_enabled_app_backends() -> list[str]:
             continue
         # Re-vet admission at boot: an app enabled before a policy tightened
         # (banned / allowlist-removed / now-unsigned) must NOT keep running
-        # across restarts. Builtins (origin == "builtin") are trusted first-party
-        # code shipped unsigned, so they are exempt (same carve-out as enable_app)
-        # — otherwise a require_signature policy would strand every core app.
-        if app_info.get("origin") != "builtin":
+        # across restarts. Only a shipped package root grants the unsigned
+        # builtin exemption, the same provenance check as enable_app.
+        if shipped_builtin_app_root(name) is None:
             try:
                 denied = app_admission_denied(name, manifest=get_app_manifest(name), action="boot")
             except Exception as exc:  # noqa: BLE001 — boot must never crash on re-vet
@@ -203,8 +218,9 @@ def start_enabled_app_backends() -> list[str]:
                 )
                 denied = f"admission re-vet error: {exc}"
             if denied:
+                _disable_denied_app(name)
                 logger.warning(
-                    "Boot: skipping enabled app %s — blocked by admission policy: %s",
+                    "Boot: skipping enabled app %s, blocked by admission policy: %s",
                     name,
                     denied,
                 )

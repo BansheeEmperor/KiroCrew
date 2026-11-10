@@ -36,6 +36,7 @@ from kiro_crew import md_notebook_state as _md_notebook_state
 from kiro_crew import platform_compat
 from kiro_crew.apps import builtin_host_grants as _host_grants
 from kiro_crew.apps import deps_boot as _deps_boot_module
+from kiro_crew.apps.admission import installed_content_refusal as _installed_content_refusal
 from kiro_crew.apps.execution import (
     app_execution_denied,
     is_builtin_app,
@@ -45,6 +46,7 @@ from kiro_crew.apps.interpreter import app_deps_dir, path_command_is_abi_matched
 from kiro_crew.apps.manager import app_dir, get_app_manifest
 from kiro_crew.apps.manifest import file_entry_point_refusal, is_module_style_entry_point
 from kiro_crew.apps.registry import minimal_env
+from kiro_crew.apps.signed_imports import pycache_prefix_env as _pycache_prefix_env
 from kiro_crew.config.loader import config_dir
 from kiro_crew.constants import (
     KIROCREW_SPAWN_INSTANCE_ENV,
@@ -521,6 +523,15 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
     # the record so a later ceiling re-check never re-resolves a path the app owns.
     _admitted_builtin = is_builtin_app(app_name=app_name, app_root=execution_path)
 
+    # A file backend runs from the installed tree: under a signature policy that
+    # tree must still be the signed one at the moment it is spawned.
+    content_refusal = None if _admitted_builtin else _installed_content_refusal(
+        app_name, execution_path or root, manifest
+    )
+    if content_refusal:
+        logger.warning("Refusing to spawn app %s backend: %s", app_name, content_refusal)
+        return None
+
     # Whether this spawn executes the SHIPPED md-notebook backend — provenance on the
     # executed path the admission gate above vetted. Only the isolated-startup branch
     # below reads it: that is the one spawn whose namespace holds an unmasked PAT, so
@@ -808,6 +819,9 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
         KIROCREW_HOME=str(config_dir()),
         **_platform_extra,
     )
+    if not _admitted_builtin:
+        # A signed app's Python never reads bytecode from its own tree.
+        env.update(_pycache_prefix_env(app_name, execution_path or root))
     # Identity this backend's whole tree carries, so the startup stale-reap can
     # still find it once the LEADER is gone. The backend is spawned with
     # start_new_session=True, so its group outlives it: when the gateway is
@@ -978,10 +992,12 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
             except Exception as exc:
                 logger.debug("SEL audit failed for npm install %s: %s", app_name, exc)
             try:
-                sandboxed_npm, _ = wrap_argv(
-                    [npm_bin, "install", "--production", "--no-audit", "--no-fund"],
-                    mode="standard",
-                )
+                from kiro_crew.apps.admission import signed_tree_applies
+
+                npm_cmd = [npm_bin, "install", "--production", "--no-audit", "--no-fund"]
+                if signed_tree_applies(app_name, entry):
+                    npm_cmd.append("--no-package-lock")
+                sandboxed_npm, _ = wrap_argv(npm_cmd, mode="standard")
                 sandboxed_npm = cgroup_scope_argv(sandboxed_npm)  # cgroup DoS ceiling
                 npm_run = run_limited(
                     sandboxed_npm,

@@ -428,6 +428,9 @@ def uninstall_app(name: str, *, keep_data: bool = True, retired_builtin: bool = 
             )
         return AppResult(ok=False, name=name, error=f"failed to remove app: {exc}{restore_note}")
 
+    from kiro_crew.apps.signed_imports import remove_app_pycache
+
+    remove_app_pycache(name)
     refresh_app_config_keys()
     logger.info("Uninstalled app %s (keep_data=%s)", name, keep_data)
 

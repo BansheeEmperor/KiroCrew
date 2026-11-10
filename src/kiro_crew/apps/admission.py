@@ -19,6 +19,12 @@ Model (mirrors the plugin gate's decision core):
    signed manifest; admission verifies the signature (HMAC POC; a production
    impl uses an asymmetric publisher key) against a trust key the *policy*
    carries, before the app's files are copied / its onInstall script runs.
+   The signature covers the whole manifest, whose ``fileDigests`` lists every
+   packaged file, so wherever a tree is at hand admission also checks that the
+   tree is exactly the signed one (``apps.signed_content``): the source before
+   a copy, the checkout before its build and before ``onInstall``, and the
+   installed app at every activation and before each executable surface runs
+   (:func:`installed_content_refusal`).
 
 Trust-root: the policy is loaded from ``config_dir()/app_admission.json`` —
 never from the app being admitted.  Interim deviation (documented as
@@ -32,14 +38,21 @@ See ``docs/system-specs/modules/security.md`` (App admission).
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import json
 import logging
+import os
 import unicodedata
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+from kiro_crew.apps.signed_content import (
+    app_signature,
+    inventory_mismatch,
+    source_runtime_entry,
+    unpackaged_entry,
+)
 from kiro_crew.config.loader import config_dir
 from kiro_crew.sel import sel
 
@@ -172,9 +185,10 @@ def _signature_valid(manifest: "AppManifest", policy: AppAdmissionPolicy) -> boo
     secret = policy.trust_keys.get(signer)
     if not secret or not signature:
         return False
-    expected = hmac.new(
-        secret.encode("utf-8"), manifest.signing_payload(), hashlib.sha256
-    ).hexdigest()
+    try:
+        expected = app_signature(secret, manifest)
+    except (TypeError, ValueError):  # a document that is not JSON data signs nothing
+        return False
     # ``signature`` is attacker-controlled; a non-ASCII value (e.g. "é") makes
     # hmac.compare_digest raise TypeError (it rejects non-ASCII str). Compare on
     # bytes so a malformed signature is a clean deny, not an unhandled 500 (DoS).
@@ -198,8 +212,114 @@ def verified_signer(manifest: "AppManifest | None") -> str:
 
 
 #: Admissions that load an app already installed, judged by its recorded version
-#: when the manifest names none.
+#: when the manifest names none, and by the installed tree when no root is given.
 _ACTIVATION_ACTIONS = frozenset({"boot", "enable", "restart"})
+
+
+def signed_content_refusal(name: str, manifest: "AppManifest", app_root: Path) -> Optional[str]:
+    """Why the tree at *app_root* is not the one *manifest* signs, or None.
+
+    Compares against the ``fileDigests`` of the document the signature covers
+    (``AppManifest.source_document``), so what is checked is exactly what was
+    signed. The caller has already verified the signature. Blocking.
+    """
+    document = getattr(manifest, "source_document", None) or {}
+    declared = document.get("fileDigests", {}) if document else manifest.fileDigests
+    mismatch = inventory_mismatch(app_root, declared)
+    return f"app {name!r} files do not match its signature: {mismatch}" if mismatch else None
+
+
+def _within(path: Path, root: Path) -> bool:
+    """Whether *path* is *root* or under it, as spelled or once resolved.
+
+    Either spelling counts, so a caller holding a resolved path (a data home
+    behind a link) and one holding the link itself are both judged. An
+    unresolvable path is judged too, never waved through.
+    """
+    if Path(os.path.abspath(path)).is_relative_to(os.path.abspath(root)):
+        return True
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return True
+
+
+def _installed_root(name: str) -> Path:
+    from kiro_crew.apps.manager import app_dir
+
+    return app_dir(name)
+
+
+def signature_required() -> bool:
+    """Whether the fleet admission policy requires signed apps. Blocking (one stat)."""
+    return load_app_admission_policy().require_signature
+
+
+def signed_tree_applies(name: str, executed: Path) -> bool:
+    """Whether code of *name* at *executed* is judged as a signed installed tree.
+
+    True under a signature policy when *executed* lies in the installed app
+    directory and is not shipped builtin code. Builtin provenance is decided from
+    the executed path alone (``execution.is_builtin_app``), never from the app's
+    installed record, which lives in the same writable folder.
+    """
+    if not signature_required() or not _within(Path(executed), _installed_root(name)):
+        return False
+    from kiro_crew.apps.execution import is_builtin_app
+
+    return not is_builtin_app(app_name=name, app_root=Path(executed))
+
+
+def verified_installed_manifest(
+    name: str,
+    executed: Path,
+    manifest: "AppManifest | None" = None,
+    runs: Optional[str] = None,
+) -> "tuple[Optional[str], AppManifest | None]":
+    """``(refusal, verified manifest)`` for installed code about to run.
+
+    Returns ``(None, None)`` when no signature check applies
+    (:func:`signed_tree_applies`). Otherwise *manifest*, the object whose fields
+    the caller is about to execute (the installed ``app.json`` when None), must
+    carry a valid signature and the installed tree must match its
+    ``fileDigests``; *runs*, a lifecycle script's text, must be one of that
+    manifest's ``setup`` scripts. Blocking: an async caller offloads it.
+    """
+    if not signed_tree_applies(name, executed):
+        return None, None
+    if manifest is None:
+        from kiro_crew.apps.manager import get_app_manifest
+
+        manifest = get_app_manifest(name)
+    if manifest is None or not _signature_valid(manifest, load_app_admission_policy()):
+        return f"app {name!r} signature invalid or unsigned", None
+    refusal = signed_content_refusal(name, manifest, _installed_root(name))
+    if refusal:
+        return refusal, None
+    scripts = {v for v in manifest.setup.to_dict().values() if isinstance(v, str)}
+    if runs is not None and runs not in scripts:
+        return f"app {name!r} script is not one its signed manifest declares", None
+    return None, manifest
+
+
+def installed_content_refusal(
+    name: str,
+    executed: Path,
+    manifest: "AppManifest | None" = None,
+    runs: Optional[str] = None,
+) -> Optional[str]:
+    """Why installed code of *name* at *executed* must not run now, or None.
+
+    Asked by each executable surface just before it runs installed app code: the
+    backend spawn, every lifecycle script, every hook module load and every agent,
+    skill, cron and MCP registration (:func:`verified_installed_manifest` has the
+    rules). It detects a packaged file or manifest changed since signing at the
+    moment it runs. It is not a boundary against something that writes the
+    installed tree between those moments (see the security spec's residuals).
+    With no signature policy it costs one stat and never reads the tree.
+    Blocking: an async caller offloads it.
+    """
+    return verified_installed_manifest(name, executed, manifest, runs)[0]
 
 
 def app_version_refusal(
@@ -239,6 +359,8 @@ def app_admission_denied(
     *,
     check_version: bool = True,
     version: str = "",
+    app_root: Optional[Path] = None,
+    fresh_checkout: bool = False,
 ) -> Optional[str]:
     """Decide whether *name* may be admitted. Returns a denial reason or None.
 
@@ -249,6 +371,20 @@ def app_admission_denied(
     :func:`app_version_refusal`, for a caller on the loop that already asked it
     off the loop. *version* is the caller's own version, used when *manifest* has
     none.
+
+    *app_root* is the tree *manifest* came from. Under ``require_signature`` it
+    must be exactly the signed tree (:func:`signed_content_refusal`); an
+    activation (*action* ``boot``, ``enable`` or ``restart``) with no root checks
+    the installed one. A caller holding only a manifest (the registry's
+    pre-clone check, a self-registration) has no tree, and the check runs where
+    the tree appears. *fresh_checkout* marks *app_root* as a clone made by this
+    install, which holds only committed content: under ``require_signature`` it
+    may hold nothing under a name the signed file list leaves out
+    (``signed_content.unpackaged_entry``), since the build and ``onInstall`` run
+    there in place. Install/update sources also refuse root runtime entries that
+    survive the copy (``data`` and ``app-crons.json``); registry publisher trees
+    refuse ``.app_secret`` too, at every phase, since scripts run there in place.
+    These source checks never apply to installed activation roots.
     """
     policy = load_app_admission_policy()
     norm = _normalize_name(name)
@@ -277,7 +413,21 @@ def app_admission_denied(
 
     # 3) Verify-before-run signature (skipped unless required). A missing
     #    manifest cannot carry a valid signature, so require_signature denies it.
-    if policy.require_signature and (manifest is None or not _signature_valid(manifest, policy)):
-        return f"app {name!r} signature invalid or unsigned"
+    if policy.require_signature:
+        if manifest is None or not _signature_valid(manifest, policy):
+            return f"app {name!r} signature invalid or unsigned"
+        root = app_root
+        if root is None and action in _ACTIVATION_ACTIONS:
+            root = _installed_root(name)
+        if root is not None and fresh_checkout:
+            planted = unpackaged_entry(root)
+            if planted:
+                return f"app {name!r} checkout holds content its signature cannot cover: {planted}"
+        if root is not None and action in {"install", "update", "install_from_registry"}:
+            planted = source_runtime_entry(root, runs_in_place=action == "install_from_registry")
+            if planted:
+                return f"app {name!r} source holds unsigned runtime content: {planted}"
+        if root is not None:
+            return signed_content_refusal(name, manifest, root)
 
     return None

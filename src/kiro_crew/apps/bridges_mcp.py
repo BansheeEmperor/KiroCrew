@@ -32,7 +32,11 @@ from kiro_crew.apps.bridges_mcp_config import (
     _read_mcp_json_unlocked,
     _write_mcp_json_unlocked,
 )
-from kiro_crew.apps.bridges_sources import _registration_denied, _registration_source
+from kiro_crew.apps.bridges_sources import (
+    _app_resource_root,
+    _registration_denied,
+    _registration_source,
+)
 from kiro_crew.apps.execution import shipped_builtin_app_root
 from kiro_crew.apps.interpreter import (
     app_deps_dir,
@@ -42,6 +46,7 @@ from kiro_crew.apps.interpreter import (
 )
 from kiro_crew.apps.manager import app_dir
 from kiro_crew.apps.manifest import AppManifest, has_stdio_mcp_server, is_module_style_entry_point
+from kiro_crew.apps.signed_imports import pycache_prefix_env as _pycache_prefix_env
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.env import emit_env
 from kiro_crew.executors import maintenance_executor
@@ -1056,6 +1061,11 @@ def _register_mcp_servers(
                 # instead of letting the tools go silently missing.
                 if isinstance(cfg, dict):
                     cfg = resolve_stdio_command(cfg, app_root=app_dir(app_name))
+                    # kiro-cli starts this per session; under a signature policy its
+                    # Python reads no bytecode from the app's tree.
+                    prefix_env = _pycache_prefix_env(app_name, _app_resource_root(app_name))
+                    if prefix_env:
+                        cfg["env"] = {**(cfg.get("env") or {}), **prefix_env}
                     _schedule_unresolvable_warning(app_name, server_name, cfg)
                     # This file is consumed by kiro-cli, which applies a declared
                     # env per key — an app manifest naming a PATH fragment would
@@ -1134,6 +1144,7 @@ def reregister_app_mcp_servers(
         app_name,
         action="mcp_register",
         app_root=app_root,
+        manifest=manifest,
     ):
         _deregister_mcp_servers(app_name)
         return []
@@ -1223,7 +1234,7 @@ def scrub_backend_mcp_url(app_name: str, unreconciled: list[str] | None = None) 
     # The admission gate that `reregister_app_mcp_servers` applies is kept explicitly: a
     # denied app gets a FULL removal rather than the selective keep-stdio treatment,
     # because nothing of a denied app should stay reachable.
-    if _registration_denied(app_name, action="mcp_register", app_root=app_root):
+    if _registration_denied(app_name, action="mcp_register", app_root=app_root, manifest=manifest):
         _deregister_mcp_servers(app_name)
         return []
     return _register_mcp_servers(app_name, manifest, live_port=None)

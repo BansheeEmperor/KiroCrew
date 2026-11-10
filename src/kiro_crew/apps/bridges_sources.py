@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from kiro_crew.apps.admission import installed_content_refusal as _installed_content_refusal
 from kiro_crew.apps.execution import app_execution_denied, shipped_builtin_app_root
 from kiro_crew.apps.manager import app_dir, get_app_manifest
 from kiro_crew.apps.manifest import AppManifest
@@ -131,14 +132,21 @@ def _registration_denied(
     *,
     action: str,
     app_root: Path,
+    manifest: AppManifest | None = None,
 ) -> str | None:
-    """Apply the shared execution decision to an executable-resource bridge."""
+    """Apply the shared execution decision to an executable-resource bridge.
+
+    Then, for a tree in the installed app, the signed-content check: the agents,
+    skills, crons and MCP commands registered from it are the publisher's only
+    while the tree is the signed one. *manifest* is the object the caller registers
+    from, so its own signature is the one verified.
+    """
     denied = app_execution_denied(
         app_name,
         action=action,
         app_root=app_root,
         caller="app_bridge",
-    )
+    ) or _installed_content_refusal(app_name, app_root, manifest)
     if denied:
         logger.warning(
             "App %s: skipping executable resource registration (%s): %s",

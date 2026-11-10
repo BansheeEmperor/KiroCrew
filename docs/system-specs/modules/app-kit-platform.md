@@ -2284,9 +2284,9 @@ behind it.
 **Compatibility rule: every value the old bare `int()` accepted still installs,
 and parses to the same `int`.** `SetupConfig.from_dict` keeps `int(raw)` unclamped
 (an int, a numeric string such as `"60"`, a float truncated, `int(True)` = 1),
-because `setup` is part of `AppManifest.signing_payload`: clamping there would
-change the signed bytes of a manifest published with, say, `600`, and its
-signature would stop verifying. Only a value `int()` raised on (a non-numeric
+so the installed record keeps what the publisher wrote (the signature covers the
+document as written either way) and a manifest published with, say, `600` still
+installs. Only a value `int()` raised on (a non-numeric
 string, `null`, a list or object, NaN or infinity), which already made the install
 fail, is recorded by `SetupConfig.from_dict` and refused with an error naming the
 field: by `AppManifest.validate` on install and update, by the registry
@@ -7529,8 +7529,8 @@ widening, and no path outside the app's data directory.
 control character or lone surrogate (a filesystem call cannot encode one, so it would
 raise in the alias pass), and no segment that starts or ends with a space or ends with a dot
 (Windows drops both, so `a.` would name `a`). At most 32 entries. `AppManifest.validate`
-refuses a manifest with a bad entry, `signing_payload` covers a non-empty declaration
-(sorted; absent when empty, so an older signature still verifies), and `to_dict` and the
+refuses a manifest with a bad entry, the signature covers the declaration as written
+(`signing_payload` signs the whole document), and `to_dict` and the
 built-in snapshot (`discovery._manifest_to_builtin_dict`) keep it.
 
 **Where it is read.** Per spawn, cached on each manifest's device, inode, size and mtime:

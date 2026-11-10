@@ -909,11 +909,14 @@ async def install_from_registry(
         # install_app/update_app will actually register, and a build step can
         # rewrite app.json; a manifest that does not satisfy the admission
         # policy (e.g. signature required but absent) must not install.
+        # With the tree too: under require_signature the build may not add,
+        # remove or change a packaged file before `onInstall` runs from it.
         denied = await asyncio.to_thread(
             app_admission_denied,
             name,
             manifest=AppManifest.from_dict(manifest_data),
             action="install_from_registry",
+            app_root=app_source,
         )
         if denied:
             log_lines.append(_refusal_line(verb, f"blocked by admission policy: {denied}"))
@@ -1182,6 +1185,7 @@ async def install_from_registry(
                 name,
                 manifest=AppManifest.from_dict(manifest_data),
                 action="install_from_registry",
+                app_root=app_source,
             )
             if denied:
                 log_lines.append(_refusal_line(verb, f"blocked by admission policy: {denied}"))
