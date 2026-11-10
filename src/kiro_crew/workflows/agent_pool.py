@@ -60,7 +60,6 @@ from kiro_crew.workflows.agent_exec import (
     WorkflowSpawnRefused,
     persist_step_usage_row,
     step_backend_kwargs,
-    step_directive_refuser,
     step_effort_kwargs,
     step_session_name,
     vet_step_spawn,
@@ -105,12 +104,16 @@ async def _run_step(
     credential or exfiltration-URL leakage into workflow results stored in
     history / injected into parent chat). A person-only directive the step
     calls is refused and audited on *key*, the step's session, and the refusal
-    leads the text (``step_directive_refuser``).
+    leads the text (``person_only_directive_refuser``).
 
     A caller that writes the turn's usage row passes its own ``stop`` and calls
     ``stop.raise_if_interrupted()`` after that write, so a turn cut off from outside
     is still billed; without one, a cut-off turn raises here.
     """
+    # Local import, as in agent_exec: the dashboard-side module is not loaded
+    # at this adapter's import time.
+    from kiro_crew.dashboard.session_directive_apply import person_only_directive_refuser
+
     watch = stop if stop is not None else StepStopWatch()
     refusals: list[str] = []
     coro = stream_and_collect(
@@ -119,7 +122,7 @@ async def _run_step(
         approval_policy=ToolApprovalPolicy.AUTO_APPROVE,
         max_turns=_MAX_TURNS_PER_STEP,
         on_complete=watch.on_complete,
-        on_event=step_directive_refuser(key, refusals),
+        on_event=person_only_directive_refuser(key, refusals),
     )
     text = await (asyncio.wait_for(coro, timeout) if timeout is not None else coro)
     if stop is None:

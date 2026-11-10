@@ -1532,12 +1532,15 @@ never spawns `kiro-cli` in tests. Two production adapters:
   turn and no session applier reads its stream, so a `USER_ORIGIN_DIRECTIVES`
   call (`set_project`, `reset_conversation`, `chat_tag`, `suggest_followup`)
   would otherwise leave only the tool's own "requested" text and no audit row
-  (#32461). Every executor path streams with
-  `agent_exec.step_directive_refuser` as `on_event`, the same
-  `person_only_directive_refuser` the cron turn uses: each completed call is
-  refused with `refuse_user_origin_directive` (its wording, and a SEL `denied`
-  row on the step's own session key), and the refusals lead the step's text
-  before redaction. Nothing is applied. Covered by
+  (#32461). Every executor path streams with `person_only_directive_refuser`
+  (`dashboard/session_directive_apply.py`, the one the cron turn uses) as
+  `on_event`: each completed call is refused with
+  `refuse_user_origin_directive` (its wording, and a SEL `denied` row on the
+  step's own session key), and the refusals lead the step's text before
+  redaction. Nothing is applied. On a `schema=` step the refusal line is prose
+  ahead of the reply: an object or array schema still parses through prose
+  recovery, but a scalar schema fails validation and is re-asked, so a refused
+  call can spend a scalar step's retries. Covered by
   `test/test_workflow_user_origin_directive_refusal.py`.
 - **`agent_pool.build_pooled_agent_fn`** (warm sessions; the service default,
   `pool_agents=True`). Per-call sessions make every call pay a full cold start

@@ -175,3 +175,21 @@ async def test_a_step_without_a_person_only_directive_is_unchanged(
 
     assert await fn("read a file", {}) == "plain reply"
     assert [a for a in audits if a.get("source") == "mcp-directive"] == []
+
+
+async def test_an_object_schema_step_still_parses_past_a_refusal(
+    audits: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kiro_crew.workflows.schema import run_with_schema
+
+    stream = _stream_calling("kiro-cli")
+
+    async def stream_json(provider: Any, msg: str, **kw: Any) -> str:
+        await stream(provider, msg, **kw)
+        return '{"ok": true}'
+
+    monkeypatch.setattr(agent_exec, "stream_and_collect", stream_json)
+    fn = agent_exec.build_agent_fn(_Sessions(), run_id="wf_s")
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+
+    assert await run_with_schema(lambda p: fn(p, {}), "call set_project", schema) == {"ok": True}

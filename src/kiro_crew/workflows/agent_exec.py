@@ -29,7 +29,7 @@ import asyncio
 import itertools
 import logging
 import time
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Callable, Optional
 
 from kiro_crew.acp_backends import (
     backend_from_stored,
@@ -79,21 +79,6 @@ class StepStopWatch:
             raise WorkflowStepInterrupted(
                 f"agent turn was stopped before it finished ({self.stop_reason})"
             )
-
-
-def step_directive_refuser(key: str, refusals: list[str]) -> Callable[[Any], Awaitable[None]]:
-    """The ``on_event`` both executors stream a step with.
-
-    No session applier reads a step's stream and a step is never a person's
-    turn, so a person-only directive (``set_project``, ...) it calls is refused
-    out loud and audited ``denied`` on the step's session *key*; each refusal is
-    appended to *refusals* for the caller to lead the step's text with.
-    """
-    # Local import: the dashboard-side module pulls the session stack, which
-    # this optional adapter must not load at import time.
-    from kiro_crew.dashboard.session_directive_apply import person_only_directive_refuser
-
-    return person_only_directive_refuser(key, refusals)
 
 
 class WorkflowSpawnRefused(Exception):
@@ -367,6 +352,12 @@ def build_agent_fn(
                     agent=opts.get("agent") or default_agent,
                     cwd=step_cwd or cwd,
                 )
+            # A step is never a person's turn and no session applier reads its
+            # stream, so a person-only directive it calls is refused out loud.
+            from kiro_crew.dashboard.session_directive_apply import (
+                person_only_directive_refuser,
+            )
+
             stop = StepStopWatch()
             refusals: list[str] = []
             text = await stream_and_collect(
@@ -375,7 +366,7 @@ def build_agent_fn(
                 approval_policy=ToolApprovalPolicy.AUTO_APPROVE,
                 max_turns=_MAX_TURNS_PER_STEP,
                 on_complete=stop.on_complete,
-                on_event=step_directive_refuser(key, refusals),
+                on_event=person_only_directive_refuser(key, refusals),
             )
             text = "\n\n".join([*refusals, text])
             # ── Per-turn usage row: attribute workflow spend. ──
