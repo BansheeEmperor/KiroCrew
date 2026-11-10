@@ -86,16 +86,21 @@ _ORIGIN_RUNTIME_STATE_KEY = "tailnet_origin_state"
 #: * ``/opt/homebrew/bin`` — macOS Homebrew on Apple silicon
 #: * the app bundle — the macOS app ships the binary inside and does not always
 #:   symlink it
-#: * ``C:\Program Files\Tailscale`` — the Windows installer
+#: * ``C:\Program Files\Tailscale`` — the Windows installer, the only one kept
+#:   there, since Windows resolves ``/usr/bin/tailscale`` against the current drive
 #:
 #: A non-standard install is not auto-derived. That is the deliberate trade: it
 #: keeps using explicit ``dashboard.url``, which is the path it uses today.
-_CLI_CANDIDATE_PATHS = (
-    "/usr/bin/tailscale",
-    "/usr/local/bin/tailscale",
-    "/opt/homebrew/bin/tailscale",
-    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    r"C:\Program Files\Tailscale\tailscale.exe",
+_CLI_CANDIDATE_PATHS = tuple(
+    path
+    for path in (
+        "/usr/bin/tailscale",
+        "/usr/local/bin/tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        r"C:\Program Files\Tailscale\tailscale.exe",
+    )
+    if IS_POSIX or not path.startswith("/")
 )
 
 #: MagicDNS names are DNS labels joined by dots, all lowercase. Deliberately
