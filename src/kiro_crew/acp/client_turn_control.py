@@ -46,6 +46,7 @@ from kiro_crew.acp.client_timeouts import (
     _STEERING_WAIT_SLICE_SECS,
     _effective_prompt_timeout_async,
 )
+from kiro_crew.acp.end_token import drop_end_token
 from kiro_crew.acp.stale_compaction import consume_stale_compaction_status
 from kiro_crew.acp.transport_errors import AcpError, AcpProcessDied, AcpTimeoutError
 from kiro_crew.acp.transport_framing import write_notification_best_effort
@@ -384,7 +385,9 @@ async def stream_command(
             "command": {"command": cmd_name, "args": cmd_args},
         },
     )
-    async for event in self._dispatch_events(req_id, timeout, extract_agent_from_result=True):
+    async for event in drop_end_token(
+        self._dispatch_events(req_id, timeout, extract_agent_from_result=True)
+    ):
         yield event
 
 
@@ -1112,7 +1115,7 @@ async def _dispatch_prompt_events(
     self._steer_turn = turn
     pi_steer_turn.open_turn(self, req_id)
     try:
-        async with aclosing(self._dispatch_events(req_id, timeout)) as events:
+        async with aclosing(drop_end_token(self._dispatch_events(req_id, timeout))) as events:
             async for event in events:
                 if (
                     event.kind == EVENT_COMPLETE
