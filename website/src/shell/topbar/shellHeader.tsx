@@ -618,6 +618,20 @@ export function ShellHeader({ shell }: { shell: AppShell }) {
               </motion.div>
             )
           })()}
+          {/* Desktop: the offline cause in words, beside the dot it explains.
+              The dot carries the cause only in its tooltip and sr-only text,
+              and the phone's strip below cannot do this job here: the header
+              is its own stacking layer, so the rail and the chat panes paint
+              over anything hanging below it. In flow in the actions group, so
+              the collapse ladder makes room for it (shell-chrome.css). Not a
+              live region: the dot's `role="status"` span already announces
+              `gatewayStatusMsg`. Quiet while the session-expired banner speaks. */}
+          {!isMobile && !connected && !authRequired && (
+            <span data-testid="topbar-offline-notice" className="flex items-center gap-1.5 shrink-0 whitespace-nowrap text-[12px] font-medium text-danger-text">
+              <span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-danger animate-pulse [animation-iteration-count:3]! motion-reduce:animate-none" />
+              <span className="tb-offline-notice-msg">{gatewayStatusMsg}</span>
+            </span>
+          )}
           {!isMobile && <MetricsErrorNotice metrics={metrics} />}
           {/* Explore (RFC "Milestones for New-User Feature Discovery" 4.6): its
               own pill next to the readout capsule (after the capsule's own
