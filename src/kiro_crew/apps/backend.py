@@ -512,6 +512,7 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
         action="backend_spawn",
         app_root=execution_path,
         caller="gateway",
+        manifest=manifest,
     )
     if denied:
         logger.warning("Refusing to spawn third-party app %s backend: %s", app_name, denied)
@@ -808,6 +809,10 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
         KIROCREW_HOME=str(config_dir()),
         **_platform_extra,
     )
+    # Under the fleet signature policy: no bytecode read from the app folder.
+    from kiro_crew.apps.admission import signed_package_child_env, signed_package_python_flags
+
+    env.update(signed_package_child_env(app_name))
     # Identity this backend's whole tree carries, so the startup stale-reap can
     # still find it once the LEADER is gone. The backend is spawned with
     # start_new_session=True, so its group outlives it: when the gateway is
@@ -934,6 +939,9 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
     # Prefer explicit backend type from manifest over content sniffing
     backend_type = manifest.backend.type
 
+    # Every branch below launches Python except node and a direct exec.
+    python_launch = True
+
     # --- Node.js backend ---
     # Note: module-style entry points (entry is None) are always Python
     # builtin apps and never declare a Node.js backend, so this branch is
@@ -952,6 +960,7 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
         # The resolved path: Node's ESM main-module guard compares the realpath-resolved
         # import.meta.url with argv[1], so a symlinked path makes it silently never fire.
         cmd = [node_bin, str(entry.resolve())]
+        python_launch = False
         cwd = str(root)
         # Pass PORT as env var — Node.js apps typically read process.env.PORT
         env["NODE_ENV"] = "production"
@@ -978,10 +987,14 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
             except Exception as exc:
                 logger.debug("SEL audit failed for npm install %s: %s", app_name, exc)
             try:
-                sandboxed_npm, _ = wrap_argv(
+                from kiro_crew.apps.admission import signed_npm_install_argv
+
+                npm_argv = signed_npm_install_argv(
                     [npm_bin, "install", "--production", "--no-audit", "--no-fund"],
-                    mode="standard",
+                    pkg_dir,
+                    ci_argv=[npm_bin, "ci", "--omit=dev", "--no-audit", "--no-fund"],
                 )
+                sandboxed_npm, _ = wrap_argv(npm_argv, mode="standard")
                 sandboxed_npm = cgroup_scope_argv(sandboxed_npm)  # cgroup DoS ceiling
                 npm_run = run_limited(
                     sandboxed_npm,
@@ -1062,6 +1075,7 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
             # /bin/sh only for a script with no shebang at all (bash source
             # under dash-as-sh dies on `set -euo pipefail`).
             cmd = [*_shebang_argv(entry), entry_str]
+        python_launch = False
         cwd = str(root)
 
     # --- ASGI (Python) backend ---
@@ -1165,6 +1179,7 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
             executable=_si,
             force_isolation=True,
         )
+        python_launch = True
     elif _deps_ready and path_command_is_abi_matched(root, cmd[0] if cmd else ""):
         # PYTHONPATH transport only on a POSITIVE ABI match: the deps tree
         # is built by the GATEWAY's pip, and an exec backend running a PATH
@@ -1180,6 +1195,12 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
             executable=cmd[0],
             force_isolation=True,
         )
+        python_launch = True
+
+    if python_launch and cmd:
+        # Under the fleet signature policy, interpreter options as well as the env:
+        # they hold under -E/-I. An exec backend's own shebang is not rewritten.
+        cmd = [cmd[0], *signed_package_python_flags(app_name), *cmd[1:]]
 
     # Apply OS-level sandbox to app backend process.
     #
@@ -1727,7 +1748,10 @@ if _typing.TYPE_CHECKING:
         _read_installed,
         _restart_exited_backend,
         _settle_superseding_start,
+        admission_audit_error,
+        admission_audit_resources,
         app_admission_denied,
+        builtin_admission_exempt,
         revive_lost_app_backends,
         shipped_builtin_app_root,
         shutdown_event,

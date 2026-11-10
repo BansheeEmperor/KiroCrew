@@ -82,6 +82,25 @@ from kiro_crew.sandbox import (
 from kiro_crew.security import redact
 
 
+def _app_python_flags(script_file: str) -> list[str]:
+    """``admission.signed_package_python_flags`` for the app whose folder holds *script_file*.
+
+    Empty for a script outside every app folder, and for every script when the
+    fleet sets no signature policy.
+    """
+    # Deferred: the cron runner loads without the app layer until an app script runs.
+    from kiro_crew.apps.admission import signed_package_python_flags
+    from kiro_crew.apps.manager import apps_dir
+
+    try:
+        rel = Path(os.path.realpath(script_file)).relative_to(os.path.realpath(apps_dir()))
+    except (OSError, ValueError):
+        return []
+    if not rel.parts or rel.parts[0].startswith("."):
+        return []
+    return signed_package_python_flags(rel.parts[0])
+
+
 def _new_envelope_tag() -> str:
     """A fresh per-run marker for the launcher's status line (see ``_envelope_line``)."""
     return f"__kirocrew_cron_status_{secrets.token_hex(16)}__:"
@@ -358,10 +377,13 @@ def run_script_sandboxed(
         # cannot execute before the launcher and capture the secrets it loads.
         # The launcher prelude seeds the trusted kiro_crew package parent
         # explicitly, so imports survive isolation on dev checkouts too.
+        # An app's script under the fleet signature policy: bytecode never read from
+        # the app folder. Interpreter options, since this child may run with -I.
+        app_flags = _app_python_flags(file_path_str)
         argv = (
-            [sys.executable, "-I", launcher_path]
+            [sys.executable, *app_flags, "-I", launcher_path]
             if stdin_payload is not None
-            else [sys.executable, launcher_path]
+            else [sys.executable, *app_flags, launcher_path]
         )
         # A granted child must never see the LIVE crons dir OR the script's
         # own parent directory: the launcher's empty-sys.path isolation stops

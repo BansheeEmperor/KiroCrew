@@ -9,8 +9,8 @@ Extracted out of ``apps/routes.py`` so that ``apps/teardown.py`` can run
 ``teardown.py``, so ``teardown`` importing the runner back from ``routes`` would be a
 cycle — and the alternative, a function-local import inside ``teardown``, both hides
 the dependency from ``patch`` and breaks the repo's top-level-imports rule. This
-module sits below both: it imports only ``execution`` / ``manager`` / ``registry`` /
-``sandbox`` / ``platform_compat``, none of which import ``teardown``.
+module sits below both: it imports only ``admission`` / ``execution`` / ``manager`` /
+``registry`` / ``sandbox`` / ``platform_compat``, none of which import ``teardown``.
 
 Why ``teardown`` needs it at all: ``onDisable`` is the ONLY thing that can stop
 whatever the app's ``onEnable`` started out-of-band (a detached helper the gateway
@@ -28,6 +28,8 @@ import os
 from typing import Any
 
 from kiro_crew import platform_compat
+from kiro_crew.apps.admission import signed_package_child_env
+from kiro_crew.apps.execution import NO_MANIFEST as _NO_MANIFEST
 from kiro_crew.apps.execution import app_execution_denied
 from kiro_crew.apps.manager import apps_dir
 from kiro_crew.apps.registry import NATIVE_WINDOWS_HOOK_REFUSAL, minimal_env
@@ -54,17 +56,22 @@ async def run_lifecycle_script(
     timeout: int = 30,
     extra_env: dict[str, str] | None = None,
     action: str = "lifecycle_script",
+    manifest: object = _NO_MANIFEST,
 ) -> dict[str, Any]:
     """Run a lifecycle script (onEnable/onDisable/onUninstall) in the app directory.
 
-    Returns dict with ``output`` (str) and ``failed`` (bool).
+    *manifest* is the manifest the caller read *script* from; the signed-package
+    check judges it. Returns dict with ``output`` (str) and ``failed`` (bool).
     """
     app_root = apps_dir() / app_name
-    denied = app_execution_denied(
+    # Off the loop: under the signature policy the gate hashes the package.
+    denied = await asyncio.to_thread(
+        app_execution_denied,
         app_name,
         action=action,
         app_root=app_root,
         caller="dashboard",
+        manifest=manifest,
     )
     if denied:
         logger.warning("Refusing app %s lifecycle action %s: %s", app_name, action, denied)
@@ -99,6 +106,8 @@ async def run_lifecycle_script(
     sandboxed_cmd, cleanup = await wrap_argv_async(base_cmd, mode="standard", _prepare=wrap_argv)
     sandboxed_cmd = cgroup_scope_argv(sandboxed_cmd)  # cgroup DoS ceiling
     env = minimal_env(NONINTERACTIVE="1")
+    # Under the fleet signature policy: no bytecode read from the app folder.
+    env.update(await asyncio.to_thread(signed_package_child_env, app_name))
     if extra_env:
         env.update(extra_env)
     try:

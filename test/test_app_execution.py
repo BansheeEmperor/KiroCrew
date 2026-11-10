@@ -17,6 +17,7 @@ from kiro_crew.apps.manager import (
     _write_installed,
     install_app,
 )
+from kiro_crew.testing.ids import UNALLOCATABLE_PID
 
 
 def _install_test_app(
@@ -570,6 +571,44 @@ class TestLaunchAndLifecycleBoundary:
             assert response.status == 200
             assert (await response.json())["pid"] == 1234
         assert calls
+
+    @pytest.mark.asyncio
+    async def test_the_signature_policy_keeps_the_open_command_off_in_folder_bytecode(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Under the policy ``openCommand``'s env names an out-of-folder bytecode prefix;
+        without it the launch env carries none."""
+        import kiro_crew.apps.routes as routes
+        from kiro_crew.apps import admission, execution
+
+        _install_test_app(
+            tmp_path, monkeypatch, enabled=True, manifest_extra={"openCommand": "echo hi"}
+        )
+        monkeypatch.setenv("DISPLAY", ":99")
+        monkeypatch.setattr(routes, "_manifest_shell_platform_refusal", lambda: None)
+        monkeypatch.setattr(execution, "third_party_execution_allowed", lambda: True)
+        monkeypatch.setattr(routes, "wrap_argv", lambda argv, **kwargs: (argv, None))
+        monkeypatch.setattr(routes, "cgroup_scope_argv", lambda argv: argv)
+        envs: list[dict[str, str]] = []
+
+        async def _spawn(*argv, **kwargs):
+            envs.append(dict(kwargs.get("env") or {}))
+            return SimpleNamespace(pid=UNALLOCATABLE_PID)
+
+        monkeypatch.setattr(routes, "create_subprocess_limited", _spawn)
+
+        async def _open() -> None:
+            async with TestClient(TestServer(as_owner(_route_app()))) as client:
+                response = await client.post("/api/apps/execution-test-app/open")
+                assert response.status == 200
+
+        await _open()
+        assert "PYTHONPYCACHEPREFIX" not in envs[-1]
+        monkeypatch.setattr(admission, "signed_packages_required", lambda: True)
+        monkeypatch.setattr(admission, "installed_package_refusal", lambda *a, **k: None)
+        await _open()
+        expected = admission.signed_package_child_env("execution-test-app")
+        assert {k: envs[-1][k] for k in expected} == expected
 
     @pytest.mark.parametrize("name", ["forged-builtin", "file-explorer"])
     @pytest.mark.asyncio

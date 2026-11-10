@@ -97,6 +97,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _changed_manifest_keys,
         _clip,
         _cron_defs_from_manifest,
+        _cron_restore_denied,
         _deregister_crons,
         _field_digest,
         _join_stamp,
@@ -128,6 +129,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _PY_OPTS_WITH_SEPARATE_VALUE,
         _deregister_mcp_servers,
         _has_python_shebang,
+        _launches_python,
         _live_port_for,
         _maybe_provision_backendless_deps,
         _normalize_attached_m,
@@ -246,6 +248,7 @@ if TYPE_CHECKING:  # names it serves from outside the family, from their homes
     from kiro_crew.apps.cron_sdk import (  # noqa: F401
         CronSDK,
     )
+    from kiro_crew.apps.execution import NO_MANIFEST as _NO_MANIFEST  # noqa: F401
     from kiro_crew.apps.execution import (  # noqa: F401
         app_execution_denied,
         shipped_builtin_app_root,
@@ -272,6 +275,9 @@ if TYPE_CHECKING:  # names it serves from outside the family, from their homes
         has_stdio_mcp_server,
         is_module_style_entry_point,
         screen_app_path,
+    )
+    from kiro_crew.apps.package_signature import (  # noqa: F401
+        is_python_interpreter as _is_python_interpreter,
     )
     from kiro_crew.atomic_write import (  # noqa: F401
         atomic_write,

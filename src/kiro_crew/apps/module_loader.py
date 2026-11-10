@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from kiro_crew.apps.admission import verified_signed_files
 from kiro_crew.apps.execution import app_execution_denied, is_builtin_app
 from kiro_crew.sel import sel
 
@@ -58,6 +59,117 @@ _http_app_grants: dict[str, tuple[int, bool]] = {}
 #: an unload+re-enable, the stale v1 callable is ignored rather than applied to
 #: tear down the freshly loaded v2 worker (it would leave v2 running).
 _app_load_generation: dict[str, int] = {}
+
+
+class _SourceOnlyLoader(importlib.machinery.SourceFileLoader):
+    """A source loader that never reads bytecode.
+
+    Under the fleet signature policy the ``.py`` files an app ships are verified,
+    but a ``__pycache__`` entry beside one is not, and the stock loader runs that
+    cached bytecode in place of the source whenever its header matches. This one
+    compiles the source bytes every time.
+    """
+
+    def get_code(self, fullname: str) -> Any:
+        path = self.get_filename(fullname)
+        return self.source_to_code(self.get_data(path), path)
+
+
+#: Resolved app roots whose modules load signed-first, mapped to the app's signed
+#: ``signedFiles`` paths (the ``/``-separated keys of the verified inventory).
+_source_only_roots: dict[str, frozenset[str]] = {}
+
+_LOADERS: tuple[tuple[type, list[str]], ...] = (
+    (importlib.machinery.ExtensionFileLoader, importlib.machinery.EXTENSION_SUFFIXES),
+    (_SourceOnlyLoader, importlib.machinery.SOURCE_SUFFIXES),
+    (importlib.machinery.SourcelessFileLoader, importlib.machinery.BYTECODE_SUFFIXES),
+)
+
+
+def _owning_root(path: str) -> str | None:
+    resolved = os.path.realpath(path)
+    for root in _source_only_roots:
+        if resolved == root or resolved.startswith(root + os.sep):
+            return root
+    return None
+
+
+class _SignedFirstFinder(importlib.machinery.FileFinder):
+    """A finder for a directory inside a signed app: a signed file wins over an unlisted one.
+
+    For each module name the candidates are the stock ones in the stock order (a
+    package directory before a module; extension, source, then bytecode). When a
+    candidate is a file the verified ``signedFiles`` lists, the first such one is
+    loaded, so an unlisted ``helpers.so`` or ``helpers/__init__.py`` cannot stand in
+    for a signed ``helpers.py``. With no listed candidate the stock search runs, so
+    an unlisted module still imports when nothing signed shares its name. Source
+    loads through :class:`_SourceOnlyLoader`; a bare listed ``.pyc`` still loads.
+    """
+
+    def __init__(self, path: str, root: str) -> None:
+        super().__init__(path, *_LOADERS)
+        self._root = root
+
+    def find_spec(self, fullname: str, target: Any = None) -> Any:
+        listed = _source_only_roots.get(self._root, frozenset())
+        directory = os.path.realpath(self.path or os.getcwd())
+        tail = fullname.rpartition(".")[2]
+        package_dir = os.path.join(directory, tail)
+        candidates: list[tuple[str, type, bool]] = []
+        for loader, suffixes in _LOADERS:
+            candidates.extend(
+                (os.path.join(package_dir, "__init__" + s), loader, True) for s in suffixes
+            )
+        for loader, suffixes in _LOADERS:
+            candidates.extend((os.path.join(directory, tail + s), loader, False) for s in suffixes)
+        for full, loader, is_package in candidates:
+            try:
+                rel = Path(full).relative_to(self._root).as_posix()
+            except ValueError:
+                continue
+            if rel in listed and os.path.isfile(full):
+                return importlib.util.spec_from_file_location(
+                    fullname,
+                    full,
+                    loader=loader(fullname, full),
+                    submodule_search_locations=[package_dir] if is_package else None,
+                )
+        return super().find_spec(fullname, target)
+
+
+def _source_only_path_hook(path: str) -> importlib.machinery.FileFinder:
+    """``sys.path_hooks`` entry: :class:`_SignedFirstFinder` for directories inside a signed app.
+
+    A sibling module an app hook imports is found through the namespace packages
+    :func:`_ensure_namespace_packages` registers, whose ``__path__`` points inside
+    the app. Every other directory falls through to the stock hooks.
+    """
+    root = _owning_root(path)
+    if root is None:
+        raise ImportError("not inside a signed app")
+    return _SignedFirstFinder(path, root)
+
+
+def _set_source_only(app_resolved: Path, listed: frozenset[str] | None) -> None:
+    """Load *app_resolved*'s modules signed-first (*listed* given) or as stock (None)."""
+    root = os.path.realpath(app_resolved)
+    if listed is None and root not in _source_only_roots:
+        return
+    if listed is not None:
+        _source_only_roots[root] = listed
+        if _source_only_path_hook not in sys.path_hooks:
+            sys.path_hooks.insert(0, _source_only_path_hook)
+    else:
+        _source_only_roots.pop(root, None)
+    # A finder cached for a directory of this app may have been made by the other hooks.
+    for cached in [
+        key
+        for key in list(sys.path_importer_cache)
+        if isinstance(key, str)
+        and (os.path.realpath(key) == root or os.path.realpath(key).startswith(root + os.sep))
+    ]:
+        sys.path_importer_cache.pop(cached, None)
+
 
 #: Per-app install directories this process loaded third-party hook code from,
 #: as normalized absolute path strings (both the path as given and its resolved
@@ -447,11 +559,19 @@ def load_app_module(app_name: str, app_dir: Path, module_path: str) -> Callable[
                 "full gateway privileges."
             )
         _warn_third_party_execution(app_name)
+        # Under the fleet signature policy the verified .py runs, never a cached
+        # .pyc beside it. Off, the stock loaders, as before.
+        _set_source_only(app_resolved, verified_signed_files(app_name))
         # Recorded before the body runs: a body that registers its real package
         # name and then raises still leaves modules the next unload must find.
         _record_app_source_root(app_name, app_dir, app_resolved)
 
-    spec = importlib.util.spec_from_file_location(unique_name, str(file_path))
+    loader = (
+        _SourceOnlyLoader(unique_name, str(file_path))
+        if third_party and _owning_root(str(app_resolved)) is not None
+        else None
+    )
+    spec = importlib.util.spec_from_file_location(unique_name, str(file_path), loader=loader)
     if spec is None or spec.loader is None:
         raise ImportError(f"Failed to create module spec for {file_path}")
 
@@ -568,6 +688,9 @@ def unload_app_modules(app_name: str) -> int:
     """
     synthetic = _app_module_keys(app_name)
     real_name = _app_real_name_keys(app_name)
+    # The next load decides again, under the policy as it then stands.
+    for root in _app_source_roots.get(app_name, ()):
+        _set_source_only(Path(root), None)
     for k in synthetic:
         del sys.modules[k]
     for k in real_name:

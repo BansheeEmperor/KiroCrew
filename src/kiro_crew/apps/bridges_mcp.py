@@ -42,6 +42,7 @@ from kiro_crew.apps.interpreter import (
 )
 from kiro_crew.apps.manager import app_dir
 from kiro_crew.apps.manifest import AppManifest, has_stdio_mcp_server, is_module_style_entry_point
+from kiro_crew.apps.package_signature import is_python_interpreter as _is_python_interpreter
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.env import emit_env
 from kiro_crew.executors import maintenance_executor
@@ -536,6 +537,23 @@ def resolve_stdio_command(cfg: dict, app_root: Path | None = None) -> dict:
     return cfg
 
 
+def _launches_python(declared: object, cfg: dict) -> bool:
+    """Whether a resolved stdio entry's command is a Python interpreter itself.
+
+    Only then are interpreter options added (``package_signature.is_python_interpreter``:
+    ``python``, ``python3.12``, ``pythonw`` or the running interpreter). A console
+    script (``python-lsp-server``), ``node`` or a shell is left as authored. The host
+    CLI (``kirocrew``, pinned to the gateway's own interpreter) runs Kiro Crew's code,
+    not the app's, so it is left alone too.
+    """
+    if isinstance(declared, dict) and declared.get("command") == _HOST_CLI_COMMAND:
+        return False
+    command = cfg.get("command")
+    return isinstance(command, str) and (
+        command == sys.executable or _is_python_interpreter(command)
+    )
+
+
 def _strip_deps_pythonpath(cfg: dict, deps_dir: Path) -> None:
     """Drop the deps dir from a shimmed server's PYTHONPATH, in place.
 
@@ -1011,6 +1029,12 @@ def _register_mcp_servers(
         return []
     resolved_port = _live_port_for(app_name, live_port)
     _maybe_provision_backendless_deps(app_name, manifest)
+    # Under the fleet signature policy a stdio server keeps no bytecode in the app
+    # folder (admission.signed_package_child_env); empty otherwise.
+    from kiro_crew.apps.admission import signed_package_child_env, signed_package_python_flags
+
+    pycache_env = signed_package_child_env(app_name)
+    pycache_flags = signed_package_python_flags(app_name)
     registered: list[str] = []
     skipped: list[str] = []
     # Reconcile guard OUTSIDE _mcp_lock: that order is fixed everywhere, so a health
@@ -1056,6 +1080,8 @@ def _register_mcp_servers(
                 # instead of letting the tools go silently missing.
                 if isinstance(cfg, dict):
                     cfg = resolve_stdio_command(cfg, app_root=app_dir(app_name))
+                    if pycache_flags and _launches_python(server_config, cfg):
+                        cfg = {**cfg, "args": [*pycache_flags, *(cfg.get("args") or [])]}
                     _schedule_unresolvable_warning(app_name, server_name, cfg)
                     # This file is consumed by kiro-cli, which applies a declared
                     # env per key — an app manifest naming a PATH fragment would
@@ -1065,6 +1091,8 @@ def _register_mcp_servers(
                     if isinstance(env, dict):
                         _warn_unresolved_secret_refs(app_name, server_name, env)
                         cfg = {**cfg, "env": emit_env(env)}
+                    if pycache_env:
+                        cfg = {**cfg, "env": {**(cfg.get("env") or {}), **pycache_env}}
             servers[namespaced] = cfg
             registered.append(namespaced)
         # LAST governance pass before this map hits disk. A verb an entry here
@@ -1134,6 +1162,7 @@ def reregister_app_mcp_servers(
         app_name,
         action="mcp_register",
         app_root=app_root,
+        manifest=manifest,
     ):
         _deregister_mcp_servers(app_name)
         return []
@@ -1223,7 +1252,7 @@ def scrub_backend_mcp_url(app_name: str, unreconciled: list[str] | None = None) 
     # The admission gate that `reregister_app_mcp_servers` applies is kept explicitly: a
     # denied app gets a FULL removal rather than the selective keep-stdio treatment,
     # because nothing of a denied app should stay reachable.
-    if _registration_denied(app_name, action="mcp_register", app_root=app_root):
+    if _registration_denied(app_name, action="mcp_register", app_root=app_root, manifest=manifest):
         _deregister_mcp_servers(app_name)
         return []
     return _register_mcp_servers(app_name, manifest, live_port=None)

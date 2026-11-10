@@ -421,7 +421,7 @@ async def test_cloned_manifest_admission_is_revalidated_before_build(monkeypatch
 
     admission_calls: list[object] = []
 
-    def _deny_cloned(name, *, manifest=None, action=""):
+    def _deny_cloned(name, *, manifest=None, action="", **_k):
         admission_calls.append(manifest)
         return "signature required but manifest is unsigned"
 
@@ -441,6 +441,50 @@ async def test_cloned_manifest_admission_is_revalidated_before_build(monkeypatch
     assert "admission" in result["error"]
     assert build_calls == []  # refused before the build
     assert len(admission_calls) == 1  # the cloned manifest was what got checked
+
+
+@pytest.mark.asyncio
+async def test_the_cloned_gate_checks_the_checkout_and_audits_only_a_class(monkeypatch, tmp_path):
+    """The cloned-manifest gate is handed the checkout as the package to check, and a
+    signed-package refusal is audited as its classification, with no name or path."""
+    from kiro_crew.apps.admission import PACKAGE_MISMATCH, PackageRefusal
+
+    src = tmp_path / "app-sources" / "demoapp"
+    monkeypatch.setattr(registry, "app_source_dir", lambda n: src)
+    audit = MagicMock()
+    monkeypatch.setattr(registry, "sel", lambda: audit)
+
+    async def _fake_clone(git_url, branch, dest, log_lines, **kwargs):
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "app.json").write_text(json.dumps({"name": "demoapp"}), encoding="utf-8")
+        return None
+
+    monkeypatch.setattr(registry, "_git_clone_or_pull", _fake_clone)
+    roots: list[object] = []
+    detail = "app 'demoapp' package does not match its signature: packaged file 'x.py'"
+
+    def _deny(name, *, manifest=None, action="", app_root=None, **_k):
+        roots.append(app_root)
+        return PackageRefusal(detail, PACKAGE_MISMATCH)
+
+    monkeypatch.setattr(registry, "app_admission_denied", _deny)
+
+    async def _fake_run_build(build_dir, app_name, log_lines):
+        raise AssertionError("refused before the build")
+
+    monkeypatch.setattr(registry, "_run_app_build", _fake_run_build)
+
+    result = await registry._clone_build_app("https://example.com/demo.git", "demoapp", [])
+
+    assert result["ok"] is False
+    assert len(roots) == 1 and os.path.realpath(str(roots[0])) == os.path.realpath(src)
+    rows = [
+        c.kwargs
+        for c in audit.log_api_access.call_args_list
+        if c.kwargs.get("operation") == "admission_cloned"
+    ]
+    assert rows and rows[0]["error"] == PACKAGE_MISMATCH
+    assert "demoapp" not in rows[0]["resources"] and "x.py" not in rows[0]["error"]
 
 
 @pytest.mark.asyncio

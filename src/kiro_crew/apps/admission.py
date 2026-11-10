@@ -19,6 +19,9 @@ Model (mirrors the plugin gate's decision core):
    signed manifest; admission verifies the signature (HMAC POC; a production
    impl uses an asymmetric publisher key) against a trust key the *policy*
    carries, before the app's files are copied / its onInstall script runs.
+   Under this flag only signature scheme 2 (``apps.package_signature``) is
+   accepted: it signs the whole manifest and the SHA-256 of every packaged
+   file, and the files are checked wherever the caller names the app's root.
 
 Trust-root: the policy is loaded from ``config_dir()/app_admission.json`` —
 never from the app being admitted.  Interim deviation (documented as
@@ -36,11 +39,24 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+from kiro_crew.apps.package_signature import (
+    FILES_KEY,
+    declared_code_paths,
+    declares_scheme_2,
+    inventory_refusal,
+    package_signature,
+    package_signing_payload,
+    unsigned_code_path,
+)
 from kiro_crew.config.loader import config_dir
+from kiro_crew.platform.admission import canonical_signing_bytes
 from kiro_crew.sel import sel
 
 if TYPE_CHECKING:
@@ -126,7 +142,7 @@ def _fail_closed_policy() -> AppAdmissionPolicy:
     return AppAdmissionPolicy(mode=MODE_ENFORCE, require_signature=True, approved=[])
 
 
-def load_app_admission_policy() -> AppAdmissionPolicy:
+def load_app_admission_policy(*, audit: bool = True) -> AppAdmissionPolicy:
     """Load the fleet app admission policy from ``config_dir()/app_admission.json``.
 
     - ABSENT file → :func:`AppAdmissionPolicy.open_default` (admit): preserves
@@ -134,6 +150,10 @@ def load_app_admission_policy() -> AppAdmissionPolicy:
       with the CPP governance seam.
     - PRESENT-but-unreadable file → :func:`_fail_closed_policy` (deny-all): a
       fleet meant to enforce something; refuse to silently fall open.
+
+    ``audit=False`` is for a caller on a repeating path (an execution boundary):
+    the failure is logged and audited by install and enable admission, not on
+    every call.
     """
     path = config_dir() / _POLICY_FILENAME
     if not path.exists():
@@ -143,6 +163,8 @@ def load_app_admission_policy() -> AppAdmissionPolicy:
         if not isinstance(data, dict):
             raise ValueError("app_admission.json must be a JSON object")
     except Exception:
+        if not audit:
+            return _fail_closed_policy()
         logger.error("app admission policy at %s is unreadable; failing closed", path)
         try:
             sel().log_api_access(
@@ -181,6 +203,216 @@ def _signature_valid(manifest: "AppManifest", policy: AppAdmissionPolicy) -> boo
     return hmac.compare_digest(expected.encode("ascii"), signature.encode("utf-8", "ignore"))
 
 
+def _package_signature_valid(manifest: "AppManifest", policy: AppAdmissionPolicy) -> bool:
+    """Scheme 2: the signature covers the whole parsed ``app.json`` object.
+
+    The object (``AppManifest.document``) carries the ``signedFiles`` inventory,
+    so this proves the inventory is the publisher's; :func:`_package_files_refusal`
+    then compares it with the files on disk.
+    """
+    document = getattr(manifest, "document", None)
+    if not isinstance(document, dict) or not declares_scheme_2(document):
+        return False
+    secret = policy.trust_keys.get(str(getattr(manifest, "signer", "") or ""))
+    signature = str(getattr(manifest, "signature", "") or "")
+    if not secret or not signature:
+        return False
+    expected = package_signature(secret, document)
+    return hmac.compare_digest(expected.encode("ascii"), signature.encode("utf-8", "surrogatepass"))
+
+
+def _out_of_install_ui_grant(name: str) -> bool:
+    """Whether the operator's dev-mode grant covers a ``ui/`` linked OUT of the install.
+
+    The existing dev-mode authorization (``dev_mode.dev_mode_granted_root``: the
+    operator's grant record, the app's ``dev`` flag and governance), bound to the
+    current resolved ``ui`` root exactly as the UI route checks it, and only for a
+    root that resolves outside the app's install directory: the
+    ``--confirm-out-of-install-root`` grant that only an operator at the host can
+    make. An in-install ``ui/`` stays checked whatever its dev flag says.
+    """
+    from kiro_crew.apps.dev_mode import dev_mode_granted_root
+    from kiro_crew.apps.manager import app_dir, apps_dir
+
+    try:
+        granted = dev_mode_granted_root(name)
+        current = os.path.realpath(app_dir(name) / "ui")
+        install = Path(os.path.realpath(apps_dir())) / name
+    except Exception:  # noqa: BLE001 - an unprovable grant grants nothing
+        logger.debug("dev-mode grant for %s could not be read", name, exc_info=True)
+        return False
+    return granted is not None and granted == current and not Path(current).is_relative_to(install)
+
+
+def _ui_skip(name: str, manifest: "AppManifest", app_root: Path):
+    """The inventory entries the dev-mode grant leaves unchecked, or None for none.
+
+    Only under :func:`_out_of_install_ui_grant`, only for the installed app
+    directory, and only for ``ui/`` entries that are not code: every ``ui/`` path
+    the manifest names as code, an agent-read resource, a script or a command
+    target (``declared_code_paths``, less the UI entry modules dev mode serves
+    live) stays checked. Compared case-folded, so a
+    case-insensitive volume cannot spell a kept path past the list.
+    """
+    from kiro_crew.apps.manager import app_dir
+
+    try:
+        if Path(app_root).resolve() != app_dir(name).resolve():
+            return None
+    except OSError:
+        return None
+    if not _out_of_install_ui_grant(name):
+        return None
+    kept = [
+        candidate.casefold()
+        for group in declared_code_paths(manifest, Path(app_root), include_ui=False)
+        for candidate in group
+        if candidate.casefold().startswith("ui/")
+    ]
+
+    def skip(rel: str) -> bool:
+        folded = rel.casefold()
+        if not folded.startswith("ui/"):
+            return False
+        return not any(folded == p or folded.startswith(p + "/") for p in kept)
+
+    return skip
+
+
+#: Audit classifications for a signed-package refusal. The detailed reason names the
+#: app and a publisher-written path, so it goes to the caller and never into the
+#: audit row (:func:`admission_audit_error`).
+PACKAGE_UNVERIFIED = "signed_package_unverified"
+PACKAGE_MISMATCH = "signed_package_mismatch"
+
+
+class PackageRefusal(str):
+    """A signed-package refusal: the detailed reason, carrying its audit classification."""
+
+    classification: str
+
+    def __new__(cls, reason: str, classification: str) -> "PackageRefusal":
+        refusal = super().__new__(cls, reason)
+        refusal.classification = classification
+        return refusal
+
+
+def admission_audit_resources(denied: str, resources: str) -> str:
+    """``resources`` for the audit row of a refusal: no app name for a package refusal."""
+    return "signed_package" if isinstance(denied, PackageRefusal) else resources
+
+
+def admission_refusal_text(denied: str) -> str:
+    """``blocked by admission policy: <denied>``, keeping a package refusal's class.
+
+    Callers return this to the dashboard routes, whose audit rows then write the
+    classification (:func:`admission_audit_error`) rather than the text.
+    """
+    text = f"blocked by admission policy: {denied}"
+    if isinstance(denied, PackageRefusal):
+        return PackageRefusal(text, denied.classification)
+    return text
+
+
+def admission_audit_error(denied: str) -> str:
+    """``error`` for the audit row of a refusal.
+
+    A signed-package refusal is written as its fixed classification, never its
+    reason, which names the app and a publisher-written path; any other refusal is
+    written as before.
+    """
+    return denied.classification if isinstance(denied, PackageRefusal) else denied
+
+
+def _package_files_refusal(
+    name: str, manifest: "AppManifest", app_root: Path
+) -> Optional[PackageRefusal]:
+    """Why the files under *app_root* differ from the signed package, or None.
+
+    Every code path the signed manifest names under the app root must be in its
+    ``signedFiles`` (``unsigned_code_path``), and every listed file must match. A
+    self-registered app (:func:`_self_registered`) has no package on disk, so only
+    its manifest signature is checked, as before.
+    """
+    if _self_registered(name, app_root, manifest):
+        return None
+    try:
+        reason = unsigned_code_path(Path(app_root), manifest)
+        if reason is None:
+            skip = _ui_skip(name, manifest, app_root)
+            reason = inventory_refusal(Path(app_root), manifest.document, skip=skip)
+    except Exception:  # noqa: BLE001 - files that cannot be read are not the signed files
+        logger.warning("signed-package file check for an app could not run", exc_info=True)
+        reason = "the packaged files could not be read"
+    if not reason:
+        return None
+    return PackageRefusal(
+        f"app {name!r} package does not match its signature: {reason}", PACKAGE_MISMATCH
+    )
+
+
+#: What a self-registered app's installed folder holds: the manifest it posted, its
+#: record, and the gateway's own leaves (``app-crons.json`` is the cron definitions
+#: the gateway writes from that manifest). Anything else is a package to check.
+_SELF_REGISTERED_ENTRIES = frozenset(
+    {"app.json", "installed.json", "approved-grants.json", ".app_secret", "data", "app-crons.json"}
+)
+
+
+def _code_file_in_folder(manifest: "AppManifest", app_root: Path) -> bool:
+    """Whether a code path the signed manifest names is an existing file in *app_root*.
+
+    A self-registered app's agents, skills and commands live outside its installed
+    folder, so naming them is fine; one that resolves to something present inside the
+    folder is code that could run from it.
+    """
+    real_root = Path(os.path.realpath(app_root))
+    for group in declared_code_paths(manifest, Path(app_root)):
+        for normal in group:
+            candidate = Path(normal) if os.path.isabs(normal) else real_root / normal
+            try:
+                resolved = Path(os.path.realpath(candidate))
+            except (OSError, ValueError):
+                continue
+            if resolved.is_relative_to(real_root) and os.path.lexists(candidate):
+                return True
+    return False
+
+
+def _self_registered(name: str, app_root: Path, manifest: "AppManifest") -> bool:
+    """Whether *app_root* is the installed folder of an app that registered itself.
+
+    ``register_external_app`` records ``lifecycle: "app"``: the app runs from its own
+    location and its installed folder holds only the manifest it posted, so there is
+    no package there to compare with an inventory. The record is the app's to write,
+    so it is never enough alone: no code path the verified manifest names may be an
+    existing file in the folder, and the folder must hold nothing beyond
+    :data:`_SELF_REGISTERED_ENTRIES`. Otherwise the full checks run.
+    """
+    from kiro_crew.apps.manager import _read_installed, app_dir
+
+    try:
+        if Path(app_root).resolve() != app_dir(name).resolve():
+            return False
+        record = _read_installed(name)
+        if record is None or record.lifecycle != "app":
+            return False
+        if _code_file_in_folder(manifest, app_root):
+            return False
+        return set(os.listdir(app_root)) <= _SELF_REGISTERED_ENTRIES
+    except Exception:  # noqa: BLE001 - an unreadable record or folder is not self-registered
+        return False
+
+
+def _unsigned_reason(name: str) -> PackageRefusal:
+    return PackageRefusal(
+        f"app {name!r} signature invalid or unsigned (this fleet requires signature "
+        "scheme 2 over the manifest and every packaged file: re-sign with "
+        "`kirocrew app sign`)",
+        PACKAGE_UNVERIFIED,
+    )
+
+
 def verified_signer(manifest: "AppManifest | None") -> str:
     """Return the signer id when *manifest* carries a signature this fleet can
     verify, else ``""`` (unsigned, unknown signer, or a signature that failed).
@@ -188,13 +420,191 @@ def verified_signer(manifest: "AppManifest | None") -> str:
     Read-only observation of the same check :func:`app_admission_denied` runs —
     it does NOT change whether a signature is *required*, and it never denies.
     Callers use it to record WHO signed an app they are about to install;
-    ``""`` simply means the provenance carries no verified signer.
+    ``""`` simply means the provenance carries no verified signer. Either
+    scheme counts here: this records who signed, not whether files match.
     """
     if manifest is None:
         return ""
-    if not _signature_valid(manifest, load_app_admission_policy()):
+    policy = load_app_admission_policy()
+    if not (_signature_valid(manifest, policy) or _package_signature_valid(manifest, policy)):
         return ""
     return str(getattr(manifest, "signer", "") or "")
+
+
+def signed_packages_required() -> bool:
+    """Whether the fleet sets ``require_signature``; True when the policy cannot be read.
+
+    For the execution side, which reads the policy on every decision: the read
+    writes no audit row (install and enable admission record an unreadable
+    policy), and an unreadable policy reads as required, as admission does.
+    """
+    try:
+        return load_app_admission_policy(audit=False).require_signature
+    except Exception:  # noqa: BLE001 - an unreadable policy fails closed
+        logger.debug("app admission policy unreadable", exc_info=True)
+        return True
+
+
+def builtin_admission_exempt(name: str, origin: str) -> bool:
+    """Whether an installed app skips admission as a shipped builtin.
+
+    Without a signature policy this is the record's ``origin == "builtin"``, as
+    before. Under ``require_signature`` the record is writable by the app, so the
+    exemption also needs shipped-package provenance: a package this build ships
+    under that name. Never raises: when the policy cannot be read the answer is
+    the provenance one.
+    """
+    if origin != "builtin":
+        return False
+    from kiro_crew.apps.execution import shipped_builtin_app_root
+
+    try:
+        if not load_app_admission_policy(audit=False).require_signature:
+            return True
+        return shipped_builtin_app_root(name) is not None
+    except Exception:  # noqa: BLE001 - a builtin is exempt only by what this build ships
+        logger.debug("builtin exemption for %s could not be read", name, exc_info=True)
+        try:
+            return shipped_builtin_app_root(name) is not None
+        except Exception:  # noqa: BLE001
+            return False
+
+
+def _acted_on_refusal(name: str, acted_on: object, verified: "AppManifest") -> Optional[str]:
+    """Why the manifest the caller acts on is not the verified one, or None.
+
+    The caller read ``app.json`` before the boundary, and the boundary reads it
+    again to verify it; without this a swap between the two reads would verify one
+    file and run another. Compared as canonical JSON bytes, so ``1``, ``1.0`` and
+    ``true`` differ. A ``to_dict`` projection is compared whole except
+    ``contributes``, which the app listing rewrites (``contain_command_agents``).
+    """
+    if acted_on is None or (isinstance(acted_on, Mapping) and not acted_on):
+        return f"app {name!r} has no manifest to check against its signature"
+    document = getattr(acted_on, "document", None)
+    if isinstance(document, dict):
+        if package_signing_payload(document) == package_signing_payload(verified.document):
+            return None
+    elif isinstance(acted_on, Mapping):
+        mine = {k: v for k, v in verified.to_dict().items() if k != "contributes"}
+        theirs = {k: v for k, v in acted_on.items() if k != "contributes"}
+        if canonical_signing_bytes(theirs) == canonical_signing_bytes(mine):
+            return None
+    return f"app {name!r} manifest changed while it was being checked"
+
+
+def installed_package_refusal(
+    name: str, app_root: Path, acted_on: object
+) -> Optional[PackageRefusal]:
+    """The signed-package check at an execution or registration boundary.
+
+    None unless the fleet sets ``require_signature``. Code that runs from a shipped
+    builtin package (``execution.is_builtin_app``) is exempt. Otherwise the
+    installed ``app.json`` must carry a valid scheme-2 signature, *acted_on* (the
+    manifest, or its ``to_dict`` projection, the caller is about to act on) must be
+    that verified manifest, and the installed app directory must match the signed
+    package. Never raises: a check that cannot run is a refusal, as at every other
+    execution gate.
+    """
+    try:
+        policy = load_app_admission_policy(audit=False)
+        if not policy.require_signature:
+            return None
+        from kiro_crew.apps.execution import is_builtin_app
+
+        if is_builtin_app(app_root=app_root, app_name=name):
+            return None
+        from kiro_crew.apps.manager import app_dir, get_app_manifest
+
+        manifest = get_app_manifest(name)
+        if manifest is None or not _package_signature_valid(manifest, policy):
+            return _unsigned_reason(name)
+        mismatch = _acted_on_refusal(name, acted_on, manifest)
+        if mismatch is not None:
+            return PackageRefusal(mismatch, PACKAGE_UNVERIFIED)
+        return _package_files_refusal(name, manifest, app_dir(name))
+    except Exception:  # noqa: BLE001 - an unverifiable package must not run
+        logger.warning("signed-package check for an app could not run", exc_info=True)
+        return PackageRefusal(
+            f"app {name!r} signed-package check could not run", PACKAGE_UNVERIFIED
+        )
+
+
+def signed_npm_install_argv(base: list[str], pkg_dir: Path, *, ci_argv: list[str]) -> list[str]:
+    """The gateway's npm install command for *pkg_dir*: *base* unless the policy is on.
+
+    Under the fleet signature policy the signed ``package-lock.json`` must decide the
+    versions and stay byte-identical, so *ci_argv* (an ``npm ci``) runs when one
+    exists; without one, *base* plus ``--no-save`` keeps ``package.json`` as signed.
+    Blocking: reads the admission policy.
+    """
+    if not signed_packages_required():
+        return base
+    if (Path(pkg_dir) / "package-lock.json").is_file():
+        return ci_argv
+    return [*base, "--no-save"]
+
+
+def verified_signed_files(name: str) -> Optional[frozenset[str]]:
+    """The ``signedFiles`` keys of *name*'s installed manifest, once it verifies.
+
+    None without the fleet signature policy. Under it, the keys of the inventory the
+    installed ``app.json`` carries when its scheme-2 signature verifies, else the
+    empty set: an inventory nobody signed names nothing as signed. Blocking.
+    """
+    try:
+        policy = load_app_admission_policy(audit=False)
+        if not policy.require_signature:
+            return None
+        from kiro_crew.apps.manager import get_app_manifest
+
+        manifest = get_app_manifest(name)
+        if manifest is None or not _package_signature_valid(manifest, policy):
+            return frozenset()
+        inventory = manifest.document.get(FILES_KEY)
+        return (
+            frozenset(str(key) for key in inventory)
+            if isinstance(inventory, Mapping)
+            else frozenset()
+        )
+    except Exception:  # noqa: BLE001 - an unverifiable inventory lists nothing
+        logger.debug("signed inventory for an app could not be read", exc_info=True)
+        return frozenset()
+
+
+def _pycache_prefix(name: str) -> Path:
+    """Where an app's Python children keep bytecode under the policy: outside the app.
+
+    Never created: the children run with ``-B`` / ``PYTHONDONTWRITEBYTECODE``, so
+    nothing is written there and the prefix only stops Python reading the app's own
+    ``__pycache__``.
+    """
+    return config_dir() / "cache" / "app-pycache" / name
+
+
+def signed_package_child_env(name: str) -> dict[str, str]:
+    """Environment for a child that may run app Python, under the signature policy.
+
+    Empty unless the fleet sets ``require_signature``. Under it, Python reads no
+    bytecode from the app folder and writes none, so a ``__pycache__`` planted
+    beside a signed ``.py`` is never run in place of that ``.py``. Python ignores
+    these under ``-E``/``-I``; where the gateway builds the interpreter's argv it
+    adds :func:`signed_package_python_flags` too.
+    """
+    if not signed_packages_required():
+        return {}
+    return {"PYTHONPYCACHEPREFIX": str(_pycache_prefix(name)), "PYTHONDONTWRITEBYTECODE": "1"}
+
+
+def signed_package_python_flags(name: str) -> list[str]:
+    """Interpreter options with the same effect, honoured under ``-E`` and ``-I``.
+
+    Empty unless the fleet sets ``require_signature``. Insert right after the
+    interpreter in an argv the gateway builds.
+    """
+    if not signed_packages_required():
+        return []
+    return ["-B", "-X", f"pycache_prefix={_pycache_prefix(name)}"]
 
 
 #: Admissions that load an app already installed, judged by its recorded version
@@ -239,6 +649,7 @@ def app_admission_denied(
     *,
     check_version: bool = True,
     version: str = "",
+    app_root: Optional[Path] = None,
 ) -> Optional[str]:
     """Decide whether *name* may be admitted. Returns a denial reason or None.
 
@@ -248,7 +659,10 @@ def app_admission_denied(
     an async caller offloads it. ``check_version=False`` skips
     :func:`app_version_refusal`, for a caller on the loop that already asked it
     off the loop. *version* is the caller's own version, used when *manifest* has
-    none.
+    none. *app_root* is the directory holding the package *manifest* came from;
+    under ``require_signature`` its files must match the signed inventory. A
+    caller with no package on disk (a self-registration, a registry prefetch)
+    passes none and only the manifest signature is checked.
     """
     policy = load_app_admission_policy()
     norm = _normalize_name(name)
@@ -277,7 +691,11 @@ def app_admission_denied(
 
     # 3) Verify-before-run signature (skipped unless required). A missing
     #    manifest cannot carry a valid signature, so require_signature denies it.
-    if policy.require_signature and (manifest is None or not _signature_valid(manifest, policy)):
-        return f"app {name!r} signature invalid or unsigned"
+    #    Only scheme 2 binds the files, so a scheme-1 signature is refused here.
+    if policy.require_signature:
+        if manifest is None or not _package_signature_valid(manifest, policy):
+            return _unsigned_reason(name)
+        if app_root is not None:
+            return _package_files_refusal(name, manifest, app_root)
 
     return None

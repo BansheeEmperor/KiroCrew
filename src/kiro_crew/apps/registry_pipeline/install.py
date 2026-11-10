@@ -24,7 +24,13 @@ from typing import Any
 
 from kiro_crew import platform_compat
 from kiro_crew.apps import install_receipt
-from kiro_crew.apps.admission import app_admission_denied, verified_signer
+from kiro_crew.apps.admission import (
+    admission_audit_error,
+    admission_audit_resources,
+    admission_refusal_text,
+    app_admission_denied,
+    verified_signer,
+)
 from kiro_crew.apps.execution import (
     app_execution_denied,
     repository_bound_grant_denied,
@@ -217,6 +223,20 @@ def _trust_grant_would_stay_local(name: str) -> bool:
 NATIVE_WINDOWS_HOOK_REFUSAL = (
     "app lifecycle hooks are not supported on native Windows (they run through /bin/bash)"
 )
+
+
+def _install_script_env(name: str) -> dict[str, str]:
+    """The ``onInstall`` child's environment (blocking: reads the admission policy).
+
+    Under the fleet signature policy it also keeps Python off the checkout's own
+    bytecode (``admission.signed_package_child_env``); otherwise it is exactly
+    ``minimal_env(NONINTERACTIVE="1")``.
+    """
+    from kiro_crew.apps.admission import signed_package_child_env
+
+    env = minimal_env(NONINTERACTIVE="1")
+    env.update(signed_package_child_env(name))
+    return env
 
 
 def _install_script_platform_refusal() -> str | None:
@@ -598,10 +618,10 @@ async def install_from_registry(
             caller="app_install_from_registry",
             operation="admission",
             outcome="rejected",
-            resources=f"name={name!r}",
-            error=denied,
+            resources=admission_audit_resources(denied, f"name={name!r}"),
+            error=admission_audit_error(denied),
         )
-        return {"ok": False, "name": name, "error": f"blocked by admission policy: {denied}"}
+        return {"ok": False, "name": name, "error": admission_refusal_text(denied)}
 
     # NOTE: the provenance signer is computed LATER, from the identity-checked
     # CLONED manifest — not from this pre-clone prefetch. An update can pull a
@@ -922,8 +942,8 @@ async def install_from_registry(
                     caller="app_install_from_registry",
                     operation="admission_postbuild",
                     outcome="rejected",
-                    resources=f"name={name!r}",
-                    error=denied,
+                    resources=admission_audit_resources(denied, f"name={name!r}"),
+                    error=admission_audit_error(denied),
                 )
             except Exception as exc:  # audit failure must never mask the refusal
                 logger.debug("SEL audit failed for %s post-build admission: %s", name, exc)
@@ -949,7 +969,7 @@ async def install_from_registry(
             outcome = {
                 "ok": False,
                 "name": name,
-                "error": f"blocked by admission policy: {denied}",
+                "error": admission_refusal_text(denied),
             }
             return outcome
 
@@ -1015,12 +1035,13 @@ async def install_from_registry(
                 base_cmd, mode="standard", _prepare=wrap_argv
             )
             sandboxed_cmd = cgroup_scope_argv(sandboxed_cmd)  # cgroup DoS ceiling
+            script_env = await asyncio.to_thread(_install_script_env, name)
             proc = await create_subprocess_limited(
                 *sandboxed_cmd,
                 cwd=str(app_source),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env=minimal_env(NONINTERACTIVE="1"),
+                env=script_env,
                 start_new_session=platform_compat.IS_POSIX,
                 creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
             )
@@ -1190,8 +1211,8 @@ async def install_from_registry(
                         caller="app_install_from_registry",
                         operation="admission_postscript",
                         outcome="rejected",
-                        resources=f"name={name!r}",
-                        error=denied,
+                        resources=admission_audit_resources(denied, f"name={name!r}"),
+                        error=admission_audit_error(denied),
                     )
                 except Exception as exc:  # audit failure must never mask the refusal
                     logger.debug("SEL audit failed for %s post-script admission: %s", name, exc)
@@ -1221,7 +1242,7 @@ async def install_from_registry(
                 outcome = {
                     "ok": False,
                     "name": name,
-                    "error": f"blocked by admission policy: {denied}",
+                    "error": admission_refusal_text(denied),
                 }
                 return outcome
 

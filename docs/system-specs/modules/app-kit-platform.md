@@ -7619,6 +7619,134 @@ Writers: `apps/credential_masks.py`, `apps/manifest.py`, `apps/app_sdk_level.py`
 `test/test_app_credential_masks.py`, `test/test_app_backend_spawn_env.py`
 (`TestTheBackendSpawnLiftsTheAppsDeclaredMasks`).
 
+## 38. A signing fleet admits an app signed whole: manifest and packaged files
+
+Signature scheme 1 (`AppManifest.signing_payload`) signs selected manifest
+fields and no file, so on a fleet that sets `require_signature` in
+`app_admission.json` a signed app's code could change with the signature still
+verifying. Under that flag `apps/admission.py` accepts only scheme 2
+(`apps/package_signature.py`):
+
+- The signature is HMAC-SHA256 (`platform.admission.hmac_signature`) over
+  `canonical_signing_bytes` of the whole parsed `app.json` object minus
+  `signature` (`AppManifest.document`, kept by `from_dict`). The object carries
+  `signatureScheme: 2` and `signedFiles`, the SHA-256 of each packaged file by
+  `/`-separated path. A scheme-1 signature is refused with a re-sign message.
+  `signedFiles` is left out of `AppManifest.to_dict`, so app listings do not
+  carry it.
+- Every listed file must exist under the app root as a regular file with the
+  signed digest (`inventory_refusal`). Each directory on the way is pinned through
+  its parent (`pinned_directory`, `child_if_real_dir`), and the file is opened
+  through the pin (`PinnedDirectory._open_file`, `dir_fd`-relative with
+  `O_NOFOLLOW` on POSIX; `open_file_no_reparse(links_only=True)` on Windows, where
+  the pin refuses renames above), so a link or junction at the file or any
+  directory above it is refused. On POSIX digests are cached by the opened file's
+  `fstat` identity (device, inode, size, mtime, ctime), so the boundaries of one
+  activation read each file once; on Windows, where `st_ctime` is the creation
+  time, every check hashes again.
+- Every code path the signed manifest names inside the app root must be listed
+  (`declared_code_paths`, `unsigned_code_path`), by one rule: a path counts when it
+  resolves to a file in the app folder and is code. Code is an agent, skill or SOP,
+  the backend entry point as the literal path the spawn runs (extensionless files
+  included; a module-style entry per `is_module_style_entry_point` runs from the
+  trusted package and names nothing in the folder), a hook module (exactly
+  `{base}.py`, the file `load_app_module` opens), a cron script, every UI module
+  (`ui`, `contributes` and `desktop` `entry`/`entryPoint` fields, resolved under
+  `ui/` where the host serves them), and in an MCP command and arguments, a `setup` script, `openCommand` or a
+  cron command (`_argv_groups`): the command word when it is a path, an
+  interpreter's script argument, the files a `-m` target runs (resolved the way Python does: a package directory and its `__init__`/`__main__` before a same-named module file), or a word ending in `.py`, `.js`,
+  `.mjs`, `.cjs` or `.sh`. Data words (`state.db`) never count. Paths are
+  normalised with `posixpath.normpath` (backslashes read as `/`); a relative one that
+  leaves the root is refused, an absolute one outside it (a system `python`) is not a
+  packaged file. A code path under a name `build_file_inventory` leaves out
+  (`data/`, `node_modules`, `.venv` and the rest) can never be listed, so it is
+  refused under the policy. A self-registered app (`lifecycle: "app"`, from
+  `register_external_app`) has no package in its installed folder: only its manifest
+  signature is checked, at registration and at every later enable, boot, restart and
+  execution boundary, but only while no code path its verified manifest names is an
+  existing file in the folder and the folder holds nothing beyond `app.json`, `installed.json`,
+  `approved-grants.json`, `.app_secret` and `data/` (`_self_registered`). The record is
+  app-writable, so it never decides the skip alone.
+- A file NOT listed is tolerated: runtime writes into the app's folder, gateway
+  sidecars. Sealing the installed tree is a separate decision.
+- Checked at: `install_app` and `update_app` on the source directory (the
+  adoption path goes through `update_app`; `kirocrew app import` emits a
+  directory that `install_app` admits), the cloned registry checkout before the
+  build (`install_clone`), and `enable_app`, the boot resource pass and restart on
+  `app_dir(name)`. The build step and `onInstall` run between the checkout check
+  and `install_app`, so they must not modify a signed file; while the policy is on
+  the gateway's own npm installs follow a signed lockfile and never rewrite it: a
+  Node backend's dependencies install with `npm ci --omit=dev` and the registry
+  build step with `npm ci` when `package-lock.json` exists, both with
+  `npm install --no-save` otherwise; with the policy off their argv is unchanged. A caller with no package on disk (self-registration, the
+  registry prefetch) checks the manifest signature only.
+- Execution boundaries: `app_execution_denied(manifest=...)` takes the manifest
+  (an `AppManifest`, or its `to_dict` projection) the caller is about to act on,
+  and with an `app_root` runs `installed_package_refusal`: the installed
+  `app.json` must verify, the caller's manifest must be that verified one
+  (`package_signing_payload` bytes equal for an `AppManifest`; for a projection,
+  canonical JSON bytes equal for every key except `contributes`, which the listing
+  rewrites), and the package must match. A caller with no manifest is refused with
+  its own reason. Callers that pass it: backend spawn, hook enable, hook boot and
+  hook reconcile, bridge registration of agents, skills, MCP servers and crons
+  (the manifest `_registration_source` returned, including the boot cron restore),
+  lifecycle scripts and `openCommand`. Callers that pass none, so the file check
+  does not run there: a hook module load (`module_loader`; the hook gate before it
+  checked the same activation), `registry_install` and `registry_detect_installed`
+  (no installed package yet), the restart backstop's execution re-check (the
+  activation verdict before it checked the files) and the health-watch revocation
+  (no app root). Async callers run the gate through `asyncio.to_thread`.
+- Audit: a signed-package refusal is a `PackageRefusal`, a `str` carrying a fixed
+  classification (`signed_package_mismatch`, `signed_package_unverified`). Every
+  audit row that records an admission or execution refusal (install, update,
+  enable, self-registration, the registry gates, boot, restart and its backstop,
+  `app_execution_denied`) writes `admission_audit_error` / `admission_audit_resources`:
+  the classification and no app name or path. The detailed reason goes to the
+  caller. The execution side reads the policy with
+  `load_app_admission_policy(audit=False)`; install and enable record an
+  unreadable policy, and the execution side reads it as requiring signatures.
+- Bytecode: under the policy the gateway starts the backend, the stdio MCP servers whose command is a Python interpreter itself
+  (`is_python_interpreter`, never a console script) and the cron scripts of an app with `-B -X pycache_prefix=<data home>/cache/app-pycache/<name>`
+  after the interpreter (`signed_package_python_flags`; honoured under `-E`/`-I`),
+  and gives those and lifecycle scripts, `openCommand` and `onInstall` the same
+  through `PYTHONPYCACHEPREFIX` and `PYTHONDONTWRITEBYTECODE`
+  (`signed_package_child_env`). The prefix is never created: nothing is written.
+  `module_loader` compiles app modules from source (`_SourceOnlyLoader`); a scoped
+  `sys.path_hooks` entry (`_SignedFirstFinder`, only for directories inside a signed
+  app's root, dropped on unload) imports the listed file when a module name has
+  one, before any unlisted extension, package directory or bytecode of that name,
+  and keeps the stock search, including a bare listed `.pyc`, otherwise. With the
+  policy off none of this runs: argv, env and loaders are as before.
+- Shipped builtins: admission's builtin exemption (`builtin_admission_exempt`)
+  needs a shipped package for the name (`shipped_builtin_app_root`), not only an
+  `origin: builtin` record, which the app can write; it never raises. At an
+  execution boundary only code that runs from the shipped package
+  (`is_builtin_app`) is exempt.
+- Dev mode: the check skips inventory entries under `ui/` only when the existing
+  operator grant (`dev_mode_granted_root`) is bound to the current resolved `ui`
+  root and that root resolves OUTSIDE the install (the CLI-confirmed
+  out-of-install grant), and only for `ui/` files that are not code: every `ui/`
+  candidate of `declared_code_paths` other than the UI entry modules dev mode
+  serves live stays checked, compared case-folded.
+- Publishers sign with `kirocrew app sign <dir> --signer <id>`, the key from
+  `KIROCREW_APP_SIGNING_KEY`. The inventory mirrors what `_copy_app_tree` carries.
+
+Remaining limits, by design: a file NOT listed is unchecked, and in a Python child
+the script's folder comes first on `sys.path`, so an unlisted file there can
+shadow a standard-library module the signed code imports; a listed file can change
+between its hash at a boundary and the read that runs it, by a process that can
+write the app folder; Python the gateway does not start with its own argv (an exec
+backend through its shebang, a cron `command`, Python in a lifecycle, `openCommand`
+or `onInstall` shell line with `-E`/`-I`) keeps the stock bytecode behaviour.
+
+With `require_signature` off nothing here runs: admission, activation and every
+execution boundary decide as before. `verified_signer` (provenance only) accepts
+either scheme.
+
+The stricter design, refusing any file the inventory does not list, was not
+taken: it refuses every registry app whose build writes output into its
+checkout and every app that writes into its own folder outside `data/`.
+
 ## Windows stale-backend cleanup capacity
 
 Stale-backend tree reaping shares the Windows cleanup admission budget with ACP.
