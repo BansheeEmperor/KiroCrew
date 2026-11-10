@@ -631,8 +631,8 @@ async def _answer_options(
     # it goes to is read before the claim, from the asker in the control's token and
     # the slot that asker holds.
     if is_shared_listed(user_id):
-        _early_asker = decode_options_token(block_id)
-        _early_key = _early_asker[0] if _early_asker else None
+        _early_token = decode_options_token(block_id)
+        _early_key = _early_token[0] if _early_token else None
         _early_slot = (
             slack_options_slot(_orch.dashboard_state, _early_key)
             if (_early_key and _orch.dashboard_state)
