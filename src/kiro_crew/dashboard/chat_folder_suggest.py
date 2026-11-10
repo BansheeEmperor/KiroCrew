@@ -5,7 +5,8 @@ no ambient folder context to inherit, so filing it stays a separate deliberate
 act that most sessions never get. This closes that gap without asking anything
 at creation time — once the session has a title, the shared background session
 picks the folder it belongs in (or none), and the dashboard offers a one-click
-move above the composer.
+move above the composer. With ``dashboard.folder_suggestions_auto_apply`` on, the
+same pick is filed straight away and the card says where it went, with an undo.
 
 Two properties are deliberate:
 
@@ -29,6 +30,7 @@ import time
 from typing import Any
 
 from kiro_crew.config.loader import KiroCrewConfig
+from kiro_crew.dashboard.chat_utils import slot_history_key
 from kiro_crew.dashboard.state import DashboardState, _ChatSlot
 from kiro_crew.executors import discovery_executor
 from kiro_crew.history import is_incognito_transcript
@@ -335,8 +337,79 @@ async def _pick_via_llm(
     return folders[index]
 
 
+async def _file_into(
+    state: DashboardState, slot: _ChatSlot, folder_id: str, history_key: str
+) -> bool:
+    """File *slot* into *folder_id*; ``False`` if it did not.
+
+    Under the sidebar move's state-wide metadata lock, minus the person's claim
+    on the folder: nobody filed this by hand. The pick is re-checked under the
+    lock because the model call left time for the user to file the session,
+    close it, or hide or delete the folder. *history_key* is the transcript the
+    pick was made for, read before that call: a slot rebound since shows another
+    conversation, so it is not filed. Only ``folder_id`` is merged into the
+    session's line, as the channel filing does, so a concurrent close on disk
+    survives; the live placement flips in the commit hook, so nothing reads a
+    filing that did not reach disk.
+    """
+    # Imported here: each of these modules imports this one through chat_title.
+    from kiro_crew.dashboard.chat_folders import _slot_meta_txn_lock
+    from kiro_crew.dashboard.chat_folders_records import note_folder_filed
+    from kiro_crew.dashboard.mate_folders import refuses_write_into
+
+    log = state.conversation_log
+    if log is None:
+        return False
+
+    def _pick_holds() -> bool:
+        target = next((f for f in state._folders if f.get("id") == folder_id), None)
+        return not (
+            slot.folder_id
+            or state._slots.get(slot.key) is not slot
+            or slot_history_key(slot) != history_key
+            or target is None
+            or target.get("hidden")
+            # The person's rule (principal ""), since the card's Undo is the
+            # person's own move: a Bot's folder takes no session they file.
+            or refuses_write_into(state._folders, folder_id, "")
+        )
+
+    async with _slot_meta_txn_lock(state):
+        if not _pick_holds():
+            return False
+
+        def _still_unfiled(meta: dict) -> bool:
+            # Again under the transcript lock, where the write lands: the line on
+            # disk still unfiled and the pick still standing.
+            return not meta.get("folder_id") and _pick_holds()
+
+        def _publish_committed() -> None:
+            slot.folder_id = folder_id
+            slot._folder_changed = True  # re-inject [FOLDER] breadcrumb on next turn
+
+        try:
+            committed = await asyncio.to_thread(
+                log.update_metadata_if,
+                history_key,
+                {"folder_id": folder_id},
+                _still_unfiled,
+                require_existing=True,
+                require_write=True,
+                after_commit_under_lock=_publish_committed,
+            )
+        except Exception:  # noqa: BLE001 — an unfiled session is the safe outcome
+            logger.debug("Folder suggestion: filing %s failed", slot.key, exc_info=True)
+            return False
+        if not committed:
+            return False
+        state.push_slots_update()
+        note_folder_filed(state, folder_id)
+    logger.info("Folder suggestion: filed slot %s into %s", slot.key, folder_id)
+    return True
+
+
 async def maybe_suggest_folder(state: DashboardState, slot: _ChatSlot) -> None:
-    """Offer one folder for an unfiled slot. Best-effort, at most once per slot.
+    """Offer (or, in apply mode, file) one folder for an unfiled slot, at most once.
 
     Fired from ``_maybe_auto_title`` once the slot has a title, because the title
     is the single best input to the decision — a distilled topic beats the raw
@@ -368,6 +441,8 @@ async def maybe_suggest_folder(state: DashboardState, slot: _ChatSlot) -> None:
     # exact nagging this feature must not do. Not released on failure either —
     # a suggestion that could not be computed is simply not offered.
     slot._folder_suggested = True
+    # The transcript this pick is for, pinned before the awaits below.
+    history_key = slot_history_key(slot)
 
     chosen = await _match_by_project_dir_off_loop(folders, slot.project)
     if chosen is None:
@@ -379,11 +454,18 @@ async def maybe_suggest_folder(state: DashboardState, slot: _ChatSlot) -> None:
         return
 
     folder_id = str(chosen["id"])
+    # Apply mode files the same pick and sends the same card, marked ``applied``
+    # so it reads as "moved, undo?" instead of "move?". A pick that can no
+    # longer be filed sends nothing: it would have been a card that fails.
+    applied = cfg.dashboard.folder_suggestions_auto_apply
+    if applied and not await _file_into(state, slot, folder_id, history_key):
+        return
     payload = {
         "slot": slot.key,
         "folder_id": folder_id,
         "folder_name": str(chosen.get("name") or ""),
         "breadcrumb": state.folder_breadcrumb(folder_id),
+        "applied": applied,
         "ts": time.time(),
     }
     # The folder's own ``icon`` emoji is deliberately NOT sent: the card renders a
@@ -402,8 +484,9 @@ async def maybe_suggest_folder(state: DashboardState, slot: _ChatSlot) -> None:
         logger.debug("Folder suggestion: WS delivery failed", exc_info=True)
         return
     logger.info(
-        "Folder suggestion for slot %s: %s (delivered to %d client(s))",
+        "Folder suggestion for slot %s: %s (applied=%s, delivered to %d client(s))",
         slot.key,
         folder_id,
+        applied,
         delivered,
     )
