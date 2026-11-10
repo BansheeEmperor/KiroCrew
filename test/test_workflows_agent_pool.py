@@ -103,6 +103,10 @@ class _FakeSessions:
         self.destroys = getattr(self, "destroys", 0) + 1
         self.live.pop(key, None)
 
+    async def recycle_if_sandbox_tightened(self, key):
+        # The sandbox tier never tightens in these tests.
+        return False
+
 
 # stream_and_collect is patched to a no-op producer so no model is called.
 async def _fake_stream(provider, prompt, **kwargs):
@@ -604,6 +608,10 @@ class _ClockSessions:
 
     def release(self, key, *, cleanup=False):
         self.live.pop(key, None)
+
+    async def recycle_if_sandbox_tightened(self, key):
+        # The sandbox tier never tightens in these tests.
+        return False
 
     async def reset(self, key):
         self.live.pop(key, None)

@@ -40,6 +40,7 @@ from kiro_crew.metrics.sessions import (
     record_session_ended,
     record_session_started,
 )
+from kiro_crew.session_allocation_parts.companions import sandbox_tier_tightened
 from kiro_crew.start_priority import PrioritySemaphore, StartPriority
 
 if TYPE_CHECKING:
@@ -163,10 +164,14 @@ class _BackgroundOwner(Protocol):
 
     def get_pid(self, key: str) -> int | None: ...  # pid-owner-ok: _bg runtime owner
 
+    async def _evict_stale_session(self, key: str, session: _BackgroundSessionEntry) -> None: ...
+
     async def _reacquire_and_validate(
         self,
         key: str,
         session: _BackgroundSessionEntry,
+        *,
+        refuse_looser_tier: bool = True,
     ) -> bool: ...
 
 
@@ -785,14 +790,15 @@ class BackgroundSessionRuntime:
             )
             return True
 
-    async def retire_for_agent_env_change(self) -> bool:
+    async def retire_for_agent_env_change(self, reason: str = "agent.env changed") -> bool:
         """Free the shared runtime's slot after an ``agent.env`` change.
 
         The runtime is one long-lived process that every background and cron
         session demuxes onto, and it carries the environment it was spawned with.
         Left in its slot it would serve the old ``agent.env`` until it went
         stale (up to the 6 h age ceiling). Freeing the slot makes the next
-        ``get_bg_session`` spawn a replacement that reads the new map.
+        ``get_bg_session`` spawn a replacement that reads the new map. A stricter
+        ``agent.sandbox`` frees it the same way (*reason* names which).
 
         The runtime is PARKED, busy or idle, never killed here: its in-flight
         sessions finish on it, and the drain reap kills it once they have. It
@@ -811,13 +817,19 @@ class BackgroundSessionRuntime:
             if runtime is None:
                 return False
             mark_identity_parked(runtime, time.monotonic())
-            await self._detach_bg_runtime_locked(runtime, "agent.env changed", park_only=True)
+            await self._detach_bg_runtime_locked(runtime, reason, park_only=True)
             return True
 
     async def _provider_backed_bg_session(
         self, start_priority: StartPriority = StartPriority.BACKGROUND
     ) -> object:
-        """Return the shared provider-backed background-session adapter."""
+        """Return the shared provider-backed background-session adapter.
+
+        An entry spawned under a looser ``agent.sandbox`` than is now configured is
+        replaced first, so no turn streams on it. One the recycle cannot replace (a dead
+        process no claim validates, or a failed start) is ended and started afresh; a
+        handle is refused while the entry is still looser.
+        """
         if self._owner._closing:
             # Typed for the same reason as get_bg_session's gates: a shutdown
             # racing this path must classify as shutdown, not as the missing-
@@ -826,6 +838,25 @@ class BackgroundSessionRuntime:
                 "session manager is closing; no background session"
             )
         await self._owner._ensure_background(start_priority=start_priority)
+
+        def spawned_looser() -> bool:
+            entry = self._owner._sessions.get(self._deps.background_key)
+            return entry is not None and sandbox_tier_tightened(
+                entry.provider.sandbox_mode, self._owner._cfg.agent.sandbox
+            )
+
+        if spawned_looser():
+            # The recycle takes the turn permit, so a running turn finishes first.
+            await self.recycle_background()
+            entry = self._owner._sessions.get(self._deps.background_key)
+            if entry is not None and spawned_looser():
+                await self._owner._evict_stale_session(self._deps.background_key, entry)
+                await self._owner._ensure_background(start_priority=start_priority)
+            if spawned_looser():
+                raise RuntimeError(
+                    "background session unavailable: no replacement started under "
+                    "the stricter agent.sandbox"
+                )
         sess = self._owner._sessions.get(self._deps.background_key)
         if sess is None:
             raise RuntimeError("background session unavailable for non-kiro _bg provider")
@@ -1163,8 +1194,10 @@ class BackgroundSessionRuntime:
 
         # Take the same semaphore a turn takes, then re-validate identity and
         # liveness under the owner lock. False means the helper already released
-        # the semaphore.
-        if not await self._owner._reacquire_and_validate(background_key, session):
+        # the semaphore. A looser sandbox tier is not refused: it is a reason below.
+        if not await self._owner._reacquire_and_validate(
+            background_key, session, refuse_looser_tier=False
+        ):
             return
         try:
             provider = session.provider
@@ -1180,7 +1213,9 @@ class BackgroundSessionRuntime:
             ) and not self._owner._bg_backend_supports_runtime()
             pct = provider.context_usage_pct()
             post_compaction = pct == 0.0 and self._deps.context_pct_is_unknown(provider)
-            if overflowed:
+            if sandbox_tier_tightened(provider.sandbox_mode, self._owner._cfg.agent.sandbox):
+                reason = "agent.sandbox is stricter than its spawn tier"
+            elif overflowed:
                 reason = f"prompt too long for the model window (context reported at {pct:.0f}%)"
             elif pct >= self._deps.bg_recycle_pct:
                 reason = f"context at {pct:.0f}%"

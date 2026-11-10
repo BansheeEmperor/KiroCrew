@@ -146,6 +146,10 @@ END_REASON_RECYCLED = "recycled"
 #: missing -- the crumb would survive and be reported as ``crashed`` at the next
 #: boot, which is a different claim about a different boot.
 END_REASON_EVICTED = "evicted"
+#: A LIVE session evicted at its claim because ``agent.sandbox`` is now stricter
+#: than its spawn tier (``SessionAllocationService._evict_stale_session``); not
+#: ``evicted``, which says the process had already died.
+END_REASON_SANDBOX_TIGHTENED = "sandbox_tightened"
 #: Backfilled at boot from a crumb no teardown path ever consumed.
 END_REASON_CRASHED = "crashed"
 
@@ -163,6 +167,7 @@ END_REASONS = frozenset(
         END_REASON_RETIRED,
         END_REASON_RECYCLED,
         END_REASON_EVICTED,
+        END_REASON_SANDBOX_TIGHTENED,
         END_REASON_CRASHED,
     }
 )

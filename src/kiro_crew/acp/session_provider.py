@@ -543,6 +543,15 @@ class AcpSessionProvider(LLMProvider):
         return list(flush()) if callable(flush) else []
 
     @property
+    def sandbox_mode(self) -> str | None:
+        """The tier this session's own runtime was spawned under (H14 capability).
+
+        ``None`` for a session on a runtime it does not own: that runtime's owner
+        replaces it, and recycling one tenant would not.
+        """
+        return self._runtime.sandbox_mode if self._owns_runtime else None
+
+    @property
     def child_fidelity_aware(self) -> bool:
         """See AcpSessionHandle.child_fidelity_aware."""
         return getattr(self._handle, "child_fidelity_aware", False)
