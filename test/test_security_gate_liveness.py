@@ -742,7 +742,11 @@ def _url_payload_command(n: int) -> str:
 #: Raised by 14, from 35,146, for ``DeniedCommandRule.note``: the optional field and its
 #: docstring, and ``edition_denied_rules`` carrying an edition rule's note through. It
 #: changes only the refusal text; no rule, pattern or match changed. Re-measured.
-_PACKAGE_LINE_BUDGET = 35_160
+#: Raised by 62, from 35,160, for the ssh floor's execute-position read of a glob
+#: verb (``_executed_program_indices`` with comment/case-arm/``sudo -e`` boundaries and
+#: ``argv_rules._program_index``), so a glob that only sits in a program's operands,
+#: a comment or a ``case`` arm is a filename, not a self-host. Re-measured.
+_PACKAGE_LINE_BUDGET = 35_222
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
