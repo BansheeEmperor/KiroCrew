@@ -716,7 +716,7 @@ class TestKasOnlyWorkerFields:
         from kiro_crew.mate_worker import kas_only_worker_fields
 
         spec["spec"] = {
-            "excludedTools": ["shell"],
+            "excludedTools": ["use_aws"],
             "hooks": {"preToolUse": [{"command": "x"}]},
             "permissions": {"allow": ["read"]},
             "toolsSettings": {"shell": {"allowedCommands": ["ls"]}},
@@ -759,10 +759,10 @@ class TestKasOnlyWorkerFields:
 
         spec["spec"] = {
             "mcpServers": {"github": {"command": "gh", "disabledTools": ["create_issue"]}},
-            "excludedTools": ["shell", "@github/x"],
+            "excludedTools": ["shell", "use_aws", "@github/x"],
         }
         assert kas_only_worker_detail("atlas-0123456789ab", "claude")[1] == (
-            ("excludedTools", "shell"),
+            ("excludedTools", "use_aws"),
         )
 
 
@@ -1184,8 +1184,10 @@ class TestCarriedMcpToolLimits:
         assert kas_only_worker_fields("atlas-0123456789ab", "claude") == ()
         assert kas_only_worker_fields("atlas-0123456789ab", "codex") == ("tool limits",)
 
-    def test_a_native_tool_limit_still_needs_kas(self, spec):
+    def test_a_native_tool_limit_no_built_in_covers_still_needs_kas(self, spec):
         from kiro_crew.mate_worker import kas_only_worker_fields
 
-        spec["spec"] = {"excludedTools": ["shell"]}
+        spec["spec"] = {"excludedTools": ["use_aws"]}
         assert kas_only_worker_fields("atlas-0123456789ab", "claude") == ("tool limits",)
+        spec["spec"] = {"excludedTools": ["shell"]}
+        assert kas_only_worker_fields("atlas-0123456789ab", "claude") == ()

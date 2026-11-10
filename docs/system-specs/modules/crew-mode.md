@@ -4397,8 +4397,11 @@ parts:
   KAS honours the limits as the worker spec's `excludedTools`). claude, in
   `ACP_BACKENDS_MATE_WORKER_MCP_TOOL_LIMITS`, honours the MCP ones as
   `permissions.deny` rules read from the worker's own spec by its session
-  (`acp.session_mcp_crewmate.crewmate_worker_deny_rules`), so it refuses only a
-  native-tool exclude (`@builtin` included), a wildcard, or a `disabledTools` that is not a list of tool
+  (`acp.session_mcp_crewmate.crewmate_worker_deny_rules`), and, in
+  `ACP_BACKENDS_MATE_WORKER_NATIVE_TOOL_LIMITS`, a native-tool exclude its built-in
+  table covers as a `tools` allow-list of the built-ins the worker keeps
+  (`agent_sdk.claude_worker_tools.claude_worker_builtin_tools`), so it refuses only another
+  native entry (a bare `@builtin`, `use_aws`), a wildcard, or a `disabledTools` that is not a list of tool
   names (`mate_worker.uncarried_tool_limits_of`). The worker's model pin is judged against the same backend
   (`mate_worker.crewmate_worker_backend`).
 
