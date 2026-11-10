@@ -2542,7 +2542,11 @@ app's `.app_secret`; `POST /api/apps/<name>/token` with that value as
 owner-enable marker the gateway sealed is present, see dashboard-token-auth), and
 `/api/ws`
 with it is the same scoped stream. `kirocrew_client.KiroCrewClient(app_name=...)`
-does the exchange (`authenticate()`) and `create_ws()` opens that socket. There is no
+does the exchange (`authenticate()`) and `create_ws()` opens that socket. Inside a
+backend spawned for that app (`KIROCREW_APP_NAME` names it) the client takes the secret
+from `KIROCREW_PROXY_SECRET` only, because every sandboxed spawn masks
+`apps/<name>/.app_secret` (security, "Every installed app's `.app_secret`"); elsewhere
+it reads the file. There is no
 second delivery channel, and an origin the gateway could not prove is omitted, so
 such a backend has none.
 
@@ -2870,6 +2874,21 @@ needed.
   record) grants no entry. Grant reads also return no entry while an update is
   swapping the app tree, whether a marker directory is held across the swap or the
   swap spans the read (`staged_app_grants`, `_tree_swap_spanned`).
+- **Sealed by the gateway.** `approved-grants.json` and `app.json` sit under the
+  agent-writable `apps/<name>/`, so for an app token they only ever narrow. Every
+  `_write_approved_grants` also writes the same in-memory value to
+  `host-exec-grants/<name>.grants` (`apps/host_exec_grants.seal_token_grants`), a file in
+  the top-level leaf the sandbox seals read-only. Install, a first registration and the
+  owner's consent may widen it (`widen=True`); an update or re-registration only keeps
+  entries the seal already holds. A builtin's seal is written at each boot from its
+  shipped definition. `_app_api_allowlist` and `_read_declared_events` grant only entries
+  that seal holds while the owner-enable marker stands (`sealed_grants`), and a consent
+  approval carries over only sealed entries plus the ones the owner was shown, so
+  editing the files widens nothing. Uninstall removes the seal (`forget_app_seals`). An
+  install from before the seal has none and its token reaches only its own namespace;
+  the owner's next enable from disabled seals the set as the gateway reads it then. The
+  hook context (`approved_manifest_permissions`) and the point grants still read the
+  files: they serve gateway-side code, not a token.
 
 `sessionApprovalConsentPending` keeps its own disable-until-consent shape: that
 grant is enforced through the enabled flag on several session routes rather

@@ -99,6 +99,7 @@ from typing import TYPE_CHECKING, Any
 # which the current import order satisfies (state_parts/slots_push.py imports us lazily inside
 # broadcast_ws, and ws.py imports us before apps.manager). Kept top-level per
 # the top-level-imports guideline.
+from kiro_crew.apps.host_exec_grants import sealed_grants
 from kiro_crew.apps.manager import get_app_manifest, is_app_enabled, staged_app_grants
 
 if TYPE_CHECKING:
@@ -1274,8 +1275,14 @@ def _read_declared_events(app: str) -> tuple[bool, frozenset[str]]:
     try:
 
         def _declared() -> list[str] | None:
+            # Only entries the gateway sealed (``apps.host_exec_grants``): the manifest
+            # and grant files are agent-writable, and without the marker or a seal a
+            # token's declared scopes are withheld (its own slots stay visible).
+            sealed = sealed_grants(app, "events")
             manifest = get_app_manifest(app)
-            return None if manifest is None else list(manifest.permissions.events)
+            if sealed is None or manifest is None:
+                return None
+            return [e for e in manifest.permissions.events if e in sealed]
 
         # An update's added entries stay out until the owner approves them.
         approved = staged_app_grants(app, "events", _declared)

@@ -39,6 +39,14 @@ def echo_state(tmp_path, monkeypatch):
     for name in ("_declared_refreshing", "_exposeto_refreshing"):
         monkeypatch.setattr(ws_event_scope, name, set())
     monkeypatch.setattr(ws_event_scope, "is_app_enabled", lambda _name: True)
+
+    def _sealed(name, family):
+        # The owner's enable sealed everything the test's manifest declares.
+        manifest = ws_event_scope.get_app_manifest(name)
+        return None if manifest is None else frozenset(getattr(manifest.permissions, family))
+
+    monkeypatch.setattr("kiro_crew.apps.host_exec_grants.sealed_grants", _sealed)
+    monkeypatch.setattr(ws_event_scope, "sealed_grants", _sealed)
     stopped = asyncio.Event()
     monkeypatch.setattr(updates, "shutdown_event", stopped)
     monkeypatch.setattr("kiro_crew.dashboard.ws.shutdown_event", stopped)

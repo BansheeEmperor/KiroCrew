@@ -83,6 +83,11 @@ ENTRY_SEPARATOR = "/"
 #: The lifecycle's move-aside name for ``data/`` is ``.<name>`` plus this, beside the app
 #: directory (``apps/manager_install.py``, ``manager_uninstall.py``, ``manager_adopt.py``).
 STAGED_DATA_SUFFIX = "-data-tmp"
+#: The gateway's per-app credential inside the app directory, and the suffix of its
+#: move-aside name (``.<name>`` plus this) while an install or update replaces the tree
+#: (``apps/manager_install.py``, ``manager_adopt.py``).
+APP_SECRET_FILENAME = ".app_secret"
+STAGED_SECRET_SUFFIX = "-secret-tmp"
 #: The retained declaration beside the app directory is ``.<name>`` plus this.
 RECORD_SUFFIX = "-credential-masks.json"
 #: A manifest larger than this declares nothing (no shipped manifest comes close).
@@ -316,6 +321,55 @@ def declared_crew_leaves(*, installed: bool = True) -> tuple[str, ...]:
                 for entry in entries
                 for leaf in (crew_leaf(app, entry), staged_crew_leaf(app, entry))
             }
+        )
+    )
+
+
+def app_secret_crew_leaves() -> tuple[str, ...]:
+    """Every installed app's ``.app_secret`` as a crew-home-relative leaf, sorted.
+
+    Not a declaration: the gateway writes this credential for every app with a backend or
+    an external registration (``dashboard.token_auth.write_app_secret``), and it trades
+    for that app's token. So it is masked like a declared leaf, from every sandboxed
+    process -- the app's own backend included, which gets it as ``KIROCREW_PROXY_SECRET``
+    instead (``apps/backend.py``). Each real app directory gives its live spelling and the
+    lifecycle's move-aside spelling (``apps/.<name>-secret-tmp``), and a move-aside file
+    standing on its own gives its spelling too.
+
+    Real directories and regular files only, read without following links: the gateway
+    honours no linked app directory, and a leaf reached through a link refuses every spawn,
+    so a link an agent planted under ``apps/`` must not name one.
+    """
+    try:
+        listed = list(os.scandir(config_dir() / APPS_LEAF))
+    except FileNotFoundError:
+        return ()
+    except Exception:
+        # Same answer as _installed_manifests for a home this cannot list.
+        logger.warning("could not list the installed apps to mask their secrets", exc_info=True)
+        return ()
+    names: set[str] = set()
+    for entry in listed:
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                names.add(entry.name)
+            elif (
+                entry.name.startswith(".")
+                and entry.name.endswith(STAGED_SECRET_SUFFIX)
+                and entry.is_file(follow_symlinks=False)
+            ):
+                names.add(entry.name[1 : -len(STAGED_SECRET_SUFFIX)])
+        except OSError:
+            continue
+    return tuple(
+        sorted(
+            leaf
+            for name in names
+            if _APP_NAME_RE.fullmatch(name)
+            for leaf in (
+                f"{APPS_LEAF}/{name}/{APP_SECRET_FILENAME}",
+                f"{APPS_LEAF}/.{name}{STAGED_SECRET_SUFFIX}",
+            )
         )
     )
 

@@ -909,24 +909,17 @@ def validate_app_secret(app_name: str, provided_secret: str) -> bool:
     (``apps.host_exec_grants``): a sealed, top-level directory only the unsandboxed
     gateway writes, on an owner-authenticated enable or first owner registration,
     and every disable and uninstall revokes. Files under the agent-writable
-    ``apps/{app_name}/`` (``installed.json``, ``app.json``) are never enough. With the
-    marker present, the secret is compared in constant time against
-    ``apps/{app_name}/.app_secret``.
+    ``apps/{app_name}/`` (``installed.json``, ``app.json``, ``.app_secret``) are never
+    enough. With the marker present, the secret is compared in constant time against the
+    digest the gateway sealed when it wrote the secret (``write_app_secret``), so a
+    ``.app_secret`` planted in a recreated app directory mints nothing.
     """
     # circular import: apps.manager imports write_app_secret from token_auth
-    from kiro_crew.apps.host_exec_grants import host_exec_granted
-    from kiro_crew.config.loader import config_dir
+    from kiro_crew.apps.host_exec_grants import host_exec_granted, sealed_secret_matches
 
     if not provided_secret or not host_exec_granted(app_name):
         return False
-    secret_path = config_dir() / "apps" / app_name / ".app_secret"
-    try:
-        stored = secret_path.read_text(encoding="utf-8").strip()
-    except (OSError, FileNotFoundError):
-        return False
-    if not stored:
-        return False
-    return _ct_eq(stored, provided_secret)
+    return sealed_secret_matches(app_name, provided_secret)
 
 
 def write_app_secret(app_name: str, secret: str) -> None:
@@ -981,6 +974,11 @@ def write_app_secret(app_name: str, secret: str) -> None:
         except OSError:
             pass
         raise
+    # The token exchange trusts this digest, not the file, which sits in the
+    # agent-writable app directory (``apps.host_exec_grants``).
+    from kiro_crew.apps.host_exec_grants import seal_app_secret
+
+    seal_app_secret(app_name, secret)
 
 
 def _evict_expired() -> None:

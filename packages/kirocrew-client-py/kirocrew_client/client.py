@@ -137,7 +137,16 @@ _SLOT_SCOPED_APPROVAL_MODES = frozenset({"normal", "trust_reads", "trust"})
 
 
 def _read_app_secret(app_name: str) -> str:
-    """Read the per-app secret from disk. Returns empty string if unavailable."""
+    """The per-app secret, or an empty string if unavailable.
+
+    Inside a backend the Gateway spawned for *app_name*, the Gateway hands the secret over
+    as ``KIROCREW_PROXY_SECRET`` (with ``KIROCREW_APP_NAME``), and that is the only source:
+    agent sandboxes mask ``apps/<name>/.app_secret``, so the file is not readable there.
+    Anywhere else (an external app the operator runs, a script outside the sandbox) the
+    file under ``KIROCREW_HOME`` is read.
+    """
+    if os.environ.get("KIROCREW_APP_NAME") == app_name:
+        return os.environ.get("KIROCREW_PROXY_SECRET", "").strip()
     home = os.environ.get("KIROCREW_HOME", str(Path.home() / ".kiro" / "crew"))
     secret_path = Path(home) / "apps" / app_name / ".app_secret"
     try:
@@ -221,11 +230,11 @@ class KiroCrewClient:
             self._on_auth_expired = on_auth_expired
 
     async def _auto_refresh_token(self) -> str:
-        """Exchange the on-disk app secret for a fresh token."""
+        """Exchange the app secret for a fresh token."""
         return await _exchange_app_token(self.base_url, self.app_name, self._app_secret)
 
     async def authenticate(self) -> bool:
-        """Bootstrap app auth by exchanging the on-disk secret for a token.
+        """Bootstrap app auth by exchanging the app secret for a token.
 
         Call once after construction if no explicit token was provided.
         No-op if the client already has a token or no app secret is available.

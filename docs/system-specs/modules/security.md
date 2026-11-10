@@ -1387,6 +1387,20 @@ a sandbox disposition holds for it. The
 installed app tree is sandbox-writable, so an agent that rewrites an `app.json` drops
 that app's masks from its next spawn; that residual is stated, not sealed.
 
+**Every installed app's `.app_secret`.** The gateway writes `apps/<name>/.app_secret`
+for each app with a backend or an external registration, and it trades for that app's
+token (`validate_app_secret`), so it is masked without any declaration:
+`credential_masks.app_secret_crew_leaves` lists `apps/<name>/.app_secret` and the
+lifecycle's move-aside `apps/.<name>-secret-tmp` for every real directory under `apps/`
+(and for a move-aside file standing alone), and `sandbox_aliases._app_declared_leaves`
+appends them to the declared leaves, so they get every pass a declared leaf gets. Links
+are not followed when listing: the gateway honours no linked app directory, and a leaf
+behind a link refuses the spawn, so a link an agent plants under `apps/` names none. No
+spawn gets it back, the app's own backend included: `apps/backend.py` injects it as
+`KIROCREW_PROXY_SECRET`, which `kirocrew_client` and Dev Fleet read first. A cron child,
+a lifecycle script and an agent shell all lose the read, which closes the
+learn-cron-dashboard residual.
+
 Hides credential paths from kiro-cli subprocess tree using platform-native isolation:
 
 - **Linux**: user + mount namespace — `unshare(CLONE_NEWUSER)` → identity UID/GID map → `unshare(CLONE_NEWNS)` → private propagation on `/` → bind-mount empty dirs. Availability is decided **empirically** by `_probe_unshare_once()`, which performs this **exact split sequence** up to and including the propagation mount rather than a combined `unshare(NEWUSER|NEWNS)` — see "Linux capability probe mirrors the split sequence" below for why the combined form gives a false positive, and why stopping at the unshares gave another.

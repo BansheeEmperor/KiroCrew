@@ -407,7 +407,7 @@ def register_external_app(
             approvedGrantsStored=approved_grants is not None,
         )
         if approved_grants is not None:
-            _write_approved_grants(name, approved_grants)
+            _write_approved_grants(name, approved_grants, widen=True)
         _write_installed(name, meta)
         # Persist manifest if provided (so dashboard can show full info).
         if manifest_data:

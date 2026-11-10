@@ -903,8 +903,10 @@ The `Returns` column describes the response shape. It is not a TypeScript type:
 no TypeScript client ships, so `SlotInfo`, `GatewayStatus`, `SystemInfo` and
 their siblings are response-shape names rather than importable types.
 
-When `app_name` is set and no explicit auth is provided, the Python client reads
-the app secret from `~/.kiro/crew/apps/{name}/.app_secret`. For a remote Gateway,
+When `app_name` is set and no explicit auth is provided, the Python client takes
+the app secret from `KIROCREW_PROXY_SECRET` inside a backend the Gateway spawned for
+that app (`KIROCREW_APP_NAME` names it), and otherwise reads
+`~/.kiro/crew/apps/{name}/.app_secret`. Sandboxed processes cannot read that file. For a remote Gateway,
 call `await client.authenticate()` before the first request; the context manager
 does not exchange the secret automatically. The same exchange refreshes a token
 after a 401/403 response.
@@ -1787,9 +1789,11 @@ KiroCrewClient(
 )
 ```
 
-With `app_name` set and no `token` or `on_auth_expired`, the client reads the
-app secret from `$KIROCREW_HOME/apps/{name}/.app_secret` (`KIROCREW_HOME`
-defaults to `~/.kiro/crew`).
+With `app_name` set and no `token` or `on_auth_expired`, the client takes the
+app secret from `KIROCREW_PROXY_SECRET` when `KIROCREW_APP_NAME` equals `app_name`
+(a backend the Gateway spawned), and otherwise reads
+`$KIROCREW_HOME/apps/{name}/.app_secret` (`KIROCREW_HOME` defaults to
+`~/.kiro/crew`). Every sandboxed spawn masks that file.
 
 For a remote Gateway, pass `token=...` or call `await client.authenticate()`
 after entering the context. Local loopback requests need no token. Setting
@@ -2301,7 +2305,9 @@ Security and lifecycle:
   your backend starts must inherit both and stay in the backend's session group,
   or it is not reaped.
 - The per-app secret lives on disk at `<KIROCREW_HOME>/apps/<name>/.app_secret`, written
-  owner-only `0600` (owner-only DACL on Windows) by the gateway.
+  owner-only `0600` (owner-only DACL on Windows) by the gateway. Every sandboxed process,
+  your backend included, sees that file masked: read the secret from
+  `KIROCREW_PROXY_SECRET`.
 - If no `.app_secret` exists, the gateway injects neither the secret nor anything derived from
   it (including the proof); a secret-less backend is otherwise unchanged.
 - `KIROCREW_GATEWAY_ORIGIN` is fail-closed: it is present only when the gateway has real

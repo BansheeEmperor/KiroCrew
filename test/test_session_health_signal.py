@@ -662,6 +662,8 @@ class TestDriverGateIsFunctional:
 
         monkeypatch.setattr(ws_event_scope, "is_app_enabled", lambda _n: True)
         monkeypatch.setattr(ws_event_scope, "get_app_manifest", lambda _n: self._manifest(declared))
+        # The owner's enable sealed what the manifest declares.
+        monkeypatch.setattr(ws_event_scope, "sealed_grants", lambda _n, _f: frozenset(declared))
         monkeypatch.setattr(ws_event_scope, "_declared_cache", {})
 
         calls: list[object] = []

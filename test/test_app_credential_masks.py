@@ -238,6 +238,8 @@ class TestThePlanHidesTheDeclaredLeaves:
         assert target in set(plan.sensitive_dirs) and target in set(plan.sensitive_files)
 
     def test_a_home_with_no_declaration_plans_as_before(self, home):
+        # The app directory alone masks its secret (below); the manifest adds nothing.
+        (home / "apps" / "demo").mkdir(parents=True)
         before = sandbox._spawn_plan(sandbox_plan.BACKEND_NAMESPACE, "standard")
         _install(home, "demo", [])
         after = sandbox._spawn_plan(sandbox_plan.BACKEND_NAMESPACE, "standard")
@@ -311,6 +313,46 @@ class TestThePlanHidesTheDeclaredLeaves:
         plan = sandbox._spawn_plan(sandbox_plan.BACKEND_NAMESPACE, "standard")
         for target in _targets("apps/.demo-data-tmp/secrets.json"):
             assert target in set(plan.sensitive_dirs)
+
+    @pytest.mark.parametrize("mode", _MODES)
+    def test_every_installed_apps_secret_is_masked_with_no_declaration(self, home, mode):
+        _install(home, "demo", [])
+        plan = sandbox._spawn_plan(sandbox_plan.BACKEND_NAMESPACE, mode)
+        hidden, files = set(plan.sensitive_dirs), set(plan.sensitive_files)
+        for leaf in ("apps/demo/.app_secret", "apps/.demo-secret-tmp"):
+            for target in _targets(leaf):
+                assert target in hidden and target in files, f"{target} is readable"
+        # The app's own backend does not get it back: the gateway injects it instead.
+        assert sandbox.app_declared_mask_targets("demo", builtin=False) == ()
+
+
+class TestTheAppSecretLeaves:
+    def test_real_app_directories_and_set_aside_secrets_are_listed(self, home):
+        (home / "apps" / "alpha").mkdir(parents=True)
+        (home / "apps" / ".beta-secret-tmp").write_text("s", encoding="utf-8")
+        (home / "apps" / "Not_An_App").mkdir()
+        (home / "apps" / "notes.txt").write_text("x", encoding="utf-8")
+
+        assert credential_masks.app_secret_crew_leaves() == (
+            "apps/.alpha-secret-tmp",
+            "apps/.beta-secret-tmp",
+            "apps/alpha/.app_secret",
+            "apps/beta/.app_secret",
+        )
+
+    @_POSIX_ONLY
+    def test_a_linked_app_directory_names_no_leaf(self, home, tmp_path):
+        """A link planted under apps/ must not make every spawn refuse."""
+        (tmp_path / "elsewhere").mkdir()
+        (home / "apps").mkdir(parents=True)
+        (home / "apps" / "planted").symlink_to(tmp_path / "elsewhere")
+        (home / "apps" / ".other-secret-tmp").symlink_to(tmp_path / "elsewhere")
+
+        assert credential_masks.app_secret_crew_leaves() == ()
+        assert sandbox._refuse_aliased_masked_leaves() == ()
+
+    def test_no_apps_directory_lists_nothing(self, home):
+        assert credential_masks.app_secret_crew_leaves() == ()
 
 
 class TestTheToolGateReadsTheShippedDeclarations:

@@ -452,7 +452,7 @@ def install_app(
     )
     # Installing is the consent moment for everything the manifest declares.
     # Written before the record, so no record ever sits beside a missing set.
-    _write_approved_grants(name, _declared_grant_entries(grant_source(manifest)))
+    _write_approved_grants(name, _declared_grant_entries(grant_source(manifest)), widen=True)
     _write_installed(name, meta)
 
     # Create data directory

@@ -139,3 +139,24 @@ class TestAppDataDir:
         # Path so the assertion holds on Windows separators too.
         assert str(Path.home() / ".kiro" / "crew") in str(d)
         assert "apps" in str(d)
+
+
+class TestAppSecretSource:
+    def test_a_spawned_backend_uses_the_gateway_injected_secret(self, tmp_path, monkeypatch):
+        # Sandboxes mask apps/<name>/.app_secret, so inside a backend the Gateway spawned
+        # for this app the injected copy is the only source; elsewhere the file is read.
+        from kirocrew_client.client import _read_app_secret
+
+        secret_dir = tmp_path / "apps" / "demo"
+        secret_dir.mkdir(parents=True)
+        (secret_dir / ".app_secret").write_text("on-disk\n", encoding="utf-8")
+        monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
+        monkeypatch.setenv("KIROCREW_PROXY_SECRET", "injected")
+        monkeypatch.delenv("KIROCREW_APP_NAME", raising=False)
+        assert _read_app_secret("demo") == "on-disk"
+        monkeypatch.setenv("KIROCREW_APP_NAME", "other")
+        assert _read_app_secret("demo") == "on-disk"
+        monkeypatch.setenv("KIROCREW_APP_NAME", "demo")
+        assert _read_app_secret("demo") == "injected"
+        monkeypatch.delenv("KIROCREW_PROXY_SECRET")
+        assert _read_app_secret("demo") == ""

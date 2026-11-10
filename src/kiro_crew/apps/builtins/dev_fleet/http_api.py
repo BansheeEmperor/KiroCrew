@@ -22,9 +22,18 @@ _APP_SECRET: str | None = None
 
 
 def _load_app_secret() -> str:
-    """Load the app secret for proxy HMAC verification (once)."""
+    """Load the app secret for proxy HMAC verification (once).
+
+    The gateway hands it to this backend as ``KIROCREW_PROXY_SECRET``; that is the source
+    under a sandbox, which masks ``apps/<name>/.app_secret`` from every spawn. The file is
+    read only when the variable is absent (a hand-launched backend outside a sandbox).
+    """
     global _APP_SECRET
     if _APP_SECRET is not None:
+        return _APP_SECRET
+    injected = os.environ.get("KIROCREW_PROXY_SECRET", "").strip()
+    if injected:
+        _APP_SECRET = injected
         return _APP_SECRET
     from kiro_crew.config.loader import config_dir
 

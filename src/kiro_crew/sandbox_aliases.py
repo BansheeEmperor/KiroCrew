@@ -156,13 +156,18 @@ _CREW_HARDLINK_REFUSED_LEAVES: frozenset[str] = frozenset(
 
 
 def _app_declared_leaves() -> tuple[str, ...]:
-    """The crew-home leaves apps declare in ``credentialMasks``: ``apps/<app>/data/<entry>``.
+    """The per-app crew-home leaves masked beside the core table.
 
-    Read per call, through the module, so a manifest changed since the last spawn is seen
-    by the next one. Every entry is under its app's own data directory
+    The leaves apps declare in ``credentialMasks`` (``apps/<app>/data/<entry>``), then every
+    installed app's ``.app_secret`` (:func:`credential_masks.app_secret_crew_leaves`), which
+    the gateway writes for each app rather than any manifest declaring it. Read per call,
+    through the module, so a manifest or app changed since the last spawn is seen by the
+    next one. A declared entry is under its app's own data directory
     (:mod:`kiro_crew.apps.credential_masks` refuses any other spelling).
     """
-    return credential_masks.declared_crew_leaves()
+    declared = credential_masks.declared_crew_leaves()
+    secrets = credential_masks.app_secret_crew_leaves()
+    return (*declared, *(leaf for leaf in secrets if leaf not in declared))
 
 
 def _hidden_leaves() -> tuple[str, ...]:

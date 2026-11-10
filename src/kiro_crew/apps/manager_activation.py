@@ -15,7 +15,16 @@ import logging
 
 from kiro_crew.apps.admission import app_admission_denied
 from kiro_crew.apps.execution import app_execution_denied, shipped_builtin_app_root
-from kiro_crew.apps.host_exec_grants import grant_host_exec, host_exec_granted, revoke_host_exec
+from kiro_crew.apps.host_exec_grants import (
+    SEALED_GRANT_FAMILIES,
+    grant_host_exec,
+    has_sealed_grants,
+    has_sealed_secret,
+    host_exec_granted,
+    revoke_host_exec,
+    seal_token_grants,
+    sealed_grants,
+)
 from kiro_crew.apps.manager_records import (
     INSTALLED_META_FILENAME,
     SESSION_APPROVAL_PENDING_KEY,
@@ -34,6 +43,7 @@ from kiro_crew.apps.manager_records import (
     get_app_manifest,
     hold_app_record_lock,
     holds_app_record_locks,
+    staged_app_grants,
 )
 from kiro_crew.apps.manager_tree import _check_path_safety
 from kiro_crew.apps.point_grants import grant_source
@@ -131,6 +141,43 @@ def _owner_enable_unrecorded(name: str) -> AppResult:
             "the data folder's permissions, then enable the app again"
         ),
     )
+
+
+def _seal_pre_seal_install(name: str) -> AppResult | None:
+    """Seal an install from before the seals existed, on the owner's enable from disabled.
+
+    Its approved token grants are sealed as the gateway reads them now, at this owner
+    action. Its secret is never trusted from the app directory: the gateway writes a new
+    one (sealing its digest), which is safe here because a disabled app runs no backend
+    holding the old one. Returns the refusal when either cannot be written.
+    """
+    try:
+        if not has_sealed_grants(name):
+
+            def _reader(family: str):
+                def _read() -> list[str] | None:
+                    manifest = get_app_manifest(name)
+                    if manifest is None:
+                        return None
+                    return [e for e in getattr(manifest.permissions, family) if e]
+
+                return _read
+
+            seal_token_grants(
+                name,
+                {f: staged_app_grants(name, f, _reader(f)) for f in SEALED_GRANT_FAMILIES},
+            )
+        if (app_dir(name) / ".app_secret").is_file() and not has_sealed_secret(name):
+            # circular import: token_auth imports the app manager's helpers.
+            from kiro_crew.apps.routes_proxy import invalidate_app_secret_cache
+            from kiro_crew.dashboard.token_auth import generate_app_secret, write_app_secret
+
+            write_app_secret(name, generate_app_secret())
+            invalidate_app_secret_cache(name)
+    except OSError:
+        logger.warning("could not seal the pre-upgrade install of %s", name, exc_info=True)
+        return _owner_enable_unrecorded(name)
+    return None
 
 
 @holds_app_record_locks
@@ -264,10 +311,16 @@ def enable_app(
             shown = {e for e in grants_consent.get(family, ()) if isinstance(e, str)}
             # A family the stored set predates approves what is declared.
             kept = list(current_grants[family] if family in current_grants else declared[family])
+            # The stored set is an agent-writable file: of what it keeps, only entries the
+            # standing seal holds carry over, so the owner approves the shown entries and
+            # nothing an agent added to the file.
+            prior = sealed_grants(name, family) if family in SEALED_GRANT_FAMILIES else None
+            if prior is not None:
+                kept = [e for e in kept if e in prior]
             kept += [e for e in declared[family] if e in shown and e not in kept]
             approved[family] = kept
             still_staged = still_staged or any(e not in kept for e in declared[family])
-        _write_approved_grants(name, approved)
+        _write_approved_grants(name, approved, widen=True)
         meta.approvedGrantsStored = True
         sel().log_api_access(
             caller="app_enable",
@@ -275,6 +328,7 @@ def enable_app(
             outcome="partial" if still_staged else "success",
             resources=f"name={name!r}",
         )
+    was_enabled = meta.enabled
     meta.enabled = True
     meta.sessionApprovalConsentPending = False
     if session_approval_consent:
@@ -292,6 +346,10 @@ def enable_app(
     # record it is reported, not passed off as success.
     if not grant_host_exec(name):
         return _owner_enable_unrecorded(name)
+    if not was_enabled:
+        upgraded = _seal_pre_seal_install(name)
+        if upgraded is not None:
+            return upgraded
 
     logger.info("Enabled app %s", name)
     return AppResult(

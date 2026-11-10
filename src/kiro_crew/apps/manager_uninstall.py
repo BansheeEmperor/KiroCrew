@@ -20,7 +20,7 @@ from pathlib import Path
 
 from kiro_crew import platform_compat
 from kiro_crew.apps import credential_masks
-from kiro_crew.apps.host_exec_grants import revoke_host_exec
+from kiro_crew.apps.host_exec_grants import forget_app_seals, revoke_host_exec
 from kiro_crew.apps.manager_builtins import (
     invalidate_orphan_cache,
     migrated_builtin_cleanup_applies,
@@ -126,6 +126,8 @@ def uninstall_app(name: str, *, keep_data: bool = True, retired_builtin: bool = 
         # behind would authorize a pod for a different app later installed under this
         # name. Best-effort and no-op unless this app runs code outside the sandbox.
         revoke_host_exec(name)
+        # Its token-grant and secret seals too, so a later app under this name starts clean.
+        forget_app_seals(name)
         # And its worker auto-approve grants, so none outlives the app.
         revoke_worker_auto_approve(name)
     except Exception as exc:  # noqa: BLE001 - refuse rather than half-uninstall

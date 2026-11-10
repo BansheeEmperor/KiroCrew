@@ -137,3 +137,30 @@ def test_pod_gate_denies_without_a_grant_and_allows_with_one(crew_home, monkeypa
     allowed = asyncio.run(_handler(_Req()))
     assert allowed == "OK"
     assert calls == ["ran"]
+
+
+def test_grant_seals_need_the_marker_and_narrow_unless_widened(crew_home):
+    heg.seal_token_grants("demo", {"api": ["/api/x"], "events": ["log"]})
+    assert heg.sealed_grants("demo", "api") is None  # no owner enable yet
+    heg.grant_host_exec("demo")
+    assert heg.sealed_grants("demo", "api") == frozenset({"/api/x"})
+    assert heg.sealed_grants("demo", "events") == frozenset({"log"})
+    # An update or re-registration may only narrow what is sealed.
+    heg.seal_token_grants("demo", {"api": ["/api/x", "/api/spawn"], "events": []}, widen=False)
+    assert heg.sealed_grants("demo", "api") == frozenset({"/api/x"})
+    assert heg.sealed_grants("demo", "events") == frozenset()
+    heg.revoke_host_exec("demo")
+    assert heg.sealed_grants("demo", "api") is None
+    heg.grant_host_exec("demo")
+    heg.forget_app_seals("demo")
+    assert heg.sealed_grants("demo", "api") is None
+
+
+def test_the_secret_seal_matches_only_what_the_gateway_wrote(crew_home):
+    assert heg.sealed_secret_matches("demo", "s3cret") is False
+    assert heg.seal_app_secret("demo", "s3cret")
+    assert heg.sealed_secret_matches("demo", "s3cret") is True
+    assert heg.sealed_secret_matches("demo", "planted") is False
+    assert heg.sealed_secret_matches("demo", "") is False
+    # A seal file cannot be read as an owner-enable marker.
+    assert heg.host_exec_granted("demo") is False

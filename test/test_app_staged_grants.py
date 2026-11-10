@@ -733,3 +733,51 @@ def test_the_allowlist_prime_skips_dashboard_tokens(monkeypatch):
     monkeypatch.setattr(token_auth, "_app_api_allowlist", lambda name: calls.append(name) or ())
     asyncio.run(token_auth._prime_app_api_allowlist(""))
     assert calls == []
+
+
+def _forge(api, events, name=APP):
+    """What a sandboxed shell can do: rewrite the manifest and the approved set on disk."""
+    root = app_dir(name)
+    manifest = json.loads((root / APP_MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    manifest["permissions"] = {"api": list(api), "events": list(events)}
+    (root / APP_MANIFEST_FILENAME).write_text(json.dumps(manifest), encoding="utf-8")
+    body = {"api": list(api), "events": list(events)}
+    _grants_path(name).write_text(json.dumps(body), encoding="utf-8")
+
+
+def test_files_an_agent_rewrites_cannot_widen_an_enabled_app(tmp_path, app_home):
+    _installed_v1(tmp_path)
+    _forge([OLD_API, NEW_API], ["slots:own", "log"])
+
+    assert _allowlist() == (OLD_API,)
+    assert _events() == (True, ws_event_scope.build_allowed_event_set(["slots:own"]))
+    # Enabling an app that is already enabled approves nothing new.
+    assert enable_app(APP).ok
+    assert _allowlist() == (OLD_API,)
+    assert _events() == (True, ws_event_scope.build_allowed_event_set(["slots:own"]))
+
+
+def test_an_approval_carries_over_only_what_the_seal_held(tmp_path, app_home):
+    _installed_v1(tmp_path)
+    assert _widen(tmp_path).ok
+    _forge([OLD_API, NEW_API], ["slots:own", "log"])
+    _grants_path().write_text(
+        json.dumps({"api": [OLD_API], "events": ["slots:own", "log"]}), encoding="utf-8"
+    )
+
+    assert enable_app(APP, grants_consent={"api": [NEW_API], "events": []}).ok
+
+    assert get_app(APP)["approvedGrants"] == {"api": [OLD_API, NEW_API], "events": ["slots:own"]}
+    assert _allowlist() == (OLD_API, NEW_API)
+    assert _events() == (True, ws_event_scope.build_allowed_event_set(["slots:own"]))
+
+
+def test_an_app_enabled_before_the_seal_recovers_with_one_owner_enable(tmp_path, app_home):
+    _installed_v1(tmp_path)
+    (app_home / "host-exec-grants" / f"{APP}.grants").unlink()  # pre-upgrade: no seal
+
+    assert _allowlist() == ()
+    assert manager_mod.disable_app(APP).ok
+    assert enable_app(APP).ok
+    assert _allowlist() == (OLD_API,)
+    assert _events() == (True, ws_event_scope.build_allowed_event_set(["slots:own"]))

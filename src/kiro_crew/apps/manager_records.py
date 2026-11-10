@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Sequence
 
 from kiro_crew.apps import credential_masks
-from kiro_crew.apps.host_exec_grants import revoke_host_exec
+from kiro_crew.apps.host_exec_grants import revoke_host_exec, seal_token_grants
 from kiro_crew.apps.manifest import AppManifest, Permissions
 from kiro_crew.apps.point_grants import point_grant_families
 from kiro_crew.apps.worker_auto_approve import WORKER_AUTO_APPROVE_GRANT_FAMILIES
@@ -638,13 +638,21 @@ def _effective_approved_grants(name: str, meta: InstalledApp | None) -> dict[str
     return grants
 
 
-def _write_approved_grants(name: str, grants: dict[str, list[str]] | None) -> None:
+def _write_approved_grants(
+    name: str, grants: dict[str, list[str]] | None, *, widen: bool = False
+) -> None:
     """Atomically store *name*'s approved set; ``None`` removes the file.
 
     Only the grant-owning paths call this: install, update, registration and
     an owner approval. Every other record write leaves the set alone because it
     never touches this file.
+
+    The same value is sealed for the app token (``host_exec_grants.seal_token_grants``),
+    first, because the file sits in the agent-writable app directory and the seal does
+    not. *widen* is for an approval moment (an install, a first registration, the owner's
+    consent); every other write may only narrow the seal.
     """
+    seal_token_grants(name, grants, widen=widen)
     path = _approved_grants_path(name)
     if grants is None:
         path.unlink(missing_ok=True)

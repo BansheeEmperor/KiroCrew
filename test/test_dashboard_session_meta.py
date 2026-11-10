@@ -59,6 +59,11 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setattr(token_auth, "_app_perms_cache", {})
     # The app tokens here stand for owner-enabled apps (the sealed marker).
     monkeypatch.setattr("kiro_crew.apps.host_exec_grants.host_exec_granted", lambda _n: True)
+    # ...and the grants it sealed at that enable: everything each manifest declares.
+    monkeypatch.setattr(
+        "kiro_crew.apps.host_exec_grants.sealed_grants",
+        lambda n, f: frozenset(getattr(_MANIFESTS[n].permissions, f)) if n in _MANIFESTS else None,
+    )
     monkeypatch.setattr(token_auth, "_revoked_store_singleton", None)
     monkeypatch.setattr(revocation_gen, "_gen", 0)
     monkeypatch.setattr("kiro_crew.apps.manager.get_app_manifest", _MANIFESTS.get)

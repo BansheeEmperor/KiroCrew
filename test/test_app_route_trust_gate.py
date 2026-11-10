@@ -97,6 +97,11 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "kiro_crew.apps.host_exec_grants.host_exec_granted", _MANIFESTS.__contains__
     )
+    # ...and the grants it sealed at that enable: everything each manifest declares.
+    monkeypatch.setattr(
+        "kiro_crew.apps.host_exec_grants.sealed_grants",
+        lambda n, f: frozenset(getattr(_MANIFESTS[n].permissions, f)) if n in _MANIFESTS else None,
+    )
     monkeypatch.setattr(token_auth, "_revoked_store_singleton", None)
     monkeypatch.setattr(revocation_gen, "_gen", 0)
     monkeypatch.setattr("kiro_crew.apps.manager.get_app_manifest", _MANIFESTS.get)

@@ -67,11 +67,18 @@ def _clear_ws_scope_module_caches(_floor_monkeypatch):
     suite's app names are synthetic and absent from the real ``installed.json``,
     which without this would read as REVOKED and withhold even the own-slot
     default. Tests that exercise revocation override this explicitly (patch it
-    False, or seed ``_declared_cache`` with a disabled entry).
+    False, or seed ``_declared_cache`` with a disabled entry). For the same reason
+    the owner's enable is taken to have sealed every event the manifest declares
+    (``sealed_grants``); a test of the seal patches it itself.
     """
     from kiro_crew.dashboard import ws_event_scope as mod
 
+    def _sealed_as_declared(name: str, family: str) -> frozenset[str] | None:
+        manifest = mod.get_app_manifest(name)
+        return None if manifest is None else frozenset(getattr(manifest.permissions, family))
+
     _floor_monkeypatch.setattr(mod, "is_app_enabled", lambda _name: True)
+    _floor_monkeypatch.setattr(mod, "sealed_grants", _sealed_as_declared)
     for cache in (mod._declared_cache, mod._exposeto_cache, mod._sel_last_audit):
         cache.clear()
     for pending in (mod._declared_refreshing, mod._exposeto_refreshing):

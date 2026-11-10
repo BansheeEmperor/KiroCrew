@@ -23,12 +23,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from kiro_crew.apps.discovery import discover_builtin_apps
+from kiro_crew.apps.host_exec_grants import has_sealed_secret, seal_token_grants
 from kiro_crew.apps.manager_activation import _app_activation_denied
 from kiro_crew.apps.manager_records import (
     APP_MANIFEST_FILENAME,
     INSTALLED_META_FILENAME,
     AppResult,
     InstalledApp,
+    _declared_grant_entries,
     _is_sidecar_entry,
     _now_iso,
     _read_installed,
@@ -863,6 +865,12 @@ def register_builtin_apps() -> int:
             dest / APP_MANIFEST_FILENAME,
             json.dumps(app_data, indent=2) + "\n",
         )
+        # A builtin's token grants are what the gateway ships, sealed from the definition
+        # in hand rather than the app.json just written (``apps.host_exec_grants``).
+        try:
+            seal_token_grants(name, _declared_grant_entries(app_data.get("permissions") or {}))
+        except OSError:
+            logger.warning("could not seal the token grants of builtin %r", name, exc_info=True)
 
         # Built-in apps with a backend need an app secret so the gateway
         # proxy can authenticate requests to them.  Generate once; preserve
@@ -872,7 +880,10 @@ def register_builtin_apps() -> int:
         # proxy, which 502s without a secret, so both must get one.
         if _app_declares_backend(app_data):
             secret_path = dest / ".app_secret"
-            if not secret_path.is_file():
+            # A secret from before its digest was sealed is replaced, never trusted: the
+            # file is in the agent-writable app directory, and boot runs before any
+            # backend that would hold the old one.
+            if not secret_path.is_file() or not has_sealed_secret(name):
                 # circular import: token_auth → app_secret_store → manager
                 # token_auth imports app_secret_store, which transitively
                 # imports the manager module's app-directory helpers.

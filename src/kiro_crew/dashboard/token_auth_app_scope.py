@@ -65,19 +65,21 @@ def _app_api_allowlist(app_name: str) -> tuple[str, ...]:
         # circular import: apps.manager imports generate_app_secret/
         # write_app_secret from token_auth, which loads this module, so a top-level
         # `import` here would form a cycle. Kept function-local deliberately.
-        from kiro_crew.apps.host_exec_grants import host_exec_granted
+        from kiro_crew.apps.host_exec_grants import sealed_grants
         from kiro_crew.apps.manager import get_app_manifest, staged_app_grants
 
         def _declared() -> list[str] | None:
-            # Grants are honoured only while the sealed owner-enable marker stands
-            # (``apps.host_exec_grants``): a token outlives a disable or uninstall until it
-            # expires, and the manifest and grant files below are agent-writable.
-            if not host_exec_granted(app_name):
+            # Grants are honoured only while the sealed owner-enable marker stands, and
+            # only entries the gateway sealed beside it (``apps.host_exec_grants``): a
+            # token outlives a disable or uninstall until it expires, and the manifest
+            # and grant files below are agent-writable.
+            sealed = sealed_grants(app_name, "api")
+            if sealed is None:
                 return None
             manifest = get_app_manifest(app_name)
             if manifest is None:
                 return None
-            return [p for p in manifest.permissions.api if p]
+            return [p for p in manifest.permissions.api if p and p in sealed]
 
         # An update's added entries stay out until the owner approves them.
         allow = tuple(staged_app_grants(app_name, "api", _declared))

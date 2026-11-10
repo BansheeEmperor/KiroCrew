@@ -214,3 +214,25 @@ def test_disable_ends_cached_grants_on_the_next_request(tmp_path, app_home):
     assert enable_app("test-app").ok
     asyncio.run(scope._prime_app_api_allowlist("test-app"))
     assert scope.app_token_path_allowed("test-app", "/api/sessions")
+
+
+def test_a_replaced_secret_file_mints_nothing(tmp_path, app_home):
+    """A sandboxed shell can recreate apps/<name>/ with its own .app_secret: the
+    exchange checks the digest the gateway sealed, not that file."""
+    _install_and_enable(tmp_path)
+    secret = _secret(app_home, "test-app")
+    (app_home / "apps" / "test-app" / ".app_secret").write_text("planted", encoding="utf-8")
+    assert validate_app_secret("test-app", "planted") is False
+    assert validate_app_secret("test-app", secret) is True
+
+
+def test_a_pre_seal_secret_is_replaced_on_the_owner_enable(tmp_path, app_home):
+    _install_and_enable(tmp_path)
+    old = _secret(app_home, "test-app")
+    (app_home / "host-exec-grants" / "test-app.secret").unlink()  # pre-upgrade
+    assert validate_app_secret("test-app", old) is False
+    assert disable_app("test-app").ok
+    assert enable_app("test-app").ok
+    new = _secret(app_home, "test-app")
+    assert new != old
+    assert validate_app_secret("test-app", new) is True
