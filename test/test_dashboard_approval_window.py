@@ -649,6 +649,30 @@ class TestTheRunnersApprovalWindow:
         assert handed == ["req-1"] * bridged
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("slot", "window"),
+        [(SlotSpec(key="chat-1"), 600), (SlotSpec(key="worker-1", app="issue-radar"), 180)],
+        ids=["attended", "unattended"],
+    )
+    async def test_the_bridged_answer_dies_with_the_prompts_own_window(
+        self, monkeypatch, slot: SlotSpec, window: int
+    ) -> None:
+        # A chat app's Approve must not outlive the wait it answers, so the
+        # binding's deadline is the window this prompt really waits.
+        handed: list[dict] = []
+        monkeypatch.setattr(
+            "kiro_crew.notifications.bridge_approval_note.schedule_pending_approval",
+            lambda state, fut, **kw: handed.append(kw),
+        )
+        await run_turn(_prompt_turn(), slot=slot)
+        [kw] = handed
+        assert kw["ttl_s"] == window
+        assert kw["crew_log_session"] and isinstance(kw["turn"], int)
+        # A plain prompt is answerable, and the buttons sit beside what it runs.
+        assert kw["answerable"] is True
+        assert kw["approval_detail"]
+
+    @pytest.mark.asyncio
     async def test_a_muted_session_still_leaves_the_bell_note(self) -> None:
         # Muting a session hides the notes it publishes itself. This one is the
         # gateway's report about it, which a mute leaves alone.

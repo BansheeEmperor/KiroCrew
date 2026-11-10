@@ -550,6 +550,12 @@ async def _on_permission_prompt(
                 tool_title=event.tool_name or "",
                 session_title=slot.display_title,
                 slack_card=_slack_approval_ts is not None,
+                approval_detail=event.tool_input or event.title or "",
+                # An override card is answered on the dashboard alone.
+                answerable=_override_offer is None,
+                ttl_s=_approval_window,
+                crew_log_session=_crew_log_sid,
+                turn=_crew_log_turn_no,
             )
             outcome = await asyncio.wait_for(fut, timeout=_approval_window)
     except asyncio.TimeoutError:
