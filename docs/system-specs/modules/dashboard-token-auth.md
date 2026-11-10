@@ -617,6 +617,16 @@ the exact file and advises deleting only that file to reset revocation state;
 the warning also states the security consequence: resetting the counter can
 re-enable unexpired sessions previously revoked by `kirocrew logout`.
 
+A `kirocrew logout` never makes token validation wait for the disk. Every
+validation reads the counter on the event loop under `_gen_lock`, while
+`POST /api/logout` runs `revoke_all_sessions()` on a worker thread. A bump holds
+`_gen_lock` only to read the memoized value and to publish the new one. The rest
+of the bump (a base read from disk when nothing is memoized, the temp-file write
+and the rename) runs under `_bump_lock`, which only bumps take, so two logouts
+cannot both build on the same base. The new value is still published only after
+the rename succeeds, so a slow write delays only the logout request
+(`test_validation_reads_the_counter_while_a_bump_write_is_stuck`).
+
 #### App-token scope confinement (CWE-269)
 
 An **app token** (payload carries a non-empty `app` claim, minted by the `X-App-Secret` exchange at `POST /api/apps/<name>/token`) must not have the same reach as a dashboard-user token. `_enforce_app_scope(request, app_name, path)` applies least privilege, **deny-by-default**:

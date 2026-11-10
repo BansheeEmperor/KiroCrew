@@ -31,10 +31,13 @@ logger = logging.getLogger(__name__)
 
 _REVOCATION_FILE = "token_revocation.gen"
 
-# Memoized counter. ``None`` = not yet loaded from disk. Guarded by the lock so
-# concurrent first reads / bumps agree on one value.
+# Memoized counter. ``None`` = not yet loaded from disk. Guarded by ``_gen_lock``,
+# which every token validation takes on the event loop, so a bump never holds it
+# across its file write; ``_bump_lock`` serializes bumps instead, so two cannot
+# build on the same base.
 _gen: int | None = None
 _gen_lock = threading.Lock()
+_bump_lock = threading.Lock()
 
 
 def _warn_unreadable_counter(path: Path, reason: str, *, exc_info: bool = False) -> None:
@@ -136,16 +139,19 @@ def bump_revocation_gen() -> int:
       successful logout. The caller reports the failed logout instead of a
       false success.
 
-    The lock is held through persistence so a concurrent reader never observes
-    a generation that might still fail to land; the write is a few bytes and
-    callers already run off the event loop for this path.
+    ``_gen_lock`` is held only to read ``_gen`` and to publish the new value:
+    a write slowed by the disk must not stall the token validations that take
+    it on the event loop.
     """
     global _gen
     # circular import: see _load_revocation_gen_or_none.
     from kiro_crew.config.loader import config_dir
 
-    with _gen_lock:
-        base = _gen if _gen is not None else _load_revocation_gen_or_none()
+    with _bump_lock:
+        with _gen_lock:
+            base = _gen
+        if base is None:
+            base = _load_revocation_gen_or_none()
         if base is None:
             raise OSError(
                 "cannot read persisted token revocation counter; refusing to "
@@ -166,5 +172,6 @@ def bump_revocation_gen() -> int:
         except OSError:
             logger.warning("could not persist token revocation counter", exc_info=True)
             raise
-        _gen = new_gen
+        with _gen_lock:
+            _gen = new_gen
         return new_gen

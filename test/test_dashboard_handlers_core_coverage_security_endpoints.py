@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -719,6 +720,22 @@ class TestLogout:
         assert json.loads(resp.body) == {"ok": True}
         revoke.assert_called_once()
         assert fake_sel.log_api_access.call_args.kwargs["outcome"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_revocation_runs_off_the_event_loop(self, monkeypatch, fake_sel) -> None:
+        """The counter write runs on a worker thread, so a slow disk cannot stall the loop."""
+        monkeypatch.setattr("kiro_crew.dashboard.handlers.is_loopback", lambda _r: True)
+        revoking_threads: list[int] = []
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.token_auth.revoke_all_sessions",
+            lambda: revoking_threads.append(threading.get_ident()),
+        )
+        resp = await core_mod.api_logout(
+            _req(app={"local_secret": "right"}, headers={"X-Local-Secret": "right"})
+        )
+        assert resp.status == 200
+        assert len(revoking_threads) == 1
+        assert revoking_threads[0] != threading.get_ident()
 
 
 class TestShutdownUnixPeer:

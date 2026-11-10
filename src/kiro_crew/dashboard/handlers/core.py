@@ -1045,9 +1045,10 @@ async def api_logout(request: web.Request) -> web.Response:
     # cannot be read (bumping from an assumed base could persist a LOWER
     # counter, resurrecting revoked sessions after restart) or when the write
     # fails (the counter is left unchanged, so the revocation did not take
-    # effect). Report the failure instead of a false success.
+    # effect). Report the failure instead of a false success. The counter write
+    # runs on a worker thread, so a slow disk delays this request, not the loop.
     try:
-        revoke_all_sessions()
+        await asyncio.to_thread(revoke_all_sessions)
     except OSError:
         logger.warning("logout failed: could not persist session revocation", exc_info=True)
         _sel().log_api_access(
