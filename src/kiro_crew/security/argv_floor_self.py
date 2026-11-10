@@ -195,7 +195,7 @@ def _self_token_frames(text_lower: str) -> "list[list[str]]":
 
 def _shell_payload_sources(text_lower: str) -> "list[str]":
     """*text_lower* plus the source text of every nested shell payload in it."""
-    return [source for source, _tokens in _shell_payload_walk(text_lower)]
+    return [source for source, _tokens in _shell_payload_walk(text_lower, whole_scripts=False)]
 
 
 # ── Self-protection floor short-circuit (perf) ──

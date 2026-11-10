@@ -742,7 +742,10 @@ def _url_payload_command(n: int) -> str:
 #: Raised by 14, from 35,146, for ``DeniedCommandRule.note``: the optional field and its
 #: docstring, and ``edition_denied_rules`` carrying an edition rule's note through. It
 #: changes only the refusal text; no rule, pattern or match changed. Re-measured.
-_PACKAGE_LINE_BUDGET = 35_160
+#: Raised by 41, from 35,160, for ``_quoted_assignment_scripts``: a carrier's quoted
+#: script that opens with an assignment is walked whole, after every other frame of
+#: the walk, so the assignment resolves inside it. Deny-only. Re-measured.
+_PACKAGE_LINE_BUDGET = 35_201
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

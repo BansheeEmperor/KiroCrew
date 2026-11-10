@@ -971,8 +971,11 @@ def _is_self_program(token: str) -> bool:
     return _glob_could_expand_to(base, _SELF_PROGRAM_SPELLINGS)
 
 
-def _self_tokens(text_lower: str) -> "list[str]":
+def _self_tokens(text_lower: str, *, resolve: bool = True) -> "list[str]":
     """Tokenize the WHOLE command, resolving quoting before any splitting.
+
+    *resolve* False stops before assignment and alias resolution, so a quoted
+    script stays the one token its carrier receives.
 
     Splitting the raw text into segments first (as the pattern passes do) is
     unsafe for these rules: it cuts on a ``;`` or ``|`` that is INSIDE a quoted
@@ -1007,11 +1010,29 @@ def _self_tokens(text_lower: str) -> "list[str]":
                 " ; " if step.active and step.char == "\n" else step.text
                 for step in _iter_shell_chars(command)
             )
-        return _resolve_function_aliases(
-            _resolve_local_assignments(normalize_shell_command(command))
-        )
+        tokens = normalize_shell_command(command)
+        if not resolve:
+            return tokens
+        return _resolve_function_aliases(_resolve_local_assignments(tokens))
     except Exception:
         return []
+
+
+def _quoted_assignment_scripts(source: str) -> "list[str]":
+    """Carrier payloads of *source* that are a whole script opening with an assignment.
+
+    The assignment resolver splits such a token at its inner operator (the test
+    :func:`_split_glued_operators` applies, reused here), so the walk would only
+    see the script's first statement.  Read from the unresolved tokens, the
+    whole script becomes a frame of its own, where its assignments resolve.
+    """
+    if "=" not in source:
+        return []
+    return [
+        payload
+        for payload in _nested_shell_payloads(_self_tokens(source, resolve=False), allow_join=False)
+        if _LOCAL_ASSIGN_RE.match(payload) and _CONTROL_OPERATOR_RE.search(payload)
+    ]
 
 
 def _protected_name_in_substitution(tokens: "list[str]", start: int) -> str:
@@ -1575,23 +1596,30 @@ def _nested_shell_payloads(
 # ``${a[@]}`` / ``${a[*]}`` / ``$a[@]`` -- the whole array as separate words.
 
 
-def _shell_payload_walk(text_lower: str) -> "list[tuple[str, list[str]]]":
+def _shell_payload_walk(
+    text_lower: str, *, whole_scripts: bool = True
+) -> "list[tuple[str, list[str]]]":
     """:func:`_shell_payload_walk_uncached`, once per text inside one ``sharing_views``
     call; each caller gets fresh lists, so one that edits its argv cannot reach the next."""
     from .shell_commands import _CALL_VIEWS  # circular import: the reader imports this module
 
     memo = _CALL_VIEWS.get()
-    if memo is None:
-        return _shell_payload_walk_uncached(text_lower)
     key = ("payload_walk", text_lower)  # the redirect views' keys are plain str
-    frames = memo.get(key)
+    frames = None if memo is None else memo.get(key)
     if frames is None:
-        frames = memo[key] = _shell_payload_walk_uncached(text_lower)
-    return [(source, list(tokens)) for source, tokens in frames]
+        frames = _shell_payload_walk_uncached(text_lower)
+        if memo is not None:
+            memo[key] = frames
+    return [(source, list(tokens)) for source, tokens, plain in frames if plain or whole_scripts]
 
 
-def _shell_payload_walk_uncached(text_lower: str) -> "list[tuple[str, list[str]]]":
-    """``(source, argv)`` for *text_lower* and every nested shell payload in it.
+def _shell_payload_walk_uncached(text_lower: str) -> "list[tuple[str, list[str], bool]]":
+    """``(source, argv, plain)`` for *text_lower* and every nested shell payload in it.
+
+    *plain* is False for the frames :func:`_quoted_assignment_scripts` adds and the
+    ones below them. Those whole scripts are walked only once every other frame is
+    out, so the *plain* frames are the walk without them, for the source-text
+    consumer that reads the git-publish verb (``whole_scripts=False``).
 
     ``bash -c "kirocrew token"`` tokenizes to ``['bash', '-c', 'kirocrew token']``
     -- the dangerous command is a single opaque token, so a direct scan cannot
@@ -1613,18 +1641,28 @@ def _shell_payload_walk_uncached(text_lower: str) -> "list[tuple[str, list[str]]
     than the parent's source text, and a chain of strictly shorter strings is
     finite.
     """
-    out: list[tuple[str, list[str]]] = []
+    out: list[tuple[str, list[str], bool]] = []
     seen: set[str] = set()
     # The third field is whether this frame may perform the ``eval`` argument join.
     # A frame PRODUCED by a join may not, which is what bounds the walk: see
     # ``_nested_shell_payloads``.
     pending: list[tuple[str, int, bool]] = [(text_lower, len(text_lower) + 1, True)]
-    while pending:
+    scripts: list[tuple[str, int, bool]] = []  # whole scripts, walked once pending is empty
+    plain = True
+    while pending or scripts:
+        if not pending:
+            plain = False
+            for script in scripts:
+                if script[0] not in seen:
+                    seen.add(script[0])
+                    pending.append(script)
+            scripts = []
+            continue
         source, parent_len, allow_join = pending.pop()
         tokens = _self_tokens(source)
         if not tokens:
             continue
-        out.append((source, tokens))
+        out.append((source, tokens, plain))
         # Every substitution body is itself a command line -- command substitution
         # (``$( )``, backticks) and PROCESS substitution (``<( )``, ``>( )``) alike, since
         # bash runs the inner command in all of them.  Walking them here means the
@@ -1656,6 +1694,9 @@ def _shell_payload_walk_uncached(text_lower: str) -> "list[tuple[str, list[str]]
                 continue
             seen.add(payload)
             pending.append((payload, len(source), payload not in joined_here))
+        for payload in map(_decode_printf_escapes, _quoted_assignment_scripts(source)):
+            if len(payload) < parent_len:
+                scripts.append((payload, len(source), payload not in joined_here))
     return out
 
 
