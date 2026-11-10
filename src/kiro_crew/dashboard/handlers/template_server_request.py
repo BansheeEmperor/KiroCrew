@@ -553,6 +553,10 @@ async def api_template_mcp_addition_add(request: web.Request) -> web.Response:
     """
     from kiro_crew import template_mcp_additions as additions
     from kiro_crew.dashboard.handlers.change_cards import HEADER_CARD_ID
+    from kiro_crew.dashboard.handlers.member_capability_catalog import (
+        gateway_entry_behind,
+        masks_settings,
+    )
 
     operation = "template_mcp_addition_add"
     denied = await _owner_only(request, operation)
@@ -586,6 +590,17 @@ async def api_template_mcp_addition_add(request: web.Request) -> web.Response:
     template = request.match_info["name"]
     if "entry" in body:
         entry = body["entry"]
+        if masks_settings(entry):
+            # The card showed its env and header values masked; the values
+            # recorded are this gateway's own, read now, never the body's.
+            entry = await asyncio.to_thread(gateway_entry_behind, body["server"], entry)
+            if entry is None:
+                return _deny(
+                    409,
+                    "entry_changed",
+                    "this server's entry on the gateway changed or was switched off "
+                    "since the card was raised; nothing changed, ask for it again",
+                )
     else:
         # Only a managed set on the default agent omits its entry: the gateway
         # builds it, and every other server still names the launch line it adds.
